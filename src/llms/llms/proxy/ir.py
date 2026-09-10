@@ -27,6 +27,11 @@ class ToolResultBlock:
 
 
 @dataclass(frozen=True)
+class ThinkingBlock:
+    text: str
+
+
+@dataclass(frozen=True)
 class LlmMessage:
     role: str
     blocks: tuple = ()
@@ -52,7 +57,7 @@ class LlmParams:
 
 
 @dataclass(frozen=True)
-class LlmRequest:
+class RequestIR:
     model: str
     messages: tuple = ()
     tools: tuple = ()
@@ -68,6 +73,16 @@ ROLE_TOOL = "tool"
 
 
 @dataclass(frozen=True)
+class ResponseIR:
+    model: str
+    status: str
+    messages: tuple = ()
+    input_tokens: int = 0
+    output_tokens: int = 0
+    raw_id: str = ""
+
+
+@dataclass(frozen=True)
 class TextDelta:
     text: str
 
@@ -77,6 +92,11 @@ class ToolArgsDelta:
     call_id: str
     name: str
     args_chunk: str
+
+
+@dataclass(frozen=True)
+class ReasoningDelta:
+    text: str
 
 
 @dataclass(frozen=True)

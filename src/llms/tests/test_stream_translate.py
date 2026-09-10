@@ -135,6 +135,56 @@ def test_chat_stream_without_done_still_completes():
     assert events[-1]["type"] == "response.completed"
 
 
+def test_reasoning_deltas_flow_to_messages_thinking():
+    lines = [
+        'data: {"type":"response.reasoning_text.delta","delta":"ponder"}',
+        "",
+        'data: {"type":"response.completed"}',
+        "",
+    ]
+    events = collect(responses_to_messages(lines, "t1", "m"))
+    kinds = [e["type"] for e in events]
+    assert "content_block_start" in kinds
+    deltas = [e for e in events if e["type"] == "content_block_delta"]
+    assert deltas[0]["delta"] == {"type": "thinking_delta", "thinking": "ponder"}
+    assert kinds[-1] == "message_stop"
+
+
+def test_thinking_deltas_flow_to_responses_reasoning():
+    lines = [
+        "event: content_block_start",
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}',
+        "",
+        "event: content_block_delta",
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}',
+        "",
+        "event: message_delta",
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}',
+        "",
+        "event: message_stop",
+        'data: {"type":"message_stop"}',
+        "",
+    ]
+    events = collect(messages_to_responses(lines, "t1", "m"))
+    kinds = [e["type"] for e in events]
+    assert "response.reasoning_text.delta" in kinds
+    assert kinds[-1] == "response.completed"
+
+
+def test_chat_reasoning_content_delta_parses():
+    from llms.proxy.stream_translate import parse_chat_sse
+
+    lines = [
+        'data: {"choices":[{"delta":{"reasoning_content":"deep"}}]}',
+        "",
+        "data: [DONE]",
+        "",
+    ]
+    kinds = [type(d).__name__ for d in parse_chat_sse(lines)]
+    assert kinds[0] == "ReasoningDelta"
+    assert kinds[-1] == "StreamDone"
+
+
 MSG_TEXT_STREAM = [
     "event: message_start",
     'data: {"type":"message_start","message":{"id":"msg-1"}}',

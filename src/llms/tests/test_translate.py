@@ -11,6 +11,7 @@ from llms.proxy.ir import (
     LlmMessage,
     LlmParams,
     TextBlock,
+    ThinkingBlock,
     ToolCallBlock,
     ToolDef,
     ToolResultBlock,
@@ -20,6 +21,7 @@ from llms.proxy.translate import (
     from_messages,
     from_responses,
     to_zen_chat,
+    to_zen_messages,
     to_zen_responses,
 )
 
@@ -389,6 +391,68 @@ def test_from_responses_parses_assistant_output_text():
     assert req.messages[0].blocks == (TextBlock("hello"),)
 
 
+def test_thinking_blocks_round_trip_all_dialects():
+    from llms.proxy.ir import ThinkingBlock
+
+    req = from_chat(
+        {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "hi",
+                    "reasoning_content": "let me think",
+                }
+            ],
+        }
+    )
+    assert req.messages[0].blocks[0] == ThinkingBlock("let me think")
+    assert to_zen_chat(req)["messages"][0]["reasoning_content"] == "let me think"
+    resp = to_zen_responses(req)
+    assert resp["input"][0] == {
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": "let me think"}],
+    }
+    msg = to_zen_messages(req)
+    assert msg["messages"][0]["content"] == [
+        {"type": "thinking", "thinking": "let me think"},
+        {"type": "text", "text": "hi"},
+    ]
+
+
+def test_messages_thinking_blocks_parse():
+    req = from_messages(
+        {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "hmm"},
+                        {"type": "redacted_thinking", "data": "secret"},
+                    ],
+                }
+            ],
+        }
+    )
+    assert req.messages[0].blocks == (ThinkingBlock("hmm"), ThinkingBlock("secret"))
+
+
+def test_responses_reasoning_item_parses():
+    req = from_responses(
+        {
+            "model": "m",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "deep"}],
+                },
+            ],
+        }
+    )
+    assert req.messages[0].blocks == (ThinkingBlock("deep"),)
+
+
 def test_tool_result_in_user_message_survives_to_responses():
     req = from_messages(
         {
@@ -396,11 +460,15 @@ def test_tool_result_in_user_message_survives_to_responses():
             "messages": [
                 {
                     "role": "assistant",
-                    "content": [{"type": "tool_use", "id": "c1", "name": "bash", "input": {}}],
+                    "content": [
+                        {"type": "tool_use", "id": "c1", "name": "bash", "input": {}}
+                    ],
                 },
                 {
                     "role": "user",
-                    "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "ok"}],
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "c1", "content": "ok"}
+                    ],
                 },
             ],
         }
@@ -408,7 +476,11 @@ def test_tool_result_in_user_message_survives_to_responses():
     body = to_zen_responses(req)
     kinds = [i["type"] for i in body["input"]]
     assert kinds == ["function_call", "function_call_output"]
-    assert body["input"][1] == {"type": "function_call_output", "call_id": "c1", "output": "ok"}
+    assert body["input"][1] == {
+        "type": "function_call_output",
+        "call_id": "c1",
+        "output": "ok",
+    }
 
 
 def test_tool_result_in_user_message_survives_to_chat():
@@ -431,7 +503,11 @@ def test_tool_result_in_user_message_survives_to_chat():
         "role": "user",
         "content": [{"type": "text", "text": "done"}],
     }
-    assert body["messages"][1] == {"role": "tool", "tool_call_id": "c1", "content": "ok"}
+    assert body["messages"][1] == {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "ok",
+    }
 
 
 def test_results_only_user_message_emits_only_tool_messages():
@@ -441,7 +517,9 @@ def test_results_only_user_message_emits_only_tool_messages():
             "messages": [
                 {
                     "role": "user",
-                    "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "ok"}],
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "c1", "content": "ok"}
+                    ],
                 },
             ],
         }

@@ -4,7 +4,7 @@ import json
 import time
 from collections.abc import Iterable, Iterator
 
-from llms.proxy.ir import StreamDone, TextDelta, ToolArgsDelta
+from llms.proxy.ir import ReasoningDelta, StreamDone, TextDelta, ToolArgsDelta
 from llms.proxy.logging import setup_logging
 
 logger = setup_logging()
@@ -51,7 +51,7 @@ def _load(payload: str) -> dict | None:
 
 def parse_chat_sse(
     lines: Iterable[str],
-) -> Iterator[TextDelta | ToolArgsDelta | StreamDone]:
+) -> Iterator[TextDelta | ToolArgsDelta | ReasoningDelta | StreamDone]:
     index_to_id: dict[int, str] = {}
     names: dict[str, str] = {}
     saw_calls = False
@@ -67,6 +67,8 @@ def parse_chat_sse(
             delta = choice.get("delta", {})
             if delta.get("content"):
                 yield TextDelta(delta["content"])
+            if delta.get("reasoning_content"):
+                yield ReasoningDelta(delta["reasoning_content"])
             for call in delta.get("tool_calls", []):
                 index = int(call.get("index", 0))
                 fn = call.get("function", {})
@@ -94,7 +96,7 @@ def parse_chat_sse(
 
 def parse_responses_sse(
     lines: Iterable[str],
-) -> Iterator[TextDelta | ToolArgsDelta | StreamDone]:
+) -> Iterator[TextDelta | ToolArgsDelta | ReasoningDelta | StreamDone]:
     names: dict[str, str] = {}
     saw_calls = False
     for payload in split_events(lines):
@@ -111,6 +113,9 @@ def parse_responses_sse(
             continue
         if kind == "response.output_text.delta":
             yield TextDelta(event.get("delta", ""))
+            continue
+        if kind == "response.reasoning_text.delta":
+            yield ReasoningDelta(event.get("delta", ""))
             continue
         if kind == "response.function_call_arguments.delta":
             item_id = event.get("item_id", "")
@@ -129,7 +134,7 @@ def parse_responses_sse(
 
 def parse_messages_sse(
     lines: Iterable[str],
-) -> Iterator[TextDelta | ToolArgsDelta | StreamDone]:
+) -> Iterator[TextDelta | ToolArgsDelta | ReasoningDelta | StreamDone]:
     ids: dict[int, str] = {}
     names: dict[int, str] = {}
     stop = "end_turn"
@@ -157,6 +162,8 @@ def parse_messages_sse(
                     names.get(index, ""),
                     delta.get("partial_json", ""),
                 )
+            elif delta.get("type") == "thinking_delta":
+                yield ReasoningDelta(delta.get("thinking", ""))
             continue
         if kind == "message_delta":
             stop = event.get("delta", {}).get("stop_reason", stop)
@@ -206,7 +213,9 @@ def _msg_event(event_type: str, payload: dict) -> bytes:
 
 
 def emit_chat_sse(
-    deltas: Iterable[TextDelta | ToolArgsDelta | StreamDone], trace_id: str, model: str
+    deltas: Iterable[TextDelta | ToolArgsDelta | ReasoningDelta | StreamDone],
+    trace_id: str,
+    model: str,
 ) -> Iterable[bytes]:
     chat_id = new_chat_id(trace_id)
     indices: dict[str, int] = {}
@@ -263,12 +272,16 @@ def emit_chat_sse(
 
 
 def emit_responses_sse(
-    deltas: Iterable[TextDelta | ToolArgsDelta | StreamDone], trace_id: str, model: str
+    deltas: Iterable[TextDelta | ToolArgsDelta | ReasoningDelta | StreamDone],
+    trace_id: str,
+    model: str,
 ) -> Iterable[bytes]:
     resp_id = new_resp_id(trace_id)
     started = False
     text_open = False
     text_accum = ""
+    reasoning_open = False
+    reasoning_accum = ""
     tool_items: dict[str, int] = {}
     tool_names: dict[str, str] = {}
     tool_args: dict[str, str] = {}
@@ -348,8 +361,51 @@ def emit_responses_sse(
                         "delta": delta.args_chunk,
                     }
                 )
+        elif isinstance(delta, ReasoningDelta):
+            yield from begin()
+            if not reasoning_open:
+                reasoning_open = True
+                yield _resp_event(
+                    {
+                        "type": "response.output_item.added",
+                        "output_index": 0,
+                        "item": {
+                            "id": f"{resp_id}-reasoning",
+                            "type": "reasoning",
+                            "summary": [],
+                        },
+                    }
+                )
+            if delta.text:
+                reasoning_accum += delta.text
+                yield _resp_event(
+                    {
+                        "type": "response.reasoning_text.delta",
+                        "output_index": 0,
+                        "delta": delta.text,
+                    }
+                )
         elif isinstance(delta, StreamDone):
             yield from begin()
+            if reasoning_open:
+                yield _resp_event(
+                    {
+                        "type": "response.reasoning_text.done",
+                        "output_index": 0,
+                        "text": reasoning_accum,
+                    }
+                )
+                yield _resp_event(
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": {
+                            "id": f"{resp_id}-reasoning",
+                            "type": "reasoning",
+                            "summary": [],
+                        },
+                    }
+                )
             if text_open:
                 yield _resp_event(
                     {
@@ -414,11 +470,14 @@ def emit_responses_sse(
 
 
 def emit_messages_sse(
-    deltas: Iterable[TextDelta | ToolArgsDelta | StreamDone], trace_id: str, model: str
+    deltas: Iterable[TextDelta | ToolArgsDelta | ReasoningDelta | StreamDone],
+    trace_id: str,
+    model: str,
 ) -> Iterable[bytes]:
     msg_id = new_msg_id(trace_id)
     started = False
     text_index: int | None = None
+    thinking_index: int | None = None
     tool_indices: dict[str, int] = {}
     next_index = 0
 
@@ -489,10 +548,32 @@ def emit_messages_sse(
                         },
                     },
                 )
+        elif isinstance(delta, ReasoningDelta):
+            yield from begin()
+            if thinking_index is None:
+                thinking_index = next_index
+                next_index += 1
+                yield _msg_event(
+                    "content_block_start",
+                    {
+                        "index": thinking_index,
+                        "content_block": {"type": "thinking", "thinking": ""},
+                    },
+                )
+            if delta.text:
+                yield _msg_event(
+                    "content_block_delta",
+                    {
+                        "index": thinking_index,
+                        "delta": {"type": "thinking_delta", "thinking": delta.text},
+                    },
+                )
         elif isinstance(delta, StreamDone):
             yield from begin()
             if text_index is not None:
                 yield _msg_event("content_block_stop", {"index": text_index})
+            if thinking_index is not None:
+                yield _msg_event("content_block_stop", {"index": thinking_index})
             for index in tool_indices.values():
                 yield _msg_event("content_block_stop", {"index": index})
             if delta.status == "completed" and tool_indices:

@@ -10,8 +10,9 @@ from llms.proxy.ir import (
     ImageBlock,
     LlmMessage,
     LlmParams,
-    LlmRequest,
+    RequestIR,
     TextBlock,
+    ThinkingBlock,
     ToolCallBlock,
     ToolDef,
     ToolResultBlock,
@@ -68,10 +69,12 @@ def _chat_part_to_block(part: dict):
         ref = part.get("image_url", "")
         url = ref.get("url") if isinstance(ref, dict) else ref
         return ImageBlock(str(url))
+    if kind in ("reasoning_content", "reasoning"):
+        return ThinkingBlock(str(part.get("text", part.get("reasoning_content", ""))))
     raise ValueError(f"unsupported chat content part: {kind}")
 
 
-def from_chat(body: dict) -> LlmRequest:
+def from_chat(body: dict) -> RequestIR:
     messages: list[LlmMessage] = []
     for msg in body.get("messages", []):
         role = msg.get("role")
@@ -92,6 +95,8 @@ def from_chat(body: dict) -> LlmRequest:
             continue
         blocks: list = []
         content = msg.get("content")
+        if isinstance(msg.get("reasoning_content"), str) and msg["reasoning_content"]:
+            blocks.append(ThinkingBlock(msg["reasoning_content"]))
         if isinstance(content, str):
             blocks.append(TextBlock(content))
         elif isinstance(content, list):
@@ -117,7 +122,7 @@ def from_chat(body: dict) -> LlmRequest:
         for t in body.get("tools", [])
         if t.get("type", "function") == "function"
     )
-    return LlmRequest(
+    return RequestIR(
         model=str(body.get("model", "")),
         messages=tuple(messages),
         tools=tools,
@@ -140,7 +145,7 @@ def _responses_content_to_blocks(content, role: str = "user") -> list:
     return blocks
 
 
-def from_responses(body: dict) -> LlmRequest:
+def from_responses(body: dict) -> RequestIR:
     messages: list[LlmMessage] = []
     if body.get("instructions"):
         messages.append(
@@ -190,6 +195,17 @@ def from_responses(body: dict) -> LlmRequest:
                     ),
                 )
             )
+        elif kind == "reasoning":
+            texts = []
+            for part in item.get("summary", []) + item.get("content", []):
+                if part.get("type") in ("summary_text", "reasoning_text", "text"):
+                    texts.append(part.get("text", ""))
+            if texts:
+                messages.append(
+                    LlmMessage(
+                        role=ROLE_ASSISTANT, blocks=(ThinkingBlock("".join(texts)),)
+                    )
+                )
         else:
             raise ValueError(f"unsupported responses input item: {kind}")
     tools = tuple(
@@ -201,7 +217,7 @@ def from_responses(body: dict) -> LlmRequest:
         for t in body.get("tools", [])
         if t.get("type") == "function"
     )
-    return LlmRequest(
+    return RequestIR(
         model=str(body.get("model", "")),
         messages=tuple(messages),
         tools=tools,
@@ -213,7 +229,8 @@ def from_responses(body: dict) -> LlmRequest:
             max_tokens=body.get("max_output_tokens"),
             reasoning_effort=(
                 str(body["reasoning"].get("effort"))
-                if isinstance(body.get("reasoning"), dict) and body["reasoning"].get("effort")
+                if isinstance(body.get("reasoning"), dict)
+                and body["reasoning"].get("effort")
                 else None
             ),
             parallel_tool_calls=(
@@ -229,7 +246,7 @@ def _render_text(blocks: tuple) -> str:
     return "".join(b.text for b in blocks if isinstance(b, TextBlock))
 
 
-def to_zen_chat(req: LlmRequest) -> dict:
+def to_zen_chat(req: RequestIR) -> dict:
     body: dict = {"model": req.model, "messages": []}
     for msg in req.messages:
         if msg.role == ROLE_TOOL:
@@ -254,9 +271,12 @@ def to_zen_chat(req: LlmRequest) -> dict:
         parts: list = []
         calls: list = []
         results: list = []
+        thinking: list = []
         for b in msg.blocks:
             if isinstance(b, TextBlock):
                 parts.append({"type": "text", "text": b.text})
+            elif isinstance(b, ThinkingBlock):
+                thinking.append(b.text)
             elif isinstance(b, ImageBlock):
                 parts.append({"type": "image_url", "image_url": {"url": b.url}})
             elif isinstance(b, ToolCallBlock):
@@ -268,16 +288,28 @@ def to_zen_chat(req: LlmRequest) -> dict:
                     }
                 )
             elif isinstance(b, ToolResultBlock):
-                results.append({"role": "tool", "tool_call_id": b.call_id, "content": b.output})
-        if len(parts) == 1 and parts[0]["type"] == "text" and not calls and not results:
+                results.append(
+                    {"role": "tool", "tool_call_id": b.call_id, "content": b.output}
+                )
+        if (
+            len(parts) == 1
+            and parts[0]["type"] == "text"
+            and not calls
+            and not results
+            and not thinking
+        ):
             out["content"] = parts[0]["text"]
         elif parts or calls:
             out["content"] = parts if parts else None
+        elif thinking:
+            out["content"] = None
         else:
             out = None
         if out is not None:
             if calls:
                 out["tool_calls"] = calls
+            if thinking:
+                out["reasoning_content"] = "\n".join(thinking)
             body["messages"].append(out)
         body["messages"].extend(results)
     if req.tools:
@@ -316,7 +348,7 @@ def to_zen_chat(req: LlmRequest) -> dict:
     return body
 
 
-def to_zen_responses(req: LlmRequest) -> dict:
+def to_zen_responses(req: RequestIR) -> dict:
     body: dict = {"model": req.model, "input": []}
     systems = [
         b.text
@@ -346,6 +378,13 @@ def to_zen_responses(req: LlmRequest) -> dict:
         for b in msg.blocks:
             if isinstance(b, TextBlock):
                 content.append({"type": text_type, "text": b.text})
+            elif isinstance(b, ThinkingBlock):
+                body["input"].append(
+                    {
+                        "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": b.text}],
+                    }
+                )
             elif isinstance(b, ImageBlock):
                 content.append({"type": "input_image", "image_url": b.url})
             elif isinstance(b, ToolCallBlock):
@@ -396,7 +435,7 @@ def to_zen_responses(req: LlmRequest) -> dict:
     return body
 
 
-def with_model(req: LlmRequest, model: str) -> LlmRequest:
+def with_model(req: RequestIR, model: str) -> RequestIR:
     return replace(req, model=model)
 
 
@@ -414,7 +453,20 @@ def responses_output_to_ir_messages(output: list) -> tuple:
                 messages.append(
                     LlmMessage(role=ROLE_ASSISTANT, blocks=(TextBlock("".join(texts)),))
                 )
-        elif kind == "function_call":
+        elif kind == "reasoning":
+            texts = []
+            for part in item.get("summary", []) + item.get("content", []):
+                if part.get("type") in ("summary_text", "reasoning_text", "text"):
+                    texts.append(part.get("text", ""))
+            if texts:
+                messages.append(
+                    LlmMessage(
+                        role=ROLE_ASSISTANT, blocks=(ThinkingBlock("".join(texts)),)
+                    )
+                )
+    for item in output:
+        kind = item.get("type")
+        if kind == "function_call":
             messages.append(
                 LlmMessage(
                     role=ROLE_ASSISTANT,
@@ -461,6 +513,8 @@ def ir_messages_to_messages_content(messages: tuple) -> list:
         for b in msg.blocks:
             if isinstance(b, TextBlock):
                 content.append({"type": "text", "text": b.text})
+            elif isinstance(b, ThinkingBlock):
+                content.append({"type": "thinking", "thinking": b.text})
             elif isinstance(b, ToolCallBlock):
                 try:
                     arguments = _json.loads(b.arguments or "{}")
@@ -494,7 +548,14 @@ def ir_messages_to_responses_output(messages: tuple) -> list:
                 }
             )
         for b in msg.blocks:
-            if isinstance(b, ToolCallBlock):
+            if isinstance(b, ThinkingBlock):
+                output.append(
+                    {
+                        "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": b.text}],
+                    }
+                )
+            elif isinstance(b, ToolCallBlock):
                 output.append(
                     {
                         "type": "function_call",
@@ -544,10 +605,14 @@ def _messages_block_to_ir(part: dict):
         return ToolResultBlock(
             str(part.get("tool_use_id", "")), _messages_text_of(part.get("content", ""))
         )
+    if kind == "thinking":
+        return ThinkingBlock(str(part.get("thinking", "")))
+    if kind == "redacted_thinking":
+        return ThinkingBlock(str(part.get("data", "")))
     raise ValueError(f"unsupported messages content block: {kind}")
 
 
-def from_messages(body: dict) -> LlmRequest:
+def from_messages(body: dict) -> RequestIR:
     messages: list[LlmMessage] = []
     system = body.get("system", "")
     if system:
@@ -587,7 +652,7 @@ def from_messages(body: dict) -> LlmRequest:
             effort = effort_for_budget(int(thinking.get("budget_tokens", 4096)))
         except (TypeError, ValueError):
             effort = "medium"
-    return LlmRequest(
+    return RequestIR(
         model=str(body.get("model", "")),
         messages=tuple(messages),
         tools=tools,
@@ -602,7 +667,7 @@ def from_messages(body: dict) -> LlmRequest:
     )
 
 
-def to_zen_messages(req: LlmRequest) -> dict:
+def to_zen_messages(req: RequestIR) -> dict:
     import json as _json
 
     body: dict = {"model": req.model, "messages": []}
@@ -623,6 +688,8 @@ def to_zen_messages(req: LlmRequest) -> dict:
         for b in msg.blocks:
             if isinstance(b, TextBlock):
                 parts.append({"type": "text", "text": b.text})
+            elif isinstance(b, ThinkingBlock):
+                parts.append({"type": "thinking", "thinking": b.text})
             elif isinstance(b, ImageBlock):
                 parts.append({"type": "image", "source": {"type": "url", "url": b.url}})
             elif isinstance(b, ToolCallBlock):

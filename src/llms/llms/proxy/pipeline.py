@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse, Response
 from llms.proxy.affinity import bucket_for
 from llms.proxy.config import Settings
 from llms.proxy.forward import forward, parse_body
-from llms.proxy.ir import LlmRequest
+from llms.proxy.ir import RequestIR
 from llms.proxy.logging import log_ingress, log_upstream, new_trace_id, setup_logging
 from llms.proxy.rate_limit import classify
 from llms.proxy.router import ENDPOINT_PATH, pick
@@ -39,12 +39,7 @@ from llms.proxy.translate import (
     to_zen_responses,
     with_model,
 )
-from llms.proxy.translate_response import (
-    chat_to_responses,
-    messages_to_responses,
-    responses_to_chat,
-    responses_to_messages,
-)
+from llms.proxy.translate_response import convert_response
 from llms.proxy.zen_headers import build_zen_headers
 
 logger = setup_logging()
@@ -61,16 +56,7 @@ DEFAULT_MODEL_ATTR = {
 def _convert_for(ingress: str, egress: str, model: str):
     if ingress == egress:
         return None
-    converters = {
-        ("chat", "responses"): responses_to_chat,
-        ("responses", "chat"): chat_to_responses,
-        ("messages", "responses"): responses_to_messages,
-        ("responses", "messages"): messages_to_responses,
-    }
-    convert = converters.get((ingress, egress))
-    if convert is None:
-        return None
-    return lambda payload: convert(payload, model)
+    return lambda payload: convert_response(egress, ingress, payload, model)
 
 
 def _stream_for(ingress: str, egress: str, model: str):
@@ -106,7 +92,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     if isinstance(body, JSONResponse):
         return body
     try:
-        req: LlmRequest = FROM[ingress](body)
+        req: RequestIR = FROM[ingress](body)
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": {"message": str(exc)}})
     if not req.model:
