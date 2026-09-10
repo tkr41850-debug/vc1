@@ -22,7 +22,7 @@ def main() -> int:
             config = DeepSeekHarnessConfig(
                 provider="deepseek-official",
                 model=MODEL,
-                max_tokens=512,
+                max_tokens=2048,
                 cwd=str(workspace),
                 dsh_home=str(home),
                 profile="sdk-minimal",
@@ -30,15 +30,16 @@ def main() -> int:
                 api_key="dummy",
             )
             with DeepSeekHarness(config) as harness:
-                result = harness.run(
-                    "Reply with exactly: dsh-ok.",
-                    session_id=f"probe-{uuid.uuid4().hex[:8]}",
+                session = f"probe-{uuid.uuid4().hex[:8]}"
+                first = harness.run("Reply with exactly: turn-one.", session_id=session)
+                print(f"turn1: {first.finish_reason} {first.final_response!r}")
+                second = harness.run(
+                    "Reply with exactly: turn-two.", session_id=session
                 )
-            print(f"finish_reason={result.finish_reason}")
-            print(f"final_response={result.final_response!r}")
-            if result.finish_reason == "error":
-                print(f"notifications={result.notifications!r}")
-                print(f"events={result.events!r}")
+                print(f"turn2: {second.finish_reason} {second.final_response!r}")
+                if second.finish_reason != "completed":
+                    print(f"notifications={second.notifications!r}")
+                    return fail(f"turn2 did not complete: {second.finish_reason}")
         return 0
     except Exception as exc:
         return fail(f"probe failed: {type(exc).__name__}: {exc}")

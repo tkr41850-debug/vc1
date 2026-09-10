@@ -76,6 +76,20 @@ def test_from_messages_rejects_unknown_block():
         )
 
 
+def test_from_messages_accepts_system_role_in_messages():
+    req = from_messages(
+        {
+            "model": "m",
+            "messages": [
+                {"role": "system", "content": "reminder"},
+                {"role": "user", "content": "hi"},
+            ],
+        }
+    )
+    assert req.messages[0].role == "system"
+    assert req.messages[0].blocks[0].text == "reminder"
+
+
 def test_to_zen_messages_round_trip():
     original = {
         "model": "claude-haiku-4-5",

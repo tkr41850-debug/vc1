@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 
 from llms.probe.proc import fail, running_proxy
@@ -16,26 +15,43 @@ def main() -> int:
     try:
         with running_proxy(PORT):
             client = OpenAI(api_key="test-key", base_url=BASE_URL)
-            response = client.responses.create(
+            first = client.responses.create(
                 model=MODEL,
-                input="reply with exactly: harness-ok",
+                input="reply with exactly: turn-one",
                 max_output_tokens=512,
             )
-            print(
-                json.dumps(
+            print(f"turn1: {first.status} {first.output_text!r}")
+            second = client.responses.create(
+                model=MODEL,
+                input=[
                     {
-                        "id": response.id,
-                        "model": response.model,
-                        "status": response.status,
-                        "output_text": response.output_text,
-                        "usage": {
-                            "input_tokens": response.usage.input_tokens,
-                            "output_tokens": response.usage.output_tokens,
-                        },
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "reply with exactly: turn-one",
+                            }
+                        ],
                     },
-                    indent=2,
-                )
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": first.output_text}],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "reply with exactly: turn-two",
+                            }
+                        ],
+                    },
+                ],
+                max_output_tokens=512,
             )
+            print(f"turn2: {second.status} {second.output_text!r}")
+            if second.status != "completed":
+                return fail(f"turn2 did not complete: {second.status}")
         return 0
     except Exception as exc:
         return fail(f"probe failed: {type(exc).__name__}: {exc}")

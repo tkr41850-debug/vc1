@@ -533,7 +533,7 @@ def from_messages(body: dict) -> LlmRequest:
         )
     for msg in body.get("messages", []):
         role = msg.get("role")
-        if role not in (ROLE_USER, ROLE_ASSISTANT):
+        if role not in (ROLE_USER, ROLE_ASSISTANT, ROLE_SYSTEM):
             raise ValueError(f"unsupported messages role: {role}")
         content = msg.get("content", "")
         if isinstance(content, str):
