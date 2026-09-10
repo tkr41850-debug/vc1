@@ -1,15 +1,90 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from llms.proxy.affinity import parse_affinity_prefix
+from llms.proxy.auth import require_admin, session_login
+from llms.proxy.store import Store
+
+OPEN_PATHS = {"/healthz"}
+OPEN_ADMIN_PREFIXES = (
+    "/api/admin/login",
+    "/api/admin/callback",
+    "/api/admin/logout",
+)
 
 
-class AffinityMiddleware(BaseHTTPMiddleware):
+def is_open_path(path: str) -> bool:
+    return path in OPEN_PATHS
+
+
+def is_oauth_path(path: str) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in OPEN_ADMIN_PREFIXES)
+
+
+def is_admin_path(path: str) -> bool:
+    return path == "/api/admin" or path.startswith("/api/admin/")
+
+
+def is_ui_path(path: str) -> bool:
+    if path == "/" or path == "/index.html":
+        return True
+    if path.startswith("/assets/"):
+        return True
+    suffix = Path(path).suffix.lower()
+    return bool(suffix) and suffix not in {".json"} and not is_admin_path(path)
+
+
+class GateMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         affinity, stripped = parse_affinity_prefix(request.url.path)
         request.state.affinity = affinity
-        if affinity is not None:
-            request.scope["path"] = stripped
+        settings = request.app.state.settings
+        path = request.url.path
+
+        if is_open_path(path) or is_oauth_path(path):
+            if affinity is not None:
+                request.scope["path"] = stripped
+            return await call_next(request)
+
+        if is_admin_path(path):
+            override = request.app.dependency_overrides.get(require_admin)
+            if (
+                path
+                in (
+                    "/api/admin/login",
+                    "/api/admin/callback",
+                    "/api/admin/logout",
+                )
+                or override is not None
+                or session_login(request, settings) is not None
+            ):
+                if affinity is not None:
+                    request.scope["path"] = stripped
+                return await call_next(request)
+            return JSONResponse(
+                status_code=401,
+                content={"error": {"message": "admin login required"}},
+            )
+
+        if is_ui_path(path):
+            login = session_login(request, settings)
+            if login is None:
+                return RedirectResponse(url="/api/admin/login", status_code=302)
+            return await call_next(request)
+
+        store = Store(data_dir=Path(settings.data_dir))
+        if affinity is None or not store.key_allowed(affinity):
+            return JSONResponse(
+                status_code=401,
+                content={"error": {"message": "unknown or disabled API key"}},
+            )
+        request.scope["path"] = stripped
         return await call_next(request)
+
+
+AffinityMiddleware = GateMiddleware

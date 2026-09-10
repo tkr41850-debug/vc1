@@ -11,7 +11,7 @@ def test_healthz(app_client):
 def test_non_stream_passthrough_with_model_override(app_client):
     tc, seen = app_client
     r = tc.post(
-        "/v1/responses",
+        "/ak-test/v1/responses",
         json={
             "model": "muse-spark-1.3-contributor-free",
             "input": "say hi",
@@ -26,12 +26,16 @@ def test_non_stream_passthrough_with_model_override(app_client):
     assert seen["headers"]["user-agent"].startswith("opencode/")
 
 
-def test_model_defaults_when_missing(mock_upstream):
-    from tests.conftest import build_app_client, make_settings
+def test_model_defaults_when_missing(mock_upstream, tmp_path):
+    from tests.conftest import TEST_KEY, build_app_client, make_settings
 
     client, seen = mock_upstream
-    with build_app_client(make_settings(default_model="custom-resp"), client) as tc:
-        r = tc.post("/v1/responses", json={"input": "hi"})
+    with build_app_client(
+        make_settings(data_dir=str(tmp_path), default_model="custom-resp"),
+        client,
+        seed_key=TEST_KEY,
+    ) as tc:
+        r = tc.post(f"/{TEST_KEY}/v1/responses", json={"input": "hi"})
         assert r.status_code == 200
         assert seen["json"]["model"] == "custom-resp"
 
@@ -39,7 +43,8 @@ def test_model_defaults_when_missing(mock_upstream):
 def test_bare_responses_alias(app_client):
     tc, seen = app_client
     r = tc.post(
-        "/responses", json={"model": "muse-spark-1.3-contributor-free", "input": "hi"}
+        "/ak-test/responses",
+        json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
     )
     assert r.status_code == 200
     assert seen["json"]["input"] == [
@@ -54,7 +59,7 @@ def test_bare_responses_alias(app_client):
 def test_invalid_json_rejected(app_client):
     tc, _ = app_client
     r = tc.post(
-        "/v1/responses",
+        "/ak-test/v1/responses",
         content="not-json",
         headers={"Content-Type": "application/json"},
     )
@@ -66,7 +71,7 @@ def test_upstream_error_forwarded(app_client, mock_upstream):
     _, seen_dict = mock_upstream
     seen_dict["mode"] = "upstream_error"
     r = tc.post(
-        "/v1/responses",
+        "/ak-test/v1/responses",
         json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
     )
     assert r.status_code == 401
@@ -78,7 +83,7 @@ def test_stream_strips_cost_frames(app_client, mock_upstream):
     _, seen_dict = mock_upstream
     seen_dict["mode"] = "stream"
     r = tc.post(
-        "/v1/responses",
+        "/ak-test/v1/responses",
         json={
             "model": "muse-spark-1.3-contributor-free",
             "input": "hi",
@@ -100,7 +105,7 @@ def test_deepseek_harness_style_override(app_client):
     }
     harness_payload["model"] = "muse-spark-1.3-contributor-free"
     r = tc.post(
-        "/v1/responses",
+        "/ak-test/v1/responses",
         json=harness_payload,
         headers={"Authorization": "Bearer test-key"},
     )

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from fastapi import Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from llms.proxy.affinity import bucket_for
 from llms.proxy.config import Settings
@@ -142,4 +142,29 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             slot,
             new_slot,
         )
+    _record_usage(request, ingress, req.model, response)
     return response
+
+
+def _record_usage(
+    request: Request, ingress: str, model: str, response: Response
+) -> None:
+    from llms.proxy.usage import extract_usage
+
+    tracker = getattr(request.app.state, "usage", None)
+    affinity = getattr(request.state, "affinity", None)
+    if tracker is None or affinity is None:
+        return
+    if isinstance(response, StreamingResponse):
+        tracker.record(affinity, model, None, None)
+        return
+    if not isinstance(response, JSONResponse) or response.status_code >= 400:
+        return
+    try:
+        payload = json.loads(response.body.decode())
+    except Exception:
+        payload = None
+    if not isinstance(payload, dict):
+        return
+    in_tokens, out_tokens = extract_usage(ingress, payload)
+    tracker.record(affinity, model, in_tokens, out_tokens)

@@ -30,6 +30,13 @@ def make_settings(**overrides) -> Settings:
         "vsp_token": "",
         "port": 8789,
         "request_timeout_s": 30.0,
+        "data_dir": "",
+        "static_dir": "",
+        "github_client_id": "",
+        "github_client_secret": "",
+        "github_redirect_uri": "http://localhost:8789/api/admin/callback",
+        "admin_github_users": (),
+        "admin_session_secret": "test-secret",
     }
     base.update(overrides)
     return Settings(**base)
@@ -140,15 +147,40 @@ def mock_upstream(upstream_seen):
     yield client, upstream_seen
 
 
-@pytest.fixture()
-def app_client(mock_upstream):
-    client, seen = mock_upstream
-    with build_app_client(make_settings(), client) as tc:
-        yield tc, seen
+TEST_KEY = "ak-test"
 
 
-def build_app_client(settings, mock_client):
+def build_app_client(settings, mock_client, seed_key: str | None = None):
+    from llms.proxy.store import ApiKey, Store
+
+    if seed_key is not None:
+        from pathlib import Path
+
+        Store(data_dir=Path(settings.data_dir)).save_keys(
+            [ApiKey(key=seed_key, label="test")]
+        )
     app = create_app(settings)
     app.state.egress = DirectEgress(mock_client)
     app.state.bucket_table = BucketTable(num_buckets=1024, num_slots=1)
     return TestClient(app)
+
+
+@pytest.fixture()
+def app_client(mock_upstream, tmp_path):
+    client, seen = mock_upstream
+    with build_app_client(
+        make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_KEY
+    ) as tc:
+        yield tc, seen
+
+
+@pytest.fixture()
+def admin_client(mock_upstream, tmp_path):
+    from llms.proxy.auth import require_admin
+
+    client, seen = mock_upstream
+    with build_app_client(
+        make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_KEY
+    ) as tc:
+        tc.app.dependency_overrides[require_admin] = lambda: "test-admin"
+        yield tc, seen
