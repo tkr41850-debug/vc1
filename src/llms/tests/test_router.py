@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from proxy.router import normalize_model, pick
+from llms.proxy.router import normalize_model, pick
 
 
 @pytest.mark.parametrize(

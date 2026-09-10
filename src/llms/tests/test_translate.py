@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from proxy.ir import (
+from llms.proxy.ir import (
     ROLE_ASSISTANT,
     ROLE_SYSTEM,
     ROLE_TOOL,
@@ -15,7 +15,12 @@ from proxy.ir import (
     ToolDef,
     ToolResultBlock,
 )
-from proxy.translate import from_chat, from_responses, to_zen_chat, to_zen_responses
+from llms.proxy.translate import (
+    from_chat,
+    from_responses,
+    to_zen_chat,
+    to_zen_responses,
+)
 
 
 def test_from_chat_plain_string_messages():

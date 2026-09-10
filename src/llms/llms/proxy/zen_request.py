@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from proxy.config import Settings
+from llms.proxy.config import Settings
 
 ALLOWED_FIELDS = (
     "model",

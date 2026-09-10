@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from proxy.ir import (
+from llms.proxy.ir import (
     ROLE_ASSISTANT,
     ROLE_SYSTEM,
     ROLE_TOOL,

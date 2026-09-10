@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from proxy.translate_response import chat_to_responses, responses_to_chat
+from llms.proxy.translate_response import chat_to_responses, responses_to_chat
 
 RESP_PAYLOAD = {
     "id": "resp_abc",

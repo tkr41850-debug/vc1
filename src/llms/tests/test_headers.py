@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from proxy.config import Settings
-from proxy.zen_headers import build_zen_headers, new_request_id, stable_session_id
+from llms.proxy.config import Settings
+from llms.proxy.zen_headers import build_zen_headers, new_request_id, stable_session_id
 from tests.conftest import make_settings
 
 

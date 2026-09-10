@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from proxy.stream_translate import chat_to_responses, responses_to_chat
+from llms.proxy.stream_translate import chat_to_responses, responses_to_chat
 
 
 def collect(chunks) -> list[dict]:

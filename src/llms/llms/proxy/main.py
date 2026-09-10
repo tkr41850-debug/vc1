@@ -5,12 +5,12 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 
-from proxy.config import Settings, get_settings
-from proxy.logging import setup_logging
-from proxy.routes import router as health_router
-from proxy.routes.chat import router as chat_router
-from proxy.routes.messages import router as messages_router
-from proxy.routes.responses import router as responses_router
+from llms.proxy.config import Settings, get_settings
+from llms.proxy.logging import setup_logging
+from llms.proxy.routes import router as health_router
+from llms.proxy.routes.chat import router as chat_router
+from llms.proxy.routes.messages import router as messages_router
+from llms.proxy.routes.responses import router as responses_router
 
 
 @asynccontextmanager

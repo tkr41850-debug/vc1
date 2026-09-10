@@ -3,8 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 
-from proxy.config import Settings, get_settings
-from proxy.pipeline import run
+from llms.proxy.config import Settings, get_settings
+from llms.proxy.pipeline import run
 
 router = APIRouter()
 

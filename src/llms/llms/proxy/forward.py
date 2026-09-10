@@ -6,7 +6,7 @@ import httpx
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from proxy.logging import log_response, setup_logging
+from llms.proxy.logging import log_response, setup_logging
 
 logger = setup_logging()
 

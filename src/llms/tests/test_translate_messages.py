@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from proxy.translate import from_messages, to_zen_messages
+from llms.proxy.translate import from_messages, to_zen_messages
 
 
 def test_from_messages_text_and_system():

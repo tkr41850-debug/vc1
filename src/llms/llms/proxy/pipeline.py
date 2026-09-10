@@ -3,18 +3,18 @@ from __future__ import annotations
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
-from proxy.config import Settings
-from proxy.forward import forward, parse_body
-from proxy.ir import LlmRequest
-from proxy.logging import log_ingress, log_upstream, new_trace_id
-from proxy.router import ENDPOINT_PATH, pick
-from proxy.stream_translate import (
+from llms.proxy.config import Settings
+from llms.proxy.forward import forward, parse_body
+from llms.proxy.ir import LlmRequest
+from llms.proxy.logging import log_ingress, log_upstream, new_trace_id
+from llms.proxy.router import ENDPOINT_PATH, pick
+from llms.proxy.stream_translate import (
     chat_to_responses as stream_chat_to_responses,
 )
-from proxy.stream_translate import (
+from llms.proxy.stream_translate import (
     responses_to_chat as stream_responses_to_chat,
 )
-from proxy.translate import (
+from llms.proxy.translate import (
     from_chat,
     from_messages,
     from_responses,
@@ -23,8 +23,8 @@ from proxy.translate import (
     to_zen_responses,
     with_model,
 )
-from proxy.translate_response import chat_to_responses, responses_to_chat
-from proxy.zen_headers import build_zen_headers
+from llms.proxy.translate_response import chat_to_responses, responses_to_chat
+from llms.proxy.zen_headers import build_zen_headers
 
 FROM = {"responses": from_responses, "chat": from_chat, "messages": from_messages}
 TO = {"responses": to_zen_responses, "chat": to_zen_chat, "messages": to_zen_messages}

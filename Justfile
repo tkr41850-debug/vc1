@@ -7,7 +7,7 @@ sync:
     uv sync --group dev
 
 dev:
-    uv run uvicorn proxy.main:app --host 127.0.0.1 --port 8789
+    uv run uvicorn llms.proxy.main:app --host 127.0.0.1 --port 8789
 
 test:
     uv run pytest -q
@@ -25,5 +25,5 @@ probe-codex:
     uv run python scripts/codex_probe.py
 
 lint:
-    uv run ruff check proxy tests scripts
-    uv run ruff format --check proxy tests scripts
+    uv run ruff check llms tests scripts
+    uv run ruff format --check llms tests scripts

@@ -4,8 +4,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from proxy.config import Settings
-from proxy.main import create_app
+from llms.proxy.config import Settings
+from llms.proxy.main import create_app
 
 
 def make_settings(**overrides) -> Settings:

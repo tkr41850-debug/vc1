@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from proxy.zen_request import build_zen_chat_request, build_zen_request
+from llms.proxy.zen_request import build_zen_chat_request, build_zen_request
 from tests.conftest import make_settings
 
 

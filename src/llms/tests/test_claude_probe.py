@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.claude_probe import check_prereqs
+from llms.probe.guards import require_messages_live
 
 
 def test_messages_live_probe_guarded():
     with pytest.raises(NotImplementedError):
-        check_prereqs()
+        require_messages_live()
 
 
 @pytest.mark.skip(reason="no free messages-capable models on Zen yet")

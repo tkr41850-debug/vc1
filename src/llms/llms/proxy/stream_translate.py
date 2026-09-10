@@ -4,7 +4,7 @@ import json
 import time
 from collections.abc import Iterable
 
-from proxy.logging import setup_logging
+from llms.proxy.logging import setup_logging
 
 logger = setup_logging()
 

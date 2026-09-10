@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 
-from proxy.config import Settings
+from llms.proxy.config import Settings
 
 
 def stable_session_id(api_key: str) -> str:
