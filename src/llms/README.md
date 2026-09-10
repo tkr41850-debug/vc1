@@ -43,6 +43,9 @@ Affinity routing: prefix any path with your key, e.g.
 `POST /ak-team1/v1/responses`. Keys match `ak-[A-Za-z0-9_-]+`; requests
 without a key are bucketed by model alone.
 
+`GET /v1/models` lists the free catalog with limits, effort tiers, routing,
+and tool/streaming support; `just catalog` checks the seed against live Zen.
+
 ## Environment
 
 | Variable | Default | Purpose |

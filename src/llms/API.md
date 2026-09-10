@@ -25,13 +25,15 @@ is carried as request affinity, never forwarded upstream.
 ## Model catalog
 
 `GET /v1/models | /models` (affinity prefix also accepted) returns the free
-models ready to serve, OpenAI list shape, `owned_by: llms`:
-
-`muse-spark-1.3-contributor-free`, `muse-spark-1.2-contributor-free`,
-`deepseek-v4-flash-free`, `mimo-v2.5-free`, `ling-3.0-flash-fin-free`,
-`nemotron-3-ultra-free`, `nemotron-3.5-lightning-free`, `big-pickle`.
-Override with `ZEN_FREE_MODELS` (comma-separated). Served locally, no
-upstream call.
+models ready to serve, OpenAI list shape. Each entry carries `id`, `object`,
+`created`, `owned_by: llms`, plus `zen_endpoint` (model's native Zen path),
+`context_window` / `max_output_tokens` (`null` = unverified),
+`reasoning_effort` tiers (or `null`) with `thinking_toggle` for on/off
+reasoning models, `tools` / `streaming` support (`null` = unverified),
+`pricing` (all catalog entries are free), and `contributor_terms` (prompts
+may train future models). Override the set with `ZEN_FREE_MODELS`
+(comma-separated); unknown ids get a minimal entry. `just catalog` diffs the
+seed against the live Zen free set.
 
 ## Affinity buckets
 

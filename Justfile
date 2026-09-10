@@ -46,6 +46,9 @@ probe-codex:
 probe-tools:
     uv run python scripts/tool_roundtrip_probe.py
 
+catalog:
+    uv run python scripts/refresh_catalog.py
+
 lint:
     uv run ruff check llms tests scripts
     uv run ruff format --check llms tests scripts

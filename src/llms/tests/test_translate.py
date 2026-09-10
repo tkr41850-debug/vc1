@@ -517,7 +517,9 @@ def test_results_only_user_message_emits_only_tool_messages():
             "messages": [
                 {
                     "role": "user",
-                    "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "ok"}],
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "c1", "content": "ok"}
+                    ],
                 },
             ],
         }
@@ -544,5 +546,7 @@ def test_null_content_fields_tolerated():
         }
     )
     assert chat.messages[0].blocks == ()
-    msgs = from_messages({"model": "m", "messages": [{"role": "user", "content": None}]})
+    msgs = from_messages(
+        {"model": "m", "messages": [{"role": "user", "content": None}]}
+    )
     assert msgs.messages[0].blocks == ()

@@ -57,12 +57,12 @@ class Settings:
 
 
 def _free_models() -> tuple:
-    from llms.proxy.router import FREE_MODELS
+    from llms.proxy.catalog import BY_ID
 
     override = os.getenv("ZEN_FREE_MODELS", "").strip()
     if override:
         return tuple(m.strip() for m in override.split(",") if m.strip())
-    return FREE_MODELS
+    return tuple(BY_ID)
 
 
 def get_settings() -> Settings:
