@@ -4,7 +4,9 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from llms.proxy.buckets import BucketTable
 from llms.proxy.config import Settings
+from llms.proxy.egress import DirectEgress
 from llms.proxy.main import create_app
 
 
@@ -19,6 +21,12 @@ def make_settings(**overrides) -> Settings:
         "default_chat_model": "muse-spark-1.3-contributor-free",
         "default_messages_model": "claude-haiku-4-5",
         "allow_client_keys": False,
+        "num_buckets": 1024,
+        "num_slots": 8,
+        "slot_cooldown_s": 60.0,
+        "egress_mode": "direct",
+        "vsp_base_url": "",
+        "vsp_token": "",
         "port": 8789,
         "request_timeout_s": 30.0,
     }
@@ -135,6 +143,7 @@ def mock_upstream(upstream_seen):
 def app_client(mock_upstream):
     client, seen = mock_upstream
     app = create_app(make_settings())
-    app.state.upstream_client = client
+    app.state.egress = DirectEgress(client)
+    app.state.bucket_table = BucketTable(num_buckets=1024, num_slots=1)
     with TestClient(app) as tc:
         yield tc, seen

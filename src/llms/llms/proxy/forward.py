@@ -15,6 +15,14 @@ def is_cost_frame(line: bytes) -> bool:
     return b"inference-cost" in line
 
 
+def passthrough_headers(upstream_headers) -> dict:
+    out: dict = {}
+    retry_after = upstream_headers.get("retry-after")
+    if retry_after:
+        out["retry-after"] = retry_after
+    return out
+
+
 async def stream_upstream(upstream: httpx.Response, trace_id: str):
     async for line in upstream.aiter_lines():
         if not line:
@@ -75,7 +83,11 @@ async def forward(
                 content = {
                     "error": {"message": payload.decode(errors="replace")[:2000]}
                 }
-            return JSONResponse(status_code=upstream.status_code, content=content)
+            return JSONResponse(
+                status_code=upstream.status_code,
+                content=content,
+                headers=passthrough_headers(upstream.headers),
+            )
         if translate_stream is not None:
             lines = [line async for line in upstream.aiter_lines()]
             try:
@@ -108,4 +120,10 @@ async def forward(
                 status_code=502,
                 content={"error": {"message": "response conversion failed"}},
             )
-    return JSONResponse(status_code=upstream.status_code, content=payload)
+    return JSONResponse(
+        status_code=upstream.status_code,
+        content=payload,
+        headers=passthrough_headers(upstream.headers)
+        if upstream.status_code >= 400
+        else None,
+    )

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
+from llms.proxy.affinity import bucket_for
 from llms.proxy.config import Settings
 from llms.proxy.forward import forward, parse_body
 from llms.proxy.ir import LlmRequest
-from llms.proxy.logging import log_ingress, log_upstream, new_trace_id
+from llms.proxy.logging import log_ingress, log_upstream, new_trace_id, setup_logging
+from llms.proxy.rate_limit import classify
 from llms.proxy.router import ENDPOINT_PATH, pick
 from llms.proxy.stream_translate import (
     chat_to_responses as stream_chat_to_responses,
@@ -25,6 +29,8 @@ from llms.proxy.translate import (
 )
 from llms.proxy.translate_response import chat_to_responses, responses_to_chat
 from llms.proxy.zen_headers import build_zen_headers
+
+logger = setup_logging()
 
 FROM = {"responses": from_responses, "chat": from_chat, "messages": from_messages}
 TO = {"responses": to_zen_responses, "chat": to_zen_chat, "messages": to_zen_messages}
@@ -53,13 +59,16 @@ def _stream_for(ingress: str, egress: str, model: str):
     if ingress == "responses" and egress == "chat":
         return lambda lines, trace_id: stream_chat_to_responses(lines, trace_id, model)
     return None
-    if ingress == egress:
-        return None
-    if ingress == "chat" and egress == "responses":
-        return lambda payload: responses_to_chat(payload, model)
-    if ingress == "responses" and egress == "chat":
-        return lambda payload: chat_to_responses(payload, model)
-    return None
+
+
+def _outcome_of(response: Response) -> tuple[str, float | None]:
+    if isinstance(response, JSONResponse):
+        try:
+            payload = json.loads(response.body.decode())
+        except Exception:
+            payload = None
+        return classify(response.status_code, payload, dict(response.headers))
+    return "ok", None
 
 
 async def run(request: Request, settings: Settings, ingress: str) -> Response:
@@ -75,16 +84,28 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         req = with_model(req, getattr(settings, DEFAULT_MODEL_ATTR[ingress]))
     egress = pick(req.model, ingress)
     outbound = TO[egress](req)
+    affinity = getattr(request.state, "affinity", None)
+    bucket = bucket_for(affinity, req.model, settings.num_buckets)
+    table = request.app.state.bucket_table
+    slot = table.slot_for(bucket)
     log_ingress(
         trace_id,
         request.url.path,
-        {"model": req.model, "ingress": ingress, "egress": egress},
+        {
+            "model": req.model,
+            "ingress": ingress,
+            "egress": egress,
+            "affinity": affinity,
+            "bucket": bucket,
+            "slot": slot,
+        },
     )
     headers = build_zen_headers(settings, request.headers.get("authorization"))
     url = settings.zen_base_url.rstrip("/") + ENDPOINT_PATH[egress]
     log_upstream(trace_id, url, headers, outbound)
-    client = request.app.state.upstream_client
-    return await forward(
+    egress_provider = request.app.state.egress
+    client = egress_provider.client_for(bucket, slot)
+    response = await forward(
         client,
         url,
         headers,
@@ -93,3 +114,14 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         convert=_convert_for(ingress, egress, req.model),
         translate_stream=_stream_for(ingress, egress, req.model),
     )
+    outcome, retry_after = _outcome_of(response)
+    if outcome == "ratelimited":
+        new_slot = table.note_ratelimited(bucket, retry_after)
+        logger.info(
+            "[%s] bucket %s ratelimited, moved slot %s -> %s",
+            trace_id,
+            bucket,
+            slot,
+            new_slot,
+        )
+    return response

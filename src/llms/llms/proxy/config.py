@@ -37,6 +37,16 @@ class Settings:
     allow_client_keys: bool = field(
         default_factory=lambda: os.getenv("ZEN_ALLOW_CLIENT_KEYS", "0") == "1"
     )
+    num_buckets: int = field(
+        default_factory=lambda: int(os.getenv("NUM_BUCKETS", "1024"))
+    )
+    num_slots: int = field(default_factory=lambda: int(os.getenv("NUM_SLOTS", "8")))
+    slot_cooldown_s: float = field(
+        default_factory=lambda: float(os.getenv("SLOT_COOLDOWN_S", "60"))
+    )
+    egress_mode: str = field(default_factory=lambda: os.getenv("EGRESS_MODE", "direct"))
+    vsp_base_url: str = field(default_factory=lambda: os.getenv("VSP_BASE_URL", ""))
+    vsp_token: str = field(default_factory=lambda: os.getenv("VSP_TOKEN", ""))
     port: int = field(
         default_factory=lambda: int(os.getenv("ZEN_GATEWAY_PORT", "8789"))
     )
