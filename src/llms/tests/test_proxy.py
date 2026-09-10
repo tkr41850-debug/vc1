@@ -97,4 +97,4 @@ def test_deepseek_harness_style_override(app_client):
     )
     assert r.status_code == 200
     assert seen["json"]["model"] == "muse-spark-1.3-contributor-free"
-    assert seen["headers"]["authorization"] == "Bearer test-key"
+    assert "authorization" not in seen["headers"]

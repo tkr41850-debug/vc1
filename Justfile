@@ -12,6 +12,9 @@ dev:
 test:
     uv run pytest -q
 
+probe:
+    uv run python scripts/deepseek_harness_probe.py
+
 lint:
     uv run ruff check proxy tests
     uv run ruff format --check proxy tests

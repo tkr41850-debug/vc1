@@ -24,6 +24,9 @@ class Settings:
             "ZEN_DEFAULT_MODEL", "muse-spark-1.3-contributor-free"
         )
     )
+    allow_client_keys: bool = field(
+        default_factory=lambda: os.getenv("ZEN_ALLOW_CLIENT_KEYS", "0") == "1"
+    )
     port: int = field(
         default_factory=lambda: int(os.getenv("ZEN_GATEWAY_PORT", "8789"))
     )

@@ -28,8 +28,20 @@ def test_free_tier_sends_no_auth_but_identity_headers():
     assert headers["x-opencode-request"].startswith("msg_")
 
 
-def test_incoming_bearer_preferred_over_env():
+def test_incoming_bearer_ignored_by_default():
+    settings: Settings = make_settings(zen_api_key="")
+    headers = build_zen_headers(settings, "Bearer incoming-key")
+    assert "Authorization" not in headers
+
+
+def test_env_key_wins_over_incoming():
     settings: Settings = make_settings(zen_api_key="env-key")
+    headers = build_zen_headers(settings, "Bearer incoming-key")
+    assert headers["Authorization"] == "Bearer env-key"
+
+
+def test_incoming_forwarded_when_allowed():
+    settings: Settings = make_settings(zen_api_key="", allow_client_keys=True)
     headers = build_zen_headers(settings, "Bearer incoming-key")
     assert headers["Authorization"] == "Bearer incoming-key"
 

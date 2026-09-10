@@ -16,6 +16,7 @@ from proxy.logging import (
     setup_logging,
 )
 from proxy.zen_headers import build_zen_headers
+from proxy.zen_request import build_zen_request
 
 router = APIRouter()
 logger = setup_logging()
@@ -23,13 +24,6 @@ logger = setup_logging()
 
 def upstream_path() -> str:
     return "/responses"
-
-
-def apply_model_default(body: dict, settings: Settings) -> dict:
-    out = dict(body)
-    if not out.get("model"):
-        out["model"] = settings.default_model
-    return out
 
 
 async def get_upstream_client(request: Request) -> AsyncIterator[httpx.AsyncClient]:
@@ -82,7 +76,7 @@ async def handle_responses(request: Request, settings: Settings) -> Response:
             status_code=400,
             content={"error": {"message": "body must be a JSON object"}},
         )
-    body = apply_model_default(body, settings)
+    body = build_zen_request(body, settings)
     log_ingress(trace_id, request.url.path, body)
     headers = build_zen_headers(settings, request.headers.get("authorization"))
     url = settings.zen_base_url.rstrip("/") + upstream_path()

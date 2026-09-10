@@ -17,11 +17,14 @@ def new_request_id() -> str:
 
 
 def build_zen_headers(settings: Settings, incoming_auth: str | None) -> dict[str, str]:
-    api_key = ""
-    if incoming_auth and incoming_auth.lower().startswith("bearer "):
+    api_key = settings.zen_api_key
+    if (
+        not api_key
+        and settings.allow_client_keys
+        and incoming_auth
+        and incoming_auth.lower().startswith("bearer ")
+    ):
         api_key = incoming_auth.split(" ", 1)[1].strip()
-    if not api_key:
-        api_key = settings.zen_api_key
     headers = {
         "User-Agent": f"opencode/{settings.opencode_version}",
         "x-opencode-client": settings.opencode_client,
