@@ -16,17 +16,23 @@ from proxy.stream_translate import (
 )
 from proxy.translate import (
     from_chat,
+    from_messages,
     from_responses,
     to_zen_chat,
+    to_zen_messages,
     to_zen_responses,
     with_model,
 )
 from proxy.translate_response import chat_to_responses, responses_to_chat
 from proxy.zen_headers import build_zen_headers
 
-FROM = {"responses": from_responses, "chat": from_chat}
-TO = {"responses": to_zen_responses, "chat": to_zen_chat}
-DEFAULT_MODEL_ATTR = {"responses": "default_model", "chat": "default_chat_model"}
+FROM = {"responses": from_responses, "chat": from_chat, "messages": from_messages}
+TO = {"responses": to_zen_responses, "chat": to_zen_chat, "messages": to_zen_messages}
+DEFAULT_MODEL_ATTR = {
+    "responses": "default_model",
+    "chat": "default_chat_model",
+    "messages": "default_messages_model",
+}
 
 
 def _convert_for(ingress: str, egress: str, model: str):
@@ -68,11 +74,6 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     if not req.model:
         req = with_model(req, getattr(settings, DEFAULT_MODEL_ATTR[ingress]))
     egress = pick(req.model, ingress)
-    if egress == "messages":
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"message": "messages models not supported yet"}},
-        )
     outbound = TO[egress](req)
     log_ingress(
         trace_id,

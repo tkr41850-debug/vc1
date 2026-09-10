@@ -29,6 +29,11 @@ class Settings:
             "ZEN_DEFAULT_CHAT_MODEL", "muse-spark-1.3-contributor-free"
         )
     )
+    default_messages_model: str = field(
+        default_factory=lambda: os.getenv(
+            "ZEN_DEFAULT_MESSAGES_MODEL", "claude-haiku-4-5"
+        )
+    )
     allow_client_keys: bool = field(
         default_factory=lambda: os.getenv("ZEN_ALLOW_CLIENT_KEYS", "0") == "1"
     )

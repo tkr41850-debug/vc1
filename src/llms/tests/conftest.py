@@ -17,6 +17,7 @@ def make_settings(**overrides) -> Settings:
         "opencode_project": "global",
         "default_model": "muse-spark-1.3-contributor-free",
         "default_chat_model": "muse-spark-1.3-contributor-free",
+        "default_messages_model": "claude-haiku-4-5",
         "allow_client_keys": False,
         "port": 8789,
         "request_timeout_s": 30.0,
@@ -42,6 +43,19 @@ def mock_upstream(upstream_seen):
         except Exception:
             upstream_seen["json"] = None
         mode = upstream_seen.pop("mode", "default")
+        if str(request.url).endswith("/messages") and mode == "default":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_123",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-haiku-4-5",
+                    "content": [{"type": "text", "text": "hello"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 4, "output_tokens": 2},
+                },
+            )
         if mode == "stream":
             if str(request.url).endswith("/chat/completions"):
                 body = (

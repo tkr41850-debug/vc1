@@ -345,3 +345,164 @@ def to_zen_responses(req: LlmRequest) -> dict:
 
 def with_model(req: LlmRequest, model: str) -> LlmRequest:
     return replace(req, model=model)
+
+
+def _messages_text_of(content) -> str:
+    if isinstance(content, str):
+        return content
+    texts = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "text":
+            texts.append(part.get("text", ""))
+        elif isinstance(part, dict) and part.get("type") == "tool_result":
+            inner = part.get("content", "")
+            texts.append(inner if isinstance(inner, str) else _messages_text_of(inner))
+    return "".join(texts)
+
+
+def _messages_block_to_ir(part: dict):
+    kind = part.get("type")
+    if kind == "text":
+        return TextBlock(part.get("text", ""))
+    if kind == "image":
+        source = part.get("source", {})
+        if isinstance(source, dict) and source.get("type") == "url":
+            return ImageBlock(str(source.get("url", "")))
+        if isinstance(source, dict) and source.get("type") == "base64":
+            return ImageBlock(
+                f"data:{source.get('media_type', '')};base64,{source.get('data', '')}"
+            )
+        raise ValueError(f"unsupported messages image source: {source}")
+    if kind == "tool_use":
+        import json as _json
+
+        return ToolCallBlock(
+            str(part.get("id", "")),
+            str(part.get("name", "")),
+            _json.dumps(part.get("input", {})),
+        )
+    if kind == "tool_result":
+        return ToolResultBlock(
+            str(part.get("tool_use_id", "")), _messages_text_of(part.get("content", ""))
+        )
+    raise ValueError(f"unsupported messages content block: {kind}")
+
+
+def from_messages(body: dict) -> LlmRequest:
+    messages: list[LlmMessage] = []
+    system = body.get("system", "")
+    if system:
+        messages.append(
+            LlmMessage(role=ROLE_SYSTEM, blocks=(TextBlock(_messages_text_of(system)),))
+        )
+    for msg in body.get("messages", []):
+        role = msg.get("role")
+        if role not in (ROLE_USER, ROLE_ASSISTANT):
+            raise ValueError(f"unsupported messages role: {role}")
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            blocks = [TextBlock(content)]
+        else:
+            blocks = [_messages_block_to_ir(p) for p in content]
+        messages.append(LlmMessage(role=role, blocks=tuple(blocks)))
+    tools = tuple(
+        ToolDef(
+            str(t.get("name", "")),
+            str(t.get("description", "")),
+            dict(t.get("input_schema", {})),
+        )
+        for t in body.get("tools", [])
+    )
+    choice = body.get("tool_choice")
+    if isinstance(choice, dict):
+        kind = choice.get("type", "auto")
+        tool_choice = {"auto": "auto", "any": "required"}.get(kind, choice)
+        if kind == "tool":
+            tool_choice = {"name": choice.get("name", "")}
+    else:
+        tool_choice = choice
+    return LlmRequest(
+        model=str(body.get("model", "")),
+        messages=tuple(messages),
+        tools=tools,
+        tool_choice=tool_choice,
+        stream=body.get("stream") is True,
+        params=LlmParams(
+            temperature=body.get("temperature"),
+            top_p=body.get("top_p"),
+            max_tokens=body.get("max_tokens"),
+        ),
+    )
+
+
+def to_zen_messages(req: LlmRequest) -> dict:
+    import json as _json
+
+    body: dict = {"model": req.model, "messages": []}
+    systems = [
+        b.text
+        for m in req.messages
+        if m.role == ROLE_SYSTEM
+        for b in m.blocks
+        if isinstance(b, TextBlock)
+    ]
+    if systems:
+        body["system"] = "\n".join(systems)
+    for msg in req.messages:
+        if msg.role == ROLE_SYSTEM:
+            continue
+        role = ROLE_USER if msg.role == ROLE_TOOL else msg.role
+        parts: list = []
+        for b in msg.blocks:
+            if isinstance(b, TextBlock):
+                parts.append({"type": "text", "text": b.text})
+            elif isinstance(b, ImageBlock):
+                parts.append({"type": "image", "source": {"type": "url", "url": b.url}})
+            elif isinstance(b, ToolCallBlock):
+                try:
+                    arguments = _json.loads(b.arguments) if b.arguments else {}
+                except Exception:
+                    arguments = {"_raw": b.arguments}
+                parts.append(
+                    {
+                        "type": "tool_use",
+                        "id": b.call_id,
+                        "name": b.name,
+                        "input": arguments,
+                    }
+                )
+            elif isinstance(b, ToolResultBlock):
+                parts.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": b.call_id,
+                        "content": b.output,
+                    }
+                )
+        if len(parts) == 1 and parts[0]["type"] == "text":
+            content = parts[0]["text"]
+        else:
+            content = parts
+        body["messages"].append({"role": role, "content": content})
+    if req.tools:
+        body["tools"] = [
+            {"name": t.name, "description": t.description, "input_schema": t.parameters}
+            for t in req.tools
+        ]
+    if req.tool_choice is not None:
+        choice = req.tool_choice
+        if choice == "required":
+            body["tool_choice"] = {"type": "any"}
+        elif isinstance(choice, dict) and "name" in choice:
+            body["tool_choice"] = {"type": "tool", "name": choice["name"]}
+        else:
+            body["tool_choice"] = {"type": "auto"}
+    params = req.params
+    body["max_tokens"] = params.max_tokens if params.max_tokens is not None else 1024
+    if params.temperature is not None:
+        body["temperature"] = params.temperature
+    if params.top_p is not None:
+        body["top_p"] = params.top_p
+    if req.stream:
+        body["stream"] = True
+    return body
