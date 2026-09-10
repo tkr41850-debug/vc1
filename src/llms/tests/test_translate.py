@@ -517,12 +517,32 @@ def test_results_only_user_message_emits_only_tool_messages():
             "messages": [
                 {
                     "role": "user",
-                    "content": [
-                        {"type": "tool_result", "tool_use_id": "c1", "content": "ok"}
-                    ],
+                    "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "ok"}],
                 },
             ],
         }
     )
     body = to_zen_chat(req)
     assert body["messages"] == [{"role": "tool", "tool_call_id": "c1", "content": "ok"}]
+
+
+def test_null_content_fields_tolerated():
+    req = from_responses(
+        {
+            "model": "m",
+            "input": [
+                {"type": "reasoning", "summary": None, "content": None},
+                {"type": "message", "role": "assistant", "content": None},
+            ],
+        }
+    )
+    assert req.messages == (LlmMessage(role="assistant", blocks=()),)
+    chat = from_chat(
+        {
+            "model": "m",
+            "messages": [{"role": "assistant", "content": None, "tool_calls": None}],
+        }
+    )
+    assert chat.messages[0].blocks == ()
+    msgs = from_messages({"model": "m", "messages": [{"role": "user", "content": None}]})
+    assert msgs.messages[0].blocks == ()

@@ -40,6 +40,19 @@ def main() -> int:
                 if second.finish_reason != "completed":
                     print(f"notifications={second.notifications!r}")
                     return fail(f"turn2 did not complete: {second.finish_reason}")
+                third = harness.run(
+                    "Use bash to run echo tool-ok, then reply with exactly its output.",
+                    session_id=session,
+                )
+                print(f"tools: {third.finish_reason} {third.final_response!r}")
+                if (
+                    third.finish_reason != "completed"
+                    or "tool-ok" not in third.final_response
+                ):
+                    print(f"notifications={third.notifications!r}")
+                    return fail(
+                        f"tool turn failed: {third.finish_reason} {third.final_response!r}"
+                    )
         return 0
     except Exception as exc:
         return fail(f"probe failed: {type(exc).__name__}: {exc}")

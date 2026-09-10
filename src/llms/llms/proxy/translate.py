@@ -101,7 +101,7 @@ def from_chat(body: dict) -> RequestIR:
             blocks.append(TextBlock(content))
         elif isinstance(content, list):
             blocks.extend(_chat_part_to_block(p) for p in content)
-        for call in msg.get("tool_calls", []):
+        for call in msg.get("tool_calls") or []:
             fn = call.get("function", {})
             if call.get("type", "function") != "function":
                 raise ValueError(f"unsupported tool call type: {call.get('type')}")
@@ -164,7 +164,7 @@ def from_responses(body: dict) -> RequestIR:
                 role = ROLE_SYSTEM
             if role not in _RESPONSES_ROLES and role != ROLE_SYSTEM:
                 raise ValueError(f"unsupported responses role: {role}")
-            raw_content = item.get("content", [])
+            raw_content = item.get("content") or []
             if isinstance(raw_content, str):
                 blocks = [TextBlock(raw_content)]
             else:
@@ -197,7 +197,7 @@ def from_responses(body: dict) -> RequestIR:
             )
         elif kind == "reasoning":
             texts = []
-            for part in item.get("summary", []) + item.get("content", []):
+            for part in (item.get("summary") or []) + (item.get("content") or []):
                 if part.get("type") in ("summary_text", "reasoning_text", "text"):
                     texts.append(part.get("text", ""))
             if texts:
@@ -446,7 +446,7 @@ def responses_output_to_ir_messages(output: list) -> tuple:
         if kind == "message":
             texts = [
                 p.get("text", "")
-                for p in item.get("content", [])
+                for p in (item.get("content") or [])
                 if p.get("type") == "output_text"
             ]
             if texts:
@@ -455,7 +455,7 @@ def responses_output_to_ir_messages(output: list) -> tuple:
                 )
         elif kind == "reasoning":
             texts = []
-            for part in item.get("summary", []) + item.get("content", []):
+            for part in (item.get("summary") or []) + (item.get("content") or []):
                 if part.get("type") in ("summary_text", "reasoning_text", "text"):
                     texts.append(part.get("text", ""))
             if texts:
@@ -625,9 +625,11 @@ def from_messages(body: dict) -> RequestIR:
             raise ValueError(f"unsupported messages role: {role}")
         content = msg.get("content", "")
         if isinstance(content, str):
-            blocks = [TextBlock(content)]
-        else:
+            blocks = [TextBlock(content)] if content else []
+        elif isinstance(content, list):
             blocks = [_messages_block_to_ir(p) for p in content]
+        else:
+            blocks = []
         messages.append(LlmMessage(role=role, blocks=tuple(blocks)))
     tools = tuple(
         ToolDef(

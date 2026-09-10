@@ -48,6 +48,25 @@ def main() -> int:
                 print(completed.stdout[-2000:])
                 if completed.returncode != 0:
                     return fail(completed.stderr[-2000:])
+                tools = subprocess.run(
+                    [
+                        "codex",
+                        "exec",
+                        "--skip-git-repo-check",
+                        "Use the shell to run echo tool-ok, then reply with exactly its output.",
+                    ],
+                    cwd=str(workspace),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    check=False,
+                )
+                print(tools.stdout[-2000:])
+                if tools.returncode != 0 or "tool-ok" not in tools.stdout:
+                    return fail(
+                        f"tool turn failed: {tools.returncode} {tools.stderr[-2000:]}"
+                    )
         return 0
     except Exception as exc:
         return fail(f"probe failed: {type(exc).__name__}: {exc}")

@@ -18,7 +18,7 @@ def main() -> int:
             first = client.responses.create(
                 model=MODEL,
                 input="reply with exactly: turn-one",
-                max_output_tokens=512,
+                max_output_tokens=1024,
             )
             print(f"turn1: {first.status} {first.output_text!r}")
             second = client.responses.create(
@@ -47,11 +47,55 @@ def main() -> int:
                         ],
                     },
                 ],
-                max_output_tokens=512,
+                max_output_tokens=1024,
             )
             print(f"turn2: {second.status} {second.output_text!r}")
             if second.status != "completed":
                 return fail(f"turn2 did not complete: {second.status}")
+            tools = [
+                {
+                    "type": "function",
+                    "name": "bash",
+                    "description": "run a shell command",
+                    "parameters": {"type": "object"},
+                }
+            ]
+            call = client.responses.create(
+                model=MODEL,
+                input="use bash to run echo tool-ok, then reply with exactly its output",
+                tools=tools,
+                max_output_tokens=1024,
+            )
+            calls = [i for i in call.output if i.type == "function_call"]
+            if not calls:
+                print(f"tools: model answered directly {call.output_text!r}")
+            else:
+                print(f"tools: function_call {calls[0].name} {calls[0].arguments!r}")
+                done = client.responses.create(
+                    model=MODEL,
+                    input=[
+                        {
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "use bash"}],
+                        },
+                        {
+                            "type": "function_call",
+                            "call_id": calls[0].call_id,
+                            "name": calls[0].name,
+                            "arguments": calls[0].arguments,
+                        },
+                        {
+                            "type": "function_call_output",
+                            "call_id": calls[0].call_id,
+                            "output": "tool-ok",
+                        },
+                    ],
+                    tools=tools,
+                    max_output_tokens=1024,
+                )
+                print(f"tools: {done.status} {done.output_text!r}")
+                if done.status != "completed":
+                    return fail(f"tool turn failed: {done.status} {done.output_text!r}")
         return 0
     except Exception as exc:
         return fail(f"probe failed: {type(exc).__name__}: {exc}")

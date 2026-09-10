@@ -26,7 +26,7 @@ def main() -> int:
 
             def run_claude(*args: str):
                 return subprocess.run(
-                    ["claude", "-p", *args, "--model", MODEL],
+                    ["claude", "-p", *args, "--model", MODEL, "--allowedTools", "Bash"],
                     cwd=str(workspace),
                     env=env,
                     capture_output=True,
@@ -43,6 +43,15 @@ def main() -> int:
             print(second.stdout[-500:])
             if second.returncode != 0:
                 return fail(second.stderr[-2000:])
+            third = run_claude(
+                "--continue",
+                "Use Bash to run echo tool-ok, then reply with exactly its output.",
+            )
+            print(third.stdout[-500:])
+            if third.returncode != 0 or "tool-ok" not in third.stdout:
+                return fail(
+                    f"tool turn failed: {third.returncode} {third.stderr[-2000:]}"
+                )
         return 0
     except Exception as exc:
         return fail(f"probe failed: {type(exc).__name__}: {exc}")
