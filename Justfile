@@ -43,6 +43,9 @@ probe-claude:
 probe-codex:
     uv run python scripts/codex_probe.py
 
+probe-tools:
+    uv run python scripts/tool_roundtrip_probe.py
+
 lint:
     uv run ruff check llms tests scripts
     uv run ruff format --check llms tests scripts
