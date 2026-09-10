@@ -13,10 +13,22 @@ from llms.proxy.logging import log_ingress, log_upstream, new_trace_id, setup_lo
 from llms.proxy.rate_limit import classify
 from llms.proxy.router import ENDPOINT_PATH, pick
 from llms.proxy.stream_translate import (
+    chat_to_messages as stream_chat_to_messages,
+)
+from llms.proxy.stream_translate import (
     chat_to_responses as stream_chat_to_responses,
 )
 from llms.proxy.stream_translate import (
+    messages_to_chat as stream_messages_to_chat,
+)
+from llms.proxy.stream_translate import (
+    messages_to_responses as stream_messages_to_responses,
+)
+from llms.proxy.stream_translate import (
     responses_to_chat as stream_responses_to_chat,
+)
+from llms.proxy.stream_translate import (
+    responses_to_messages as stream_responses_to_messages,
 )
 from llms.proxy.translate import (
     from_chat,
@@ -27,7 +39,12 @@ from llms.proxy.translate import (
     to_zen_responses,
     with_model,
 )
-from llms.proxy.translate_response import chat_to_responses, responses_to_chat
+from llms.proxy.translate_response import (
+    chat_to_responses,
+    messages_to_responses,
+    responses_to_chat,
+    responses_to_messages,
+)
 from llms.proxy.zen_headers import build_zen_headers
 
 logger = setup_logging()
@@ -44,21 +61,33 @@ DEFAULT_MODEL_ATTR = {
 def _convert_for(ingress: str, egress: str, model: str):
     if ingress == egress:
         return None
-    if ingress == "chat" and egress == "responses":
-        return lambda payload: responses_to_chat(payload, model)
-    if ingress == "responses" and egress == "chat":
-        return lambda payload: chat_to_responses(payload, model)
-    return None
+    converters = {
+        ("chat", "responses"): responses_to_chat,
+        ("responses", "chat"): chat_to_responses,
+        ("messages", "responses"): responses_to_messages,
+        ("responses", "messages"): messages_to_responses,
+    }
+    convert = converters.get((ingress, egress))
+    if convert is None:
+        return None
+    return lambda payload: convert(payload, model)
 
 
 def _stream_for(ingress: str, egress: str, model: str):
     if ingress == egress:
         return None
-    if ingress == "chat" and egress == "responses":
-        return lambda lines, trace_id: stream_responses_to_chat(lines, trace_id, model)
-    if ingress == "responses" and egress == "chat":
-        return lambda lines, trace_id: stream_chat_to_responses(lines, trace_id, model)
-    return None
+    translators = {
+        ("chat", "responses"): stream_responses_to_chat,
+        ("responses", "chat"): stream_chat_to_responses,
+        ("messages", "responses"): stream_responses_to_messages,
+        ("responses", "messages"): stream_messages_to_responses,
+        ("chat", "messages"): stream_messages_to_chat,
+        ("messages", "chat"): stream_chat_to_messages,
+    }
+    translate = translators.get((ingress, egress))
+    if translate is None:
+        return None
+    return lambda lines, trace_id: translate(lines, trace_id, model)
 
 
 def _outcome_of(response: Response) -> tuple[str, float | None]:

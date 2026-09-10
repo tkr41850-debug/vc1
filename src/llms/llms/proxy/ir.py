@@ -63,3 +63,21 @@ ROLE_SYSTEM = "system"
 ROLE_USER = "user"
 ROLE_ASSISTANT = "assistant"
 ROLE_TOOL = "tool"
+
+
+@dataclass(frozen=True)
+class TextDelta:
+    text: str
+
+
+@dataclass(frozen=True)
+class ToolArgsDelta:
+    call_id: str
+    name: str
+    args_chunk: str
+
+
+@dataclass(frozen=True)
+class StreamDone:
+    status: str
+    has_tool_calls: bool = False

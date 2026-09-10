@@ -59,3 +59,30 @@ def test_cross_dialect_stream_translates(app_client, mock_upstream):
     assert "hi" in r.text
     assert "data: [DONE]" in r.text
     assert "inference-cost" not in r.text
+
+
+def test_messages_ingress_routes_spark_to_responses(app_client):
+    tc, seen = app_client
+    r = tc.post(
+        "/v1/messages",
+        json={
+            "model": "muse-spark-1.3-contributor-free",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+        },
+    )
+    assert r.status_code == 200
+    assert seen["url"].endswith("/responses")
+    body = r.json()
+    assert body["type"] == "message"
+    assert body["content"] == [{"type": "text", "text": "hello"}]
+
+
+def test_responses_ingress_routes_claude_to_messages(app_client):
+    tc, seen = app_client
+    r = tc.post("/v1/responses", json={"model": "claude-haiku-4-5", "input": "hi"})
+    assert r.status_code == 200
+    assert seen["url"].endswith("/messages")
+    body = r.json()
+    assert body["object"] == "response"
+    assert body["status"] == "completed"

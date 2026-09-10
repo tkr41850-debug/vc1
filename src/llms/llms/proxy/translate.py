@@ -347,6 +347,112 @@ def with_model(req: LlmRequest, model: str) -> LlmRequest:
     return replace(req, model=model)
 
 
+def responses_output_to_ir_messages(output: list) -> tuple:
+    messages: list = []
+    for item in output:
+        kind = item.get("type")
+        if kind == "message":
+            texts = [
+                p.get("text", "")
+                for p in item.get("content", [])
+                if p.get("type") == "output_text"
+            ]
+            if texts:
+                messages.append(
+                    LlmMessage(role=ROLE_ASSISTANT, blocks=(TextBlock("".join(texts)),))
+                )
+        elif kind == "function_call":
+            messages.append(
+                LlmMessage(
+                    role=ROLE_ASSISTANT,
+                    blocks=(
+                        ToolCallBlock(
+                            str(item.get("call_id", item.get("id", ""))),
+                            str(item.get("name", "")),
+                            str(item.get("arguments", "")),
+                        ),
+                    ),
+                )
+            )
+    return tuple(messages)
+
+
+def messages_content_to_ir_blocks(content: list) -> tuple:
+    import json as _json
+
+    blocks: list = []
+    for part in content:
+        kind = part.get("type")
+        if kind == "text":
+            blocks.append(TextBlock(part.get("text", "")))
+        elif kind == "tool_use":
+            blocks.append(
+                ToolCallBlock(
+                    str(part.get("id", "")),
+                    str(part.get("name", "")),
+                    _json.dumps(part.get("input", {})),
+                )
+            )
+        else:
+            raise ValueError(f"unsupported messages response block: {kind}")
+    return tuple(blocks)
+
+
+def ir_messages_to_messages_content(messages: tuple) -> list:
+    import json as _json
+
+    content: list = []
+    for msg in messages:
+        if msg.role != ROLE_ASSISTANT:
+            continue
+        for b in msg.blocks:
+            if isinstance(b, TextBlock):
+                content.append({"type": "text", "text": b.text})
+            elif isinstance(b, ToolCallBlock):
+                try:
+                    arguments = _json.loads(b.arguments or "{}")
+                except Exception:
+                    arguments = {"_raw": b.arguments}
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": b.call_id,
+                        "name": b.name,
+                        "input": arguments,
+                    }
+                )
+    return content
+
+
+def ir_messages_to_responses_output(messages: tuple) -> list:
+    output: list = []
+    for msg in messages:
+        if msg.role != ROLE_ASSISTANT:
+            continue
+        texts = "".join(b.text for b in msg.blocks if isinstance(b, TextBlock))
+        if texts:
+            output.append(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": texts, "annotations": []}
+                    ],
+                }
+            )
+        for b in msg.blocks:
+            if isinstance(b, ToolCallBlock):
+                output.append(
+                    {
+                        "type": "function_call",
+                        "call_id": b.call_id,
+                        "name": b.name,
+                        "arguments": b.arguments,
+                    }
+                )
+    return output
+
+
 def _messages_text_of(content) -> str:
     if isinstance(content, str):
         return content

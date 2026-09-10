@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 import uuid
 
+from llms.proxy.ir import ROLE_ASSISTANT, LlmMessage, ToolCallBlock
+
 
 def _resp_text_of(output: list) -> str:
     texts = []
@@ -108,5 +110,78 @@ def chat_to_responses(payload: dict, model: str) -> dict:
             "input_tokens": usage.get("prompt_tokens", 0),
             "output_tokens": usage.get("completion_tokens", 0),
             "total_tokens": usage.get("total_tokens", 0),
+        },
+    }
+
+
+def responses_to_messages(payload: dict, model: str) -> dict:
+    from llms.proxy.translate import (
+        ir_messages_to_messages_content,
+        responses_output_to_ir_messages,
+    )
+
+    raw_id = str(payload.get("id", uuid.uuid4().hex[:12])).removeprefix("resp_")
+    output = payload.get("output", [])
+    messages = responses_output_to_ir_messages(output)
+    content = ir_messages_to_messages_content(messages)
+    status = payload.get("status", "completed")
+    has_calls = any(isinstance(b, ToolCallBlock) for m in messages for b in m.blocks)
+    if has_calls and status == "completed":
+        stop = "tool_use"
+    elif status == "completed":
+        stop = "end_turn"
+    elif status == "incomplete":
+        stop = "max_tokens"
+    else:
+        stop = "end_turn"
+    usage = payload.get("usage", {})
+    return {
+        "id": f"msg_{raw_id}",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": content,
+        "stop_reason": stop,
+        "usage": {
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+        },
+    }
+
+
+def messages_to_responses(payload: dict, model: str) -> dict:
+    from llms.proxy.translate import (
+        ir_messages_to_responses_output,
+        messages_content_to_ir_blocks,
+    )
+
+    raw_id = str(payload.get("id", uuid.uuid4().hex[:12])).removeprefix("msg_")
+    messages = (
+        LlmMessage(
+            role=ROLE_ASSISTANT,
+            blocks=messages_content_to_ir_blocks(payload.get("content", [])),
+        ),
+    )
+    output = ir_messages_to_responses_output(messages)
+    stop = payload.get("stop_reason", "end_turn")
+    status = (
+        "completed"
+        if stop in ("end_turn", "tool_use", "stop_sequence")
+        else "incomplete"
+    )
+    usage = payload.get("usage", {})
+    return {
+        "id": f"resp_{raw_id}",
+        "object": "response",
+        "created_at": int(time.time()),
+        "status": status,
+        "model": model,
+        "error": None,
+        "output": output,
+        "usage": {
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("input_tokens", 0)
+            + usage.get("output_tokens", 0),
         },
     }
