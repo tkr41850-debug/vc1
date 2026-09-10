@@ -80,7 +80,6 @@ and tool/streaming support; `just catalog` checks the seed against live Zen.
 | Variable | Default | Purpose |
 |---|---|---|
 | `ZEN_API_KEY` | — | Operator Zen key; empty = anonymous free tier |
-| `ZEN_ALLOW_CLIENT_KEYS` | `0` | `1` lets harness `Bearer` keys through when no operator key set |
 | `ZEN_BASE_URL` | `https://opencode.ai/zen/v1` | Upstream gateway |
 | `ZEN_DEFAULT_MODEL` | `muse-spark-1.3-contributor-free` | Responses fallback |
 | `ZEN_DEFAULT_CHAT_MODEL` | `muse-spark-1.3-contributor-free` | Chat fallback |

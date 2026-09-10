@@ -83,8 +83,10 @@ def fake_world(tmp_path_factory):
     )
     import tempfile
 
+    from llms.proxy.keys import reset_cache
     from llms.proxy.store import ApiKey, Store
 
+    reset_cache()
     data_dir = pathlib.Path(tempfile.mkdtemp())
     Store(data_dir=data_dir).save_keys([ApiKey(key="sk-team1")])
     settings = make_settings(data_dir=str(data_dir))

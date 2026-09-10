@@ -49,9 +49,11 @@ shape. Each entry carries `id`, `object`,
 `reasoning_effort` tiers (or `null`) with `thinking_toggle` for on/off
 reasoning models, `tools` / `streaming` support (`null` = unverified),
 `pricing` (all catalog entries are free), and `contributor_terms` (prompts
-may train future models). Override the set with `ZEN_FREE_MODELS`
-(comma-separated); unknown ids get a minimal entry. `just catalog` diffs the
-seed against the live Zen free set. Served locally, no upstream call.
+may train future models). `data/models.yaml` — managed via the admin UI —
+supersedes the seed set: the served list is exactly the enabled ids in the
+file (missing file falls back to the seed). Unknown ids get a minimal entry.
+`just catalog` diffs the seed against the live Zen free set. Served locally,
+no upstream call.
 
 ## Admin API (GitHub OAuth session required)
 
@@ -102,10 +104,9 @@ to the next slot with cooldown `max(SLOT_COOLDOWN_S, Retry-After)`.
 - Unknown top-level fields are dropped; the proxy rebuilds a whitelisted
   request from its intermediate format. Unknown roles/content-block types
   yield `400 {error.message}` naming the offender.
-- `Authorization: Bearer <key>` from the client is used **only** when no
-  `ZEN_API_KEY` is configured **and** `ZEN_ALLOW_CLIENT_KEYS=1`. Otherwise
-  the operator credential (or anonymous free tier) wins; harness dummy keys
-  are never forwarded.
+- Client credentials (`sk-` secrets, harness dummy keys) are **never**
+  forwarded upstream. The operator `ZEN_API_KEY` authenticates upstream when
+  set; otherwise requests ride the anonymous free tier.
 - Reasoning effort is translated, not dropped:
   `responses.reasoning.effort` ↔ `chat.reasoning_effort` (or
   `thinking: {type: enabled}` → `medium`) ↔ `messages.thinking`
@@ -115,7 +116,8 @@ to the next slot with cooldown `max(SLOT_COOLDOWN_S, Retry-After)`.
 
 `User-Agent: opencode/<ver>`, `x-opencode-client`, `x-opencode-project`,
 per-key stable `x-opencode-session`, per-request `x-opencode-request`,
-`Content-Type: application/json`, plus `Authorization` per the rule above.
+`Content-Type: application/json`, plus `Authorization: Bearer <ZEN_API_KEY>`
+when the operator key is set (never the client's).
 `host`, `content-length`, `accept-*`, and harness identity headers are dropped;
 httpx regenerates transport headers. Free-tier Zen access depends on the
 opencode identity set; omitting it yields `MissingSessionID`.

@@ -9,6 +9,20 @@ def test_healthz_open_without_secret(app_client):
     assert tc.get("/healthz").status_code == 200
 
 
+def test_corrupt_store_fails_closed_but_healthz_reports(app_client, tmp_path):
+    from llms.proxy.keys import reset_cache
+
+    tc, _ = app_client
+    (tmp_path / "keys.yaml").write_text("not: [valid, yaml\n")
+    reset_cache()
+    try:
+        r = tc.post("/v1/responses", json={"input": "hi"}, headers=TEST_HEADERS)
+        assert r.status_code == 503
+        assert r.json() == {"error": {"message": "key store unavailable"}}
+    finally:
+        reset_cache()
+
+
 def test_missing_secret_rejected_on_all_ingress(app_client):
     tc, _ = app_client
     for path in (
@@ -50,6 +64,8 @@ def test_wrong_scheme_and_unknown_secret_rejected(app_client):
 
 
 def test_disabled_secret_rejected(app_client, tmp_path):
+    from llms.proxy.keys import reset_cache
+
     tc, _ = app_client
     store = Store(data_dir=tmp_path)
     keys = store.load_keys()
@@ -57,10 +73,16 @@ def test_disabled_secret_rejected(app_client, tmp_path):
         if k.key == TEST_SECRET:
             k.enabled = False
     store.save_keys(keys)
-    assert (
-        tc.post("/v1/responses", json={"input": "hi"}, headers=TEST_HEADERS).status_code
-        == 401
-    )
+    reset_cache()
+    try:
+        assert (
+            tc.post(
+                "/v1/responses", json={"input": "hi"}, headers=TEST_HEADERS
+            ).status_code
+            == 401
+        )
+    finally:
+        reset_cache()
 
 
 def test_secret_header_forwards_with_and_without_affinity(app_client, mock_upstream):

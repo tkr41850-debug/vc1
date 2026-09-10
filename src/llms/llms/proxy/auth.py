@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+import secrets
 import urllib.parse
-from pathlib import Path
 
 import httpx
 from fastapi import HTTPException, Request
 
 from llms.proxy.config import Settings
 from llms.proxy.logging import setup_logging
-from llms.proxy.store import Store, is_secret_key
+from llms.proxy.store import is_secret_key
 
 logger = setup_logging()
 
@@ -17,13 +17,18 @@ GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_USER_URL = "https://api.github.com/user"
 
 
-def build_authorize_url(settings: Settings) -> str:
+def build_authorize_url(settings: Settings, state: str) -> str:
     params = {
         "client_id": settings.github_client_id,
         "redirect_uri": settings.github_redirect_uri,
         "scope": "read:user",
+        "state": state,
     }
     return f"{GITHUB_AUTHORIZE_URL}?{urllib.parse.urlencode(params)}"
+
+
+def new_oauth_state() -> str:
+    return secrets.token_urlsafe(32)
 
 
 async def exchange_code(code: str, settings: Settings) -> str:
@@ -87,20 +92,14 @@ def presented_secret_key(request: Request) -> str | None:
 
 
 def request_secret_key(request: Request, settings: Settings) -> str | None:
-    """The sk- secret key for this request, or None if missing/unknown/disabled.
+    """Back-compat wrapper: prefer llms.proxy.keys.resolve_secret_key.
 
-    The sk- key lives only on the Authorization header. It is authenticated
-    here, never forwarded upstream (see zen_headers) and never mixed with the
-    ak- affinity prefix (see middleware).
+    Kept so route-level callers don't need the caching layer's import;
+    delegates to the mtime-cached snapshot.
     """
-    presented = presented_secret_key(request)
-    if presented is None:
-        return None
-    store = Store(data_dir=Path(settings.data_dir))
-    found = store.find_key(presented)
-    if found is None or not found.enabled:
-        return None
-    return found.key
+    from llms.proxy.keys import resolve_secret_key
+
+    return resolve_secret_key(request, settings)
 
 
 def require_admin(request: Request) -> str:

@@ -119,7 +119,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             "slot": slot,
         },
     )
-    headers = build_zen_headers(settings, request.headers.get("authorization"))
+    headers = build_zen_headers(settings)
     url = settings.zen_base_url.rstrip("/") + ENDPOINT_PATH[egress]
     log_upstream(trace_id, url, headers, outbound)
     egress_provider = request.app.state.egress

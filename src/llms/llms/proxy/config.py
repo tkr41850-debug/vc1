@@ -39,9 +39,6 @@ class Settings:
     )
     free_models: tuple = field(default_factory=lambda: _free_models())
     model_aliases: tuple = field(default_factory=lambda: _model_aliases())
-    allow_client_keys: bool = field(
-        default_factory=lambda: os.getenv("ZEN_ALLOW_CLIENT_KEYS", "0") == "1"
-    )
     num_buckets: int = field(
         default_factory=lambda: int(os.getenv("NUM_BUCKETS", "1024"))
     )

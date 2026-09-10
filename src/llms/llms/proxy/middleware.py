@@ -7,7 +7,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from llms.proxy.affinity import parse_affinity_prefix
-from llms.proxy.auth import request_secret_key, require_admin, session_login
+from llms.proxy.auth import require_admin, session_login
+from llms.proxy.keys import resolve_secret_key
+from llms.proxy.store import StoreError
 
 OPEN_PATHS = {"/healthz"}
 OPEN_ADMIN_PREFIXES = (
@@ -81,7 +83,16 @@ class GateMiddleware(BaseHTTPMiddleware):
 
         # sk- secret keys live on the Authorization header. The ak- affinity
         # prefix (when present) is unauthenticated bucket routing only.
-        secret_key = request_secret_key(request, settings)
+        try:
+            secret_key = resolve_secret_key(request, settings)
+        except StoreError as exc:
+            request.app.state.store_error = str(exc)
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"message": "key store unavailable"}},
+            )
+        else:
+            request.app.state.store_error = None
         if secret_key is None:
             return JSONResponse(
                 status_code=401,

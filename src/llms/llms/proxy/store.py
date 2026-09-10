@@ -12,6 +12,10 @@ MODELS_FILE = "models.yaml"
 SECRET_PREFIX = "sk-"
 
 
+class StoreError(Exception):
+    """Raised when a YAML store file exists but cannot be parsed."""
+
+
 def is_secret_key(value: str) -> bool:
     return value.startswith(SECRET_PREFIX)
 
@@ -48,7 +52,12 @@ class Store:
         path = self.keys_path()
         if not path.exists():
             return []
-        raw = yaml.safe_load(path.read_text()) or []
+        try:
+            raw = yaml.safe_load(path.read_text()) or []
+        except yaml.YAMLError as exc:
+            raise StoreError(f"unparsable {KEYS_FILE}: {exc}") from exc
+        if not isinstance(raw, list):
+            raise StoreError(f"unparsable {KEYS_FILE}: expected a list")
         out = []
         for item in raw:
             if not isinstance(item, dict) or not item.get("key"):
@@ -63,12 +72,16 @@ class Store:
         return out
 
     def save_keys(self, keys: list[ApiKey]) -> None:
-        self.keys_path().write_text(
+        path = self.keys_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
             yaml.safe_dump(
                 [{"key": k.key, "label": k.label, "enabled": k.enabled} for k in keys],
                 sort_keys=False,
             )
         )
+        tmp.replace(path)
 
     def find_key(self, key: str) -> ApiKey | None:
         for k in self.load_keys():
@@ -88,7 +101,12 @@ class Store:
             from llms.proxy.router import FREE_MODELS
 
             return [ModelEntry(id=m) for m in FREE_MODELS]
-        raw = yaml.safe_load(path.read_text()) or []
+        try:
+            raw = yaml.safe_load(path.read_text()) or []
+        except yaml.YAMLError as exc:
+            raise StoreError(f"unparsable {MODELS_FILE}: {exc}") from exc
+        if not isinstance(raw, list):
+            raise StoreError(f"unparsable {MODELS_FILE}: expected a list")
         out = []
         for item in raw:
             if not isinstance(item, dict) or not item.get("id"):
@@ -103,12 +121,16 @@ class Store:
         return out
 
     def save_models(self, models: list[ModelEntry]) -> None:
-        self.models_path().write_text(
+        path = self.models_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
             yaml.safe_dump(
                 [{"id": m.id, "label": m.label, "enabled": m.enabled} for m in models],
                 sort_keys=False,
             )
         )
+        tmp.replace(path)
 
     def enabled_model_ids(self) -> list[str]:
         return [m.id for m in self.load_models() if m.enabled]

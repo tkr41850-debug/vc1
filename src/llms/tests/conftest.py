@@ -20,7 +20,6 @@ def make_settings(**overrides) -> Settings:
         "default_model": "muse-spark-1.3-contributor-free",
         "default_chat_model": "muse-spark-1.3-contributor-free",
         "default_messages_model": "claude-haiku-4-5",
-        "allow_client_keys": False,
         "num_buckets": 1024,
         "num_slots": 8,
         "slot_cooldown_s": 60.0,
@@ -152,8 +151,10 @@ TEST_HEADERS = {"Authorization": f"Bearer {TEST_SECRET}"}
 
 
 def build_app_client(settings, mock_client, seed_key: str | None = None):
+    from llms.proxy.keys import reset_cache
     from llms.proxy.store import ApiKey, Store
 
+    reset_cache()
     if seed_key is not None:
         from pathlib import Path
 

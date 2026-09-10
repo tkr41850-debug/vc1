@@ -10,6 +10,28 @@ def test_healthz(app_client):
     assert r.json() == {"status": "ok"}
 
 
+def test_healthz_reports_degraded_store(app_client, tmp_path):
+    from llms.proxy.keys import reset_cache
+
+    tc, _ = app_client
+    (tmp_path / "keys.yaml").write_text("{unclosed: [bracket\n  - nope")
+    reset_cache()
+    try:
+        # any gated request trips the corrupt store into visibility
+        assert (
+            tc.post(
+                "/v1/responses", json={"input": "hi"}, headers=TEST_HEADERS
+            ).status_code
+            == 503
+        )
+        r = tc.get("/healthz")
+        assert r.status_code == 200
+        assert r.json()["status"] == "degraded"
+        assert "unparsable keys.yaml" in r.json()["store_error"]
+    finally:
+        reset_cache()
+
+
 def test_non_stream_passthrough_with_model_override(app_client):
     tc, seen = app_client
     r = tc.post(

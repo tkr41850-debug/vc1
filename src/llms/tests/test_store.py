@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from llms.proxy.store import ApiKey, ModelEntry, Store, is_secret_key
+from llms.proxy.store import ApiKey, ModelEntry, Store, StoreError, is_secret_key
 
 
 def test_is_secret_key():
@@ -35,6 +35,30 @@ def test_key_allowed(tmp_path: Path):
     assert store.key_allowed("sk-on") is True
     assert store.key_allowed("sk-off") is False
     assert store.key_allowed("sk-missing") is False
+
+
+def test_corrupt_keys_file_raises_store_error(tmp_path: Path):
+    import pytest
+
+    (tmp_path / "keys.yaml").write_text("{unclosed: [bracket\n  - nope")
+    with pytest.raises(StoreError):
+        Store(data_dir=tmp_path).load_keys()
+
+
+def test_non_list_keys_file_raises_store_error(tmp_path: Path):
+    import pytest
+
+    (tmp_path / "keys.yaml").write_text("key: sk-x\n")
+    with pytest.raises(StoreError):
+        Store(data_dir=tmp_path).load_keys()
+
+
+def test_corrupt_models_file_raises_store_error(tmp_path: Path):
+    import pytest
+
+    (tmp_path / "models.yaml").write_text("{unclosed: [bracket\n  - nope")
+    with pytest.raises(StoreError):
+        Store(data_dir=tmp_path).load_models()
 
 
 def test_missing_models_file_seeds_free_models(tmp_path: Path):

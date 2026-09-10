@@ -82,10 +82,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings or get_settings()
     app.state.usage = UsageTracker()
     app.state.usage.load_file(app.state.settings.data_dir)
-    app.add_middleware(
-        SessionMiddleware, secret_key=app.state.settings.admin_session_secret or "dev"
-    )
+    # Starlette executes middleware in reverse insertion order, so Gate runs
+    # last (outermost) and sees the session populated by SessionMiddleware.
+    # Without a session secret the admin UI cannot work: sign with a random
+    # per-process key (admin sessions simply won't survive restarts) rather
+    # than a publicly-known fallback. Set ADMIN_SESSION_SECRET in production
+    # so logins persist and can't be forged after a restart.
+    import secrets as _secrets
+
+    session_secret = app.state.settings.admin_session_secret or _secrets.token_hex(32)
     app.add_middleware(GateMiddleware)
+    app.add_middleware(SessionMiddleware, secret_key=session_secret)
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(admin_router)
