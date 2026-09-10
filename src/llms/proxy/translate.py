@@ -138,12 +138,12 @@ def from_responses(body: dict) -> LlmRequest:
                 role = ROLE_SYSTEM
             if role not in _RESPONSES_ROLES and role != ROLE_SYSTEM:
                 raise ValueError(f"unsupported responses role: {role}")
-            messages.append(
-                LlmMessage(
-                    role=role,
-                    blocks=tuple(_responses_content_to_blocks(item.get("content", []))),
-                )
-            )
+            raw_content = item.get("content", [])
+            if isinstance(raw_content, str):
+                blocks = [TextBlock(raw_content)]
+            else:
+                blocks = _responses_content_to_blocks(raw_content)
+            messages.append(LlmMessage(role=role, blocks=tuple(blocks)))
         elif kind == "function_call":
             call_id = str(item.get("call_id", item.get("id", "")))
             messages.append(

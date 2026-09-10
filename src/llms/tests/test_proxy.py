@@ -39,7 +39,13 @@ def test_bare_responses_alias(app_client):
         "/responses", json={"model": "muse-spark-1.3-contributor-free", "input": "hi"}
     )
     assert r.status_code == 200
-    assert seen["json"]["input"] == "hi"
+    assert seen["json"]["input"] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hi"}],
+        }
+    ]
 
 
 def test_invalid_json_rejected(app_client):

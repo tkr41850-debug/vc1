@@ -43,11 +43,18 @@ def mock_upstream(upstream_seen):
             upstream_seen["json"] = None
         mode = upstream_seen.pop("mode", "default")
         if mode == "stream":
-            body = (
-                'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
-                'data: {"inference-cost":123}\n\n'
-                'data: {"type":"response.completed"}\n\n'
-            )
+            if str(request.url).endswith("/chat/completions"):
+                body = (
+                    'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+                    'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+                    "data: [DONE]\n\n"
+                )
+            else:
+                body = (
+                    'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+                    'data: {"inference-cost":123}\n\n'
+                    'data: {"type":"response.completed"}\n\n'
+                )
             return httpx.Response(
                 200,
                 content=body.encode(),
@@ -61,13 +68,45 @@ def mock_upstream(upstream_seen):
                     "error": {"type": "AuthError", "message": "bad key"},
                 },
             )
+        if str(request.url).endswith("/chat/completions"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-123",
+                    "object": "chat.completion",
+                    "model": "mimo-v2.5-free",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "hello"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 4,
+                        "completion_tokens": 2,
+                        "total_tokens": 6,
+                    },
+                },
+            )
         return httpx.Response(
             200,
             json={
                 "id": "resp_123",
                 "object": "response",
+                "status": "completed",
                 "model": "muse-spark-1.3-contributor-free",
                 "output_text": "hello",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "hello", "annotations": []}
+                        ],
+                    }
+                ],
+                "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
             },
         )
 

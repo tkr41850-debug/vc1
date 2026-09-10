@@ -46,7 +46,12 @@ async def parse_body(request: Request):
 
 
 async def forward(
-    client: httpx.AsyncClient, url: str, headers: dict, body: dict, trace_id: str
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict,
+    body: dict,
+    trace_id: str,
+    convert=None,
 ) -> Response:
     if body.get("stream") is True:
         req = client.build_request("POST", url, headers=headers, json=body)
@@ -84,4 +89,13 @@ async def forward(
         payload = upstream.json()
     except Exception:
         payload = {"error": {"message": upstream.text[:2000]}}
+    if convert is not None and upstream.status_code < 400:
+        try:
+            payload = convert(payload)
+        except Exception as exc:
+            logger.error("[%s] response conversion failed: %s", trace_id, exc)
+            return JSONResponse(
+                status_code=502,
+                content={"error": {"message": "response conversion failed"}},
+            )
     return JSONResponse(status_code=upstream.status_code, content=payload)
