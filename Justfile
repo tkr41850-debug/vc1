@@ -15,6 +15,9 @@ test:
 probe:
     uv run python scripts/deepseek_harness_probe.py
 
+probe-dsh:
+    uv run --with deepseek-harness-sdk python scripts/dsh_headless_probe.py
+
 lint:
     uv run ruff check proxy tests
     uv run ruff format --check proxy tests

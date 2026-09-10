@@ -16,6 +16,7 @@ def make_settings(**overrides) -> Settings:
         "opencode_client": "cli",
         "opencode_project": "global",
         "default_model": "muse-spark-1.3-contributor-free",
+        "default_chat_model": "muse-spark-1.3-contributor-free",
         "allow_client_keys": False,
         "port": 8789,
         "request_timeout_s": 30.0,
