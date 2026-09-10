@@ -58,9 +58,14 @@ The admin UI (`/`, same port) 302s to login when unauthenticated.
 ## Usage aggregation
 
 In-memory per-key counters (`requests`, `input_tokens`, `output_tokens`,
-per-model breakdown), recorded from upstream `usage` payloads for all three
-dialects (streams count the request, tokens `None`). Flushed to
-`data/usage.json` every 60s and on shutdown; reloaded as baseline on startup.
+`cached_tokens`, `reasoning_tokens`, per-model breakdown), recorded from
+upstream `usage` payloads for all three dialects (streams count the request,
+tokens `None`). Cache detail sources: responses/chat `*_tokens_details`
+(`cached_tokens`/`reasoning_tokens`), messages `cache_read_input_tokens`.
+Token usage carries `cached_tokens` / `reasoning_tokens` breakdowns across
+dialects and streams. Flushed to `data/usage.json` every 60s and on shutdown;
+reloaded as baseline on startup (old snapshots without the new fields migrate
+to 0).
 
 ## Affinity buckets
 

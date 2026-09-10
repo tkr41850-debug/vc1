@@ -39,7 +39,11 @@ def test_responses_to_messages_tool_use():
     assert out["content"] == [
         {"type": "tool_use", "id": "c1", "name": "bash", "input": {"command": "ls"}}
     ]
-    assert out["usage"] == {"input_tokens": 5, "output_tokens": 3}
+    assert out["usage"] == {
+        "input_tokens": 5,
+        "output_tokens": 3,
+        "cache_read_input_tokens": 0,
+    }
 
 
 def test_responses_to_messages_text_end_turn():

@@ -6,34 +6,94 @@ from llms.proxy.usage import UsageTracker, extract_usage
 def test_extract_usage_all_dialects():
     assert extract_usage(
         "responses", {"usage": {"input_tokens": 4, "output_tokens": 2}}
-    ) == (4, 2)
+    ) == (4, 2, None, None)
     assert extract_usage(
-        "messages", {"usage": {"input_tokens": 4, "output_tokens": 2}}
-    ) == (4, 2)
+        "messages",
+        {
+            "usage": {
+                "input_tokens": 4,
+                "output_tokens": 2,
+                "cache_read_input_tokens": 3,
+            }
+        },
+    ) == (4, 2, 3, None)
     assert extract_usage(
         "chat",
         {"usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}},
-    ) == (4, 2)
-    assert extract_usage("responses", {}) == (None, None)
-    assert extract_usage("responses", {"usage": None}) == (None, None)
+    ) == (4, 2, None, None)
+    assert extract_usage("responses", {}) == (None, None, None, None)
+    assert extract_usage("responses", {"usage": None}) == (None, None, None, None)
+
+
+def test_extract_usage_details_shapes():
+    assert extract_usage(
+        "responses",
+        {
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "input_tokens_details": {"cached_tokens": 7},
+                "output_tokens_details": {"reasoning_tokens": 2},
+            }
+        },
+    ) == (10, 5, 7, 2)
+    assert extract_usage(
+        "chat",
+        {
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "prompt_tokens_details": {"cached_tokens": 7},
+                "completion_tokens_details": {"reasoning_tokens": 2},
+            }
+        },
+    ) == (10, 5, 7, 2)
 
 
 def test_tracker_aggregates_per_key_and_model():
     t = UsageTracker()
-    t.record("ak-a", "m1", 4, 2)
-    t.record("ak-a", "m1", 1, 1)
+    t.record("ak-a", "m1", 4, 2, 1, 0)
+    t.record("ak-a", "m1", 1, 1, 1, 1)
     t.record("ak-a", "m2", None, None)
     snap = t.snapshot()
     a = snap["keys"]["ak-a"]
     assert a["requests"] == 3
     assert a["input_tokens"] == 5
     assert a["output_tokens"] == 3
+    assert a["cached_tokens"] == 2
+    assert a["reasoning_tokens"] == 1
     assert a["models"]["m1"] == {
         "requests": 2,
         "input_tokens": 5,
         "output_tokens": 3,
+        "cached_tokens": 2,
+        "reasoning_tokens": 1,
     }
     assert a["models"]["m2"]["requests"] == 1
+
+
+def test_tracker_migrates_old_snapshots(tmp_path):
+    import json
+
+    old = {
+        "keys": {
+            "ak-a": {
+                "requests": 1,
+                "input_tokens": 4,
+                "output_tokens": 2,
+                "models": {
+                    "m1": {"requests": 1, "input_tokens": 4, "output_tokens": 2}
+                },
+            }
+        }
+    }
+    (tmp_path / "usage.json").write_text(json.dumps(old))
+    t = UsageTracker()
+    t.load_file(tmp_path)
+    a = t.snapshot()["keys"]["ak-a"]
+    assert a["cached_tokens"] == 0
+    assert a["reasoning_tokens"] == 0
+    assert a["models"]["m1"]["cached_tokens"] == 0
 
 
 def test_tracker_persists_roundtrip(tmp_path):
@@ -64,6 +124,8 @@ def test_usage_recorded_for_responses(app_client):
     assert usage["requests"] == 1
     assert usage["input_tokens"] == 4
     assert usage["output_tokens"] == 2
+    assert usage["cached_tokens"] == 0
+    assert usage["reasoning_tokens"] == 0
 
 
 def test_usage_recorded_for_chat_and_messages(app_client):

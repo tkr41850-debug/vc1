@@ -1,11 +1,13 @@
-export interface KeyUsage {
+export interface ModelUsage {
   requests: number;
   input_tokens: number;
   output_tokens: number;
-  models: Record<
-    string,
-    { requests: number; input_tokens: number; output_tokens: number }
-  >;
+  cached_tokens: number;
+  reasoning_tokens: number;
+}
+
+export interface KeyUsage extends ModelUsage {
+  models: Record<string, ModelUsage>;
 }
 
 export interface ApiKeyEntry {

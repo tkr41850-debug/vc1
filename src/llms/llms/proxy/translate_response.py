@@ -107,6 +107,7 @@ def parse_messages_response(payload: dict) -> ResponseIR:
     else:
         status = "failed"
     usage = payload.get("usage", {})
+    cached = int(usage.get("cache_read_input_tokens") or 0)
     return ResponseIR(
         model=str(payload.get("model", "")),
         status=status,
@@ -119,6 +120,7 @@ def parse_messages_response(payload: dict) -> ResponseIR:
         input_tokens=int(usage.get("input_tokens", 0)),
         output_tokens=int(usage.get("output_tokens", 0)),
         raw_id=str(payload.get("id", uuid.uuid4().hex[:12])).removeprefix("msg_"),
+        cached_tokens=cached,
         incomplete_reason="max_output_tokens" if stop == "max_tokens" else None,
     )
 
@@ -226,7 +228,11 @@ def emit_messages_response(rir: ResponseIR, model: str) -> dict:
         "model": model,
         "content": ir_messages_to_messages_content(rir.messages),
         "stop_reason": stop,
-        "usage": {"input_tokens": rir.input_tokens, "output_tokens": rir.output_tokens},
+        "usage": {
+            "input_tokens": rir.input_tokens,
+            "output_tokens": rir.output_tokens,
+            "cache_read_input_tokens": rir.cached_tokens,
+        },
     }
 
 

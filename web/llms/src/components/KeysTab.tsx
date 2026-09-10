@@ -94,8 +94,11 @@ export default function KeysTab({
             <th className="py-2 pr-4">Label</th>
             <th className="py-2 pr-4">Enabled</th>
             <th className="py-2 pr-4 text-right">Requests</th>
-            <th className="py-2 pr-4 text-right">In tokens</th>
-            <th className="py-2 pr-4 text-right">Out tokens</th>
+            <th className="py-2 pr-4 text-right">In</th>
+            <th className="py-2 pr-4 text-right">Cached</th>
+            <th className="py-2 pr-4 text-right">Uncached</th>
+            <th className="py-2 pr-4 text-right">Out</th>
+            <th className="py-2 pr-4 text-right">Reasoning</th>
             <th className="py-2"></th>
           </tr>
         </thead>
@@ -119,7 +122,14 @@ export default function KeysTab({
               </td>
               <td className="py-2 pr-4 text-right">{fmt(k.usage.requests)}</td>
               <td className="py-2 pr-4 text-right">{fmt(k.usage.input_tokens)}</td>
+              <td className="py-2 pr-4 text-right" title="Served from prompt cache">
+                {fmt(k.usage.cached_tokens ?? 0)}
+              </td>
+              <td className="py-2 pr-4 text-right" title="Billed input tokens">
+                {fmt(k.usage.input_tokens - (k.usage.cached_tokens ?? 0))}
+              </td>
               <td className="py-2 pr-4 text-right">{fmt(k.usage.output_tokens)}</td>
+              <td className="py-2 pr-4 text-right">{fmt(k.usage.reasoning_tokens ?? 0)}</td>
               <td className="py-2 text-right">
                 <button
                   className="rounded px-2 py-0.5 text-xs text-red-600 hover:bg-red-50"
@@ -132,7 +142,7 @@ export default function KeysTab({
           ))}
           {keys.length === 0 && (
             <tr>
-              <td colSpan={7} className="py-4 text-center text-gray-500">
+              <td colSpan={10} className="py-4 text-center text-gray-500">
                 No keys yet — add one above.
               </td>
             </tr>

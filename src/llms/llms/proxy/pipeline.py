@@ -156,7 +156,7 @@ def _record_usage(
     if tracker is None or affinity is None:
         return
     if isinstance(response, StreamingResponse):
-        tracker.record(affinity, model, None, None)
+        tracker.record(affinity, model, None, None, None, None)
         return
     if not isinstance(response, JSONResponse) or response.status_code >= 400:
         return
@@ -166,5 +166,9 @@ def _record_usage(
         payload = None
     if not isinstance(payload, dict):
         return
-    in_tokens, out_tokens = extract_usage(ingress, payload)
-    tracker.record(affinity, model, in_tokens, out_tokens)
+    in_tokens, out_tokens, cached_tokens, reasoning_tokens = extract_usage(
+        ingress, payload
+    )
+    tracker.record(
+        affinity, model, in_tokens, out_tokens, cached_tokens, reasoning_tokens
+    )
