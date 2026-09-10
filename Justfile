@@ -21,6 +21,9 @@ probe-dsh:
 probe-claude:
     uv run python scripts/claude_probe.py
 
+probe-codex:
+    uv run python scripts/codex_probe.py
+
 lint:
     uv run ruff check proxy tests scripts
     uv run ruff format --check proxy tests scripts
