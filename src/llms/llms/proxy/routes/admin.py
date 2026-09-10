@@ -124,7 +124,8 @@ async def delete_key(
 
 @router.get("/api/admin/models")
 async def list_models(
-    settings: Settings = Depends(settings_from_app), _admin: str = Depends(require_admin)
+    settings: Settings = Depends(settings_from_app),
+    _admin: str = Depends(require_admin),
 ):
     return {
         "models": [
