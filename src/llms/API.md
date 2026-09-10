@@ -85,10 +85,7 @@ Warp-pool egress is `NotImplementedError` until vsp exposes per-bucket warp
 selection; the required server side is: lease/select a warp exit for
 `(bucket, slot)` and report health, honoring the same rate-limit signals.
 
-## Configuration (env)
+## Configuration
 
-`ZEN_BASE_URL`, `ZEN_API_KEY`, `ZEN_ALLOW_CLIENT_KEYS`,
-`ZEN_DEFAULT_MODEL`, `ZEN_DEFAULT_CHAT_MODEL`, `ZEN_DEFAULT_MESSAGES_MODEL`,
-`ZEN_GATEWAY_OPENCODE_VERSION/CLIENT/PROJECT`, `NUM_BUCKETS` (1024),
-`NUM_SLOTS` (8), `SLOT_COOLDOWN_S` (60), `EGRESS_MODE` (direct),
-`VSP_BASE_URL`, `VSP_TOKEN`, `ZEN_GATEWAY_PORT` (8789), `ZEN_TIMEOUT_S` (120).
+Environment reference lives in [README.md](README.md#environment).
+This document specifies wire behavior only.
