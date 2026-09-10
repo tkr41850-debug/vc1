@@ -5,27 +5,28 @@ dialects; routes each model to its preferred Zen endpoint, translating as needed
 
 ## Ingress paths
 
-Plain and affinity-prefixed forms serve identically:
+Every request except `/healthz` and the OAuth login flow must carry a key
+prefix from `data/keys.yaml`:
 
 ```
-POST /v1/responses | /responses
-POST /v1/chat/completions | /chat/completions
-POST /v1/messages | /messages
 GET  /healthz
+GET  /api/admin/login | /api/admin/callback | POST /api/admin/logout
 
-POST /{affinity}/v1/responses | /{affinity}/responses
-POST /{affinity}/v1/chat/completions | /{affinity}/chat/completions
-POST /{affinity}/v1/messages | /{affinity}/messages
+POST /{key}/v1/responses | /{key}/responses
+POST /{key}/v1/chat/completions | /{key}/chat/completions
+POST /{key}/v1/messages | /{key}/messages
+GET  /{key}/v1/models | /{key}/models
 ```
 
-`{affinity}` matches `ak-[A-Za-z0-9_-]+`. Any other first segment falls through
-to normal routing (usually 404). The prefix is stripped before routing; the key
-is carried as request affinity, never forwarded upstream.
+`{key}` matches `ak-[A-Za-z0-9_-]+` and must exist and be enabled in
+`data/keys.yaml`; otherwise `401 {error.message: "unknown or disabled API
+key"}`. The prefix is stripped before routing; the key is carried as request
+affinity, never forwarded upstream.
 
 ## Model catalog
 
-`GET /v1/models | /models` (affinity prefix also accepted) returns the free
-models ready to serve, OpenAI list shape. Each entry carries `id`, `object`,
+`GET /{key}/v1/models | /{key}/models` returns the enabled models from
+`data/models.yaml`, OpenAI list shape. Each entry carries `id`, `object`,
 `created`, `owned_by: llms`, plus `zen_endpoint` (model's native Zen path),
 `context_window` / `max_output_tokens` (`null` = unverified),
 `reasoning_effort` tiers (or `null`) with `thinking_toggle` for on/off
@@ -33,13 +34,39 @@ reasoning models, `tools` / `streaming` support (`null` = unverified),
 `pricing` (all catalog entries are free), and `contributor_terms` (prompts
 may train future models). Override the set with `ZEN_FREE_MODELS`
 (comma-separated); unknown ids get a minimal entry. `just catalog` diffs the
-seed against the live Zen free set.
+seed against the live Zen free set. Served locally, no upstream call.
+
+## Admin API (GitHub OAuth session required)
+
+```
+GET    /api/admin/keys            keys with live usage aggregates
+POST   /api/admin/keys            {key, label?, enabled?} -> 201
+PUT    /api/admin/keys/{key}      {label?, enabled?}
+DELETE /api/admin/keys/{key}
+GET    /api/admin/models          [{id, label, enabled}]
+POST   /api/admin/models          {id, label?, enabled?} -> 201
+PUT    /api/admin/models/{id}     {label?, enabled?}
+DELETE /api/admin/models/{id}
+GET    /api/admin/usage           {keys: {<key>: {requests, input_tokens, output_tokens, models}}}
+```
+
+Unauthenticated: `401 {error.message: "admin login required"}`. OAuth:
+`GET /api/admin/login` redirects to GitHub; `GET /api/admin/callback?code=`
+exchanges, allowlists `ADMIN_GITHUB_USERS`, sets a session, redirects to `/`.
+The admin UI (`/`, same port) 302s to login when unauthenticated.
+
+## Usage aggregation
+
+In-memory per-key counters (`requests`, `input_tokens`, `output_tokens`,
+per-model breakdown), recorded from upstream `usage` payloads for all three
+dialects (streams count the request, tokens `None`). Flushed to
+`data/usage.json` every 60s and on shutdown; reloaded as baseline on startup.
 
 ## Affinity buckets
 
-`bucket = sha256("{affinity or ''}\x00{model.lower()}") mod NUM_BUCKETS`
-(`NUM_BUCKETS`, default 1024). Plain-path traffic hashes with empty affinity,
-so it still spreads by model. Buckets map to egress slots
+`bucket = sha256("{key}\x00{model.lower()}") mod NUM_BUCKETS`
+(`NUM_BUCKETS`, default 1024). Every gated request carries its key as affinity.
+Buckets map to egress slots
 (`bucket % NUM_SLOTS` initially); on a rate-limit signal the bucket advances
 to the next slot with cooldown `max(SLOT_COOLDOWN_S, Retry-After)`.
 

@@ -16,7 +16,11 @@ def main() -> int:
     try:
         with (
             probe_dirs("tool-probe"),
-            running_proxy(PORT, os.getenv("PROXY_LOG", "/tmp/tool-probe-proxy.log")),
+            running_proxy(
+                PORT,
+                os.getenv("PROXY_LOG", "/tmp/tool-probe-proxy.log"),
+                data_dir=os.getenv("PROBE_DATA_DIR", "/tmp/tool-probe-data"),
+            ),
         ):
             body = {
                 "model": MODEL,
@@ -54,7 +58,7 @@ def main() -> int:
                 ],
                 "max_tokens": 512,
             }
-            r = httpx.post(f"{BASE_URL}/v1/messages", json=body, timeout=120.0)
+            r = httpx.post(f"{BASE_URL}/ak-probe/v1/messages", json=body, timeout=120.0)
             print(f"status={r.status_code} stop={r.json().get('stop_reason')}")
             if r.status_code != 200:
                 return fail(f"tool roundtrip failed: {r.text[:500]}")

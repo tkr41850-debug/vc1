@@ -1,15 +1,27 @@
-set working-directory := "/home/uqmm/vc1/src/llms"
+repo := "/home/uqmm/vc1/.claude/worktrees/web-ui"
+set working-directory := repo + "/src/llms"
 
 port := env_var_or_default("ZEN_GATEWAY_PORT", "8789")
 pidfile := "/tmp/llms.pid"
 logfile := "/tmp/llms.log"
+webdir := repo + "/web/llms"
+staticdir := repo + "/src/llms/llms/proxy/static"
 
 default:
     @just --list
 
-up:
+web-install:
+    npm ci --prefix {{webdir}}
+
+web-build: web-install
+    npm run build --prefix {{webdir}}
+    ls {{staticdir}}/index.html
+
+up: web-build
     #!/usr/bin/env bash
     set -u
+    if [ ! -f {{repo}}/.env ]; then echo "missing {{repo}}/.env (copy .env.example)"; exit 1; fi
+    set -a; source {{repo}}/.env; set +a
     echo "aliases: ${MODEL_ALIASES:-none}"
     if [ -f {{pidfile}} ] && kill -0 "$(cat {{pidfile}})" 2>/dev/null; then kill "$(cat {{pidfile}})"; sleep 1; fi
     pkill -f "uvicorn llms.proxy.main" 2>/dev/null || true; sleep 1
@@ -23,6 +35,23 @@ down:
     pkill -f "uvicorn llms.proxy.main" 2>/dev/null || true
     echo stopped
 
+docker-up:
+    #!/usr/bin/env bash
+    set -u
+    cd {{repo}}
+    if [ ! -f .env ]; then echo "missing {{repo}}/.env (copy .env.example)"; exit 1; fi
+    if command -v docker-compose >/dev/null 2>&1; then COMPOSE="docker-compose"; else COMPOSE="docker compose"; fi
+    $COMPOSE --env-file .env up --build -d
+    for i in $(seq 1 60); do curl -s --max-time 2 http://127.0.0.1:{{port}}/healthz | grep -q ok && break; sleep 2; done
+    curl -s --max-time 5 http://127.0.0.1:{{port}}/healthz; echo
+
+docker-down:
+    #!/usr/bin/env bash
+    cd {{repo}}
+    if command -v docker-compose >/dev/null 2>&1; then COMPOSE="docker-compose"; else COMPOSE="docker compose"; fi
+    $COMPOSE down
+    echo stopped
+
 sync:
     uv sync --group dev
 
@@ -34,6 +63,9 @@ test:
 
 probe:
     uv run python scripts/deepseek_harness_probe.py
+
+probe-admin:
+    uv run python scripts/admin_usage_probe.py
 
 probe-dsh:
     uv run --with deepseek-harness-sdk python scripts/dsh_headless_probe.py

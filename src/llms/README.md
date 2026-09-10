@@ -7,15 +7,24 @@ See [API.md](API.md) for the wire contracts.
 ## Quickstart
 
 ```sh
-just sync   # install deps with uv
-just up     # start in background (kills any existing instance)
-just down   # stop it
-just test   # mocked unit suite
-just lint   # ruff check + format
+cp ../../.env.example ../../.env  # once; fill in GitHub OAuth + admin users
+just sync       # install deps with uv
+just up         # build web UI + start gateway in background
+just down       # stop it
+just test       # mocked unit suite
+just lint       # ruff check + format
+just docker-up  # or: containerized (same port, ./data mounted)
 ```
 
 Health: `curl localhost:8789/healthz` → `{"status":"ok"}`.
 Port via `ZEN_GATEWAY_PORT` (default `8789`).
+
+## Admin UI
+
+`just up`, then open `http://localhost:8789/` and sign in with GitHub
+(register an OAuth app; callback `http://localhost:8789/api/admin/callback`;
+put your login in `ADMIN_GITHUB_USERS`). Manage keys (with aggregate usage)
+and models; stored in `data/keys.yaml` / `data/models.yaml` at the repo root.
 
 ## Claude Code (free, via Muse Spark)
 
@@ -52,9 +61,9 @@ just probe-dsh    # DeepSeek harness (chat) → auto-translated to model endpoin
 just probe-claude # Claude Code headless (needs a messages-capable model)
 ```
 
-Affinity routing: prefix any path with your key, e.g.
-`POST /ak-team1/v1/responses`. Keys match `ak-[A-Za-z0-9_-]+`; requests
-without a key are bucketed by model alone.
+All requests (including `/v1/models`) must prefix the path with a key from
+`data/keys.yaml`, e.g. `POST /ak-team1/v1/responses`. Keyless, unknown, or
+disabled keys get `401`. Only `/healthz` and the OAuth login flow stay open.
 
 `GET /v1/models` lists the free catalog with limits, effort tiers, routing,
 and tool/streaming support; `just catalog` checks the seed against live Zen.
@@ -78,3 +87,8 @@ and tool/streaming support; `just catalog` checks the seed against live Zen.
 | `VSP_BASE_URL`, `VSP_TOKEN` | — | Warp pool endpoint/credential (future) |
 | `ZEN_GATEWAY_PORT` | `8789` | Listen port |
 | `ZEN_TIMEOUT_S` | `120` | Upstream timeout |
+| `DATA_DIR` | `./data` | Keys/models YAML + usage.json |
+| `GITHUB_CLIENT_ID/SECRET` | — | OAuth app for the admin UI |
+| `GITHUB_REDIRECT_URI` | `http://localhost:8789/api/admin/callback` | OAuth callback |
+| `ADMIN_GITHUB_USERS` | — | Comma-separated admin logins |
+| `ADMIN_SESSION_SECRET` | — | Session cookie signing secret |

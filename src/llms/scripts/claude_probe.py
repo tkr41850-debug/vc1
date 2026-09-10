@@ -7,7 +7,7 @@ from llms.probe.dirs import probe_dirs
 from llms.probe.proc import fail, running_proxy
 
 PORT = int(os.getenv("PROBE_PORT", "8793"))
-BASE_URL = f"http://127.0.0.1:{PORT}"
+BASE_URL = f"http://127.0.0.1:{PORT}/ak-probe"
 MODEL = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
 
 
@@ -15,7 +15,11 @@ def main() -> int:
     try:
         with (
             probe_dirs("claude-probe") as (_home, workspace),
-            running_proxy(PORT, os.getenv("PROXY_LOG", "/tmp/claude-probe-proxy.log")),
+            running_proxy(
+                PORT,
+                os.getenv("PROXY_LOG", "/tmp/claude-probe-proxy.log"),
+                data_dir=os.getenv("PROBE_DATA_DIR", "/tmp/claude-probe-data"),
+            ),
         ):
             env = dict(
                 os.environ,
