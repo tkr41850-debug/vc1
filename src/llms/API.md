@@ -76,6 +76,9 @@ opencode identity set; omitting it yields `MissingSessionID`.
 - Same-dialect responses pass through; cross-dialect responses are translated
   (`stop`↔`completed`, `length`↔`incomplete`, tool calls both ways,
   token usage remapped). Translation failure yields `502`.
+- Token usage carries `cached_tokens` / `reasoning_tokens` breakdowns across
+  dialects and streams. Truncation carries `incomplete_details.reason`
+  (`length`/`max_tokens` normalize to `max_output_tokens`).
 - Streams: `text/event-stream`. Chat streams terminate with `data: [DONE]`;
   Responses streams terminate with `response.completed` (no `[DONE]`); the
   translator synthesizes whichever terminator the ingress client expects.
