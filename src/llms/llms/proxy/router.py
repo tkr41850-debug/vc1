@@ -26,6 +26,22 @@ ENDPOINT_PATH = {
     "messages": "/messages",
 }
 
+FREE_RESPONSES_MODELS = (
+    "muse-spark-1.3-contributor-free",
+    "muse-spark-1.2-contributor-free",
+)
+
+FREE_CHAT_MODELS = (
+    "deepseek-v4-flash-free",
+    "mimo-v2.5-free",
+    "ling-3.0-flash-fin-free",
+    "nemotron-3-ultra-free",
+    "nemotron-3.5-lightning-free",
+    "big-pickle",
+)
+
+FREE_MODELS = FREE_RESPONSES_MODELS + FREE_CHAT_MODELS
+
 
 def normalize_model(model: str) -> str:
     name = model.strip().lower().removeprefix("opencode/")

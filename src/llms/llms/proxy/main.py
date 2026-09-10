@@ -13,6 +13,7 @@ from llms.proxy.middleware import AffinityMiddleware
 from llms.proxy.routes import router as health_router
 from llms.proxy.routes.chat import router as chat_router
 from llms.proxy.routes.messages import router as messages_router
+from llms.proxy.routes.models import router as models_router
 from llms.proxy.routes.responses import router as responses_router
 
 
@@ -40,6 +41,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings or get_settings()
     app.add_middleware(AffinityMiddleware)
     app.include_router(health_router)
+    app.include_router(models_router)
     app.include_router(responses_router)
     app.include_router(chat_router)
     app.include_router(messages_router)

@@ -34,6 +34,7 @@ class Settings:
             "ZEN_DEFAULT_MESSAGES_MODEL", "claude-haiku-4-5"
         )
     )
+    free_models: tuple = field(default_factory=lambda: _free_models())
     allow_client_keys: bool = field(
         default_factory=lambda: os.getenv("ZEN_ALLOW_CLIENT_KEYS", "0") == "1"
     )
@@ -53,6 +54,15 @@ class Settings:
     request_timeout_s: float = field(
         default_factory=lambda: float(os.getenv("ZEN_TIMEOUT_S", "120"))
     )
+
+
+def _free_models() -> tuple:
+    from llms.proxy.router import FREE_MODELS
+
+    override = os.getenv("ZEN_FREE_MODELS", "").strip()
+    if override:
+        return tuple(m.strip() for m in override.split(",") if m.strip())
+    return FREE_MODELS
 
 
 def get_settings() -> Settings:

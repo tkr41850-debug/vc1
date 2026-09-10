@@ -350,3 +350,39 @@ def test_effort_round_trip_chat_responses_chat():
     assert (
         to_zen_chat(from_responses(to_zen_responses(from_chat(original)))) == original
     )
+
+
+def test_assistant_history_uses_output_text():
+    req = from_chat(
+        {
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": "again"},
+            ],
+        }
+    )
+    body = to_zen_responses(req)
+    assert body["input"][0]["content"] == [{"type": "input_text", "text": "hi"}]
+    assert body["input"][1] == {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "hello"}],
+    }
+
+
+def test_from_responses_parses_assistant_output_text():
+    req = from_responses(
+        {
+            "model": "m",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "hello"}],
+                }
+            ],
+        }
+    )
+    assert req.messages[0].blocks == (TextBlock("hello"),)

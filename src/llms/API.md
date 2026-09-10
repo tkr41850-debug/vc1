@@ -22,6 +22,17 @@ POST /{affinity}/v1/messages | /{affinity}/messages
 to normal routing (usually 404). The prefix is stripped before routing; the key
 is carried as request affinity, never forwarded upstream.
 
+## Model catalog
+
+`GET /v1/models | /models` (affinity prefix also accepted) returns the free
+models ready to serve, OpenAI list shape, `owned_by: llms`:
+
+`muse-spark-1.3-contributor-free`, `muse-spark-1.2-contributor-free`,
+`deepseek-v4-flash-free`, `mimo-v2.5-free`, `ling-3.0-flash-fin-free`,
+`nemotron-3-ultra-free`, `nemotron-3.5-lightning-free`, `big-pickle`.
+Override with `ZEN_FREE_MODELS` (comma-separated). Served locally, no
+upstream call.
+
 ## Affinity buckets
 
 `bucket = sha256("{affinity or ''}\x00{model.lower()}") mod NUM_BUCKETS`

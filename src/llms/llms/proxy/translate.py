@@ -125,11 +125,11 @@ def from_chat(body: dict) -> LlmRequest:
     )
 
 
-def _responses_content_to_blocks(content) -> list:
+def _responses_content_to_blocks(content, role: str = "user") -> list:
     blocks: list = []
     for part in content:
         kind = part.get("type")
-        if kind == "input_text":
+        if kind in ("input_text", "output_text"):
             blocks.append(TextBlock(part.get("text", "")))
         elif kind == "input_image":
             blocks.append(ImageBlock(str(part.get("image_url", ""))))
@@ -329,9 +329,10 @@ def to_zen_responses(req: LlmRequest) -> dict:
                     )
             continue
         content = []
+        text_type = "output_text" if msg.role == ROLE_ASSISTANT else "input_text"
         for b in msg.blocks:
             if isinstance(b, TextBlock):
-                content.append({"type": "input_text", "text": b.text})
+                content.append({"type": text_type, "text": b.text})
             elif isinstance(b, ImageBlock):
                 content.append({"type": "input_image", "image_url": b.url})
             elif isinstance(b, ToolCallBlock):
