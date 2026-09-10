@@ -16,6 +16,8 @@ from llms.proxy.routes.messages import router as messages_router
 from llms.proxy.routes.models import router as models_router
 from llms.proxy.routes.responses import router as responses_router
 
+logger = setup_logging()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -23,6 +25,17 @@ async def lifespan(app: FastAPI):
         yield
         return
     settings: Settings = app.state.settings
+    logger.info(
+        "effective settings port=%s buckets=%s egress=%s aliases=%s defaults=%s/%s/%s auth=%s",
+        settings.port,
+        settings.num_buckets,
+        settings.egress_mode,
+        settings.model_aliases or "none",
+        settings.default_model,
+        settings.default_chat_model,
+        settings.default_messages_model,
+        "key" if settings.zen_api_key else "anonymous",
+    )
     async with httpx.AsyncClient(
         base_url=settings.zen_base_url, timeout=settings.request_timeout_s
     ) as client:

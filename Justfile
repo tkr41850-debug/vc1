@@ -10,6 +10,7 @@ default:
 up:
     #!/usr/bin/env bash
     set -u
+    echo "aliases: ${MODEL_ALIASES:-none}"
     if [ -f {{pidfile}} ] && kill -0 "$(cat {{pidfile}})" 2>/dev/null; then kill "$(cat {{pidfile}})"; sleep 1; fi
     pkill -f "uvicorn llms.proxy.main" 2>/dev/null || true; sleep 1
     nohup uv run uvicorn llms.proxy.main:app --host 127.0.0.1 --port {{port}} > {{logfile}} 2>&1 & echo $! > {{pidfile}}
