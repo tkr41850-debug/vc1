@@ -48,6 +48,7 @@ class LlmParams:
     frequency_penalty: float | None = None
     presence_penalty: float | None = None
     reasoning_effort: str | None = None
+    parallel_tool_calls: bool | None = None
 
 
 @dataclass(frozen=True)

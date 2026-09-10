@@ -41,6 +41,7 @@ def _params_from_chat(body: dict) -> LlmParams:
         and thinking.get("type") == "enabled"
     ):
         effort = "medium"
+    parallel = body.get("parallel_tool_calls")
     return LlmParams(
         temperature=body.get("temperature"),
         top_p=body.get("top_p"),
@@ -49,6 +50,7 @@ def _params_from_chat(body: dict) -> LlmParams:
         frequency_penalty=body.get("frequency_penalty"),
         presence_penalty=body.get("presence_penalty"),
         reasoning_effort=str(effort) if effort is not None else None,
+        parallel_tool_calls=None if parallel is None else bool(parallel),
     )
 
 
@@ -211,9 +213,13 @@ def from_responses(body: dict) -> LlmRequest:
             max_tokens=body.get("max_output_tokens"),
             reasoning_effort=(
                 str(body["reasoning"].get("effort"))
-                if isinstance(body.get("reasoning"), dict)
-                and body["reasoning"].get("effort")
+                if isinstance(body.get("reasoning"), dict) and body["reasoning"].get("effort")
                 else None
+            ),
+            parallel_tool_calls=(
+                None
+                if body.get("parallel_tool_calls") is None
+                else bool(body.get("parallel_tool_calls"))
             ),
         ),
     )
@@ -247,6 +253,7 @@ def to_zen_chat(req: LlmRequest) -> dict:
         out: dict = {"role": msg.role}
         parts: list = []
         calls: list = []
+        results: list = []
         for b in msg.blocks:
             if isinstance(b, TextBlock):
                 parts.append({"type": "text", "text": b.text})
@@ -260,15 +267,19 @@ def to_zen_chat(req: LlmRequest) -> dict:
                         "function": {"name": b.name, "arguments": b.arguments},
                     }
                 )
-        if len(parts) == 1 and parts[0]["type"] == "text" and not calls:
+            elif isinstance(b, ToolResultBlock):
+                results.append({"role": "tool", "tool_call_id": b.call_id, "content": b.output})
+        if len(parts) == 1 and parts[0]["type"] == "text" and not calls and not results:
             out["content"] = parts[0]["text"]
-        elif parts:
-            out["content"] = parts
+        elif parts or calls:
+            out["content"] = parts if parts else None
         else:
-            out["content"] = None
-        if calls:
-            out["tool_calls"] = calls
-        body["messages"].append(out)
+            out = None
+        if out is not None:
+            if calls:
+                out["tool_calls"] = calls
+            body["messages"].append(out)
+        body["messages"].extend(results)
     if req.tools:
         body["tools"] = [
             {
@@ -298,6 +309,8 @@ def to_zen_chat(req: LlmRequest) -> dict:
         body["stop"] = params.stop
     if params.reasoning_effort is not None:
         body["reasoning_effort"] = params.reasoning_effort
+    if params.parallel_tool_calls is not None:
+        body["parallel_tool_calls"] = params.parallel_tool_calls
     if req.stream:
         body["stream"] = True
     return body
@@ -344,6 +357,14 @@ def to_zen_responses(req: LlmRequest) -> dict:
                         "arguments": b.arguments,
                     }
                 )
+            elif isinstance(b, ToolResultBlock):
+                body["input"].append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": b.call_id,
+                        "output": b.output,
+                    }
+                )
         if content:
             body["input"].append(
                 {"type": "message", "role": msg.role, "content": content}
@@ -368,6 +389,8 @@ def to_zen_responses(req: LlmRequest) -> dict:
         body["max_output_tokens"] = req.params.max_tokens
     if req.params.reasoning_effort is not None:
         body["reasoning"] = {"effort": req.params.reasoning_effort}
+    if req.params.parallel_tool_calls is not None:
+        body["parallel_tool_calls"] = req.params.parallel_tool_calls
     if req.stream:
         body["stream"] = True
     return body

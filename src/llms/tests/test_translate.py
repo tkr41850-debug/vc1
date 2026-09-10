@@ -17,6 +17,7 @@ from llms.proxy.ir import (
 )
 from llms.proxy.translate import (
     from_chat,
+    from_messages,
     from_responses,
     to_zen_chat,
     to_zen_responses,
@@ -386,3 +387,64 @@ def test_from_responses_parses_assistant_output_text():
         }
     )
     assert req.messages[0].blocks == (TextBlock("hello"),)
+
+
+def test_tool_result_in_user_message_survives_to_responses():
+    req = from_messages(
+        {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "c1", "name": "bash", "input": {}}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "ok"}],
+                },
+            ],
+        }
+    )
+    body = to_zen_responses(req)
+    kinds = [i["type"] for i in body["input"]]
+    assert kinds == ["function_call", "function_call_output"]
+    assert body["input"][1] == {"type": "function_call_output", "call_id": "c1", "output": "ok"}
+
+
+def test_tool_result_in_user_message_survives_to_chat():
+    req = from_messages(
+        {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "done"},
+                        {"type": "tool_result", "tool_use_id": "c1", "content": "ok"},
+                    ],
+                },
+            ],
+        }
+    )
+    body = to_zen_chat(req)
+    assert body["messages"][0] == {
+        "role": "user",
+        "content": [{"type": "text", "text": "done"}],
+    }
+    assert body["messages"][1] == {"role": "tool", "tool_call_id": "c1", "content": "ok"}
+
+
+def test_results_only_user_message_emits_only_tool_messages():
+    req = from_messages(
+        {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "ok"}],
+                },
+            ],
+        }
+    )
+    body = to_zen_chat(req)
+    assert body["messages"] == [{"role": "tool", "tool_call_id": "c1", "content": "ok"}]
