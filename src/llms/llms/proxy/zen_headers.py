@@ -17,6 +17,9 @@ def new_request_id() -> str:
 
 
 def build_zen_headers(settings: Settings, incoming_auth: str | None) -> dict[str, str]:
+    # The client's sk- secret key must never reach the upstream gateway.
+    # Only the operator ZEN_API_KEY (or an explicitly allowed non-sk- client
+    # bearer) authenticates upstream.
     api_key = settings.zen_api_key
     if (
         not api_key
@@ -24,7 +27,9 @@ def build_zen_headers(settings: Settings, incoming_auth: str | None) -> dict[str
         and incoming_auth
         and incoming_auth.lower().startswith("bearer ")
     ):
-        api_key = incoming_auth.split(" ", 1)[1].strip()
+        presented = incoming_auth.split(" ", 1)[1].strip()
+        if not presented.startswith("sk-"):
+            api_key = presented
     headers = {
         "User-Agent": f"opencode/{settings.opencode_version}",
         "x-opencode-client": settings.opencode_client,

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import urllib.parse
+from pathlib import Path
 
 import httpx
 from fastapi import HTTPException, Request
 
 from llms.proxy.config import Settings
 from llms.proxy.logging import setup_logging
+from llms.proxy.store import Store, is_secret_key
 
 logger = setup_logging()
 
@@ -63,6 +65,42 @@ def session_login(request: Request, settings: Settings) -> str | None:
     if login not in settings.admin_github_users:
         return None
     return login
+
+
+def presented_secret_key(request: Request) -> str | None:
+    """The sk- secret key presented on this request, or None.
+
+    Accepted on `Authorization: Bearer sk-...` (OpenAI-style clients,
+    including the OpenAI SDK with api_key=) or `x-api-key: sk-...`
+    (Anthropic-style clients, e.g. Claude Code). Values that do not start
+    with sk- are never secret keys — ak- affinity in particular is not auth.
+    """
+    auth = request.headers.get("authorization", "")
+    scheme, _, value = auth.partition(" ")
+    if scheme.lower() == "bearer" and value.strip():
+        value = value.strip()
+        return value if is_secret_key(value) else None
+    api_key = request.headers.get("x-api-key", "").strip()
+    if api_key:
+        return api_key if is_secret_key(api_key) else None
+    return None
+
+
+def request_secret_key(request: Request, settings: Settings) -> str | None:
+    """The sk- secret key for this request, or None if missing/unknown/disabled.
+
+    The sk- key lives only on the Authorization header. It is authenticated
+    here, never forwarded upstream (see zen_headers) and never mixed with the
+    ak- affinity prefix (see middleware).
+    """
+    presented = presented_secret_key(request)
+    if presented is None:
+        return None
+    store = Store(data_dir=Path(settings.data_dir))
+    found = store.find_key(presented)
+    if found is None or not found.enabled:
+        return None
+    return found.key
 
 
 def require_admin(request: Request) -> str:

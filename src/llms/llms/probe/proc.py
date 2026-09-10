@@ -25,11 +25,11 @@ def running_proxy(port: int, log_path: str | None = None, data_dir: str | None =
                 keys = yaml.safe_load(f) or []
         if not any(
             isinstance(k, dict)
-            and k.get("key") == "ak-probe"
+            and k.get("key") == "sk-probe"
             and k.get("enabled", True)
             for k in keys
         ):
-            keys.append({"key": "ak-probe", "label": "probe", "enabled": True})
+            keys.append({"key": "sk-probe", "label": "probe", "enabled": True})
             with open(keys_path, "w") as f:
                 yaml.safe_dump(keys, f, sort_keys=False)
 

@@ -147,7 +147,8 @@ def mock_upstream(upstream_seen):
     yield client, upstream_seen
 
 
-TEST_KEY = "ak-test"
+TEST_SECRET = "sk-test"
+TEST_HEADERS = {"Authorization": f"Bearer {TEST_SECRET}"}
 
 
 def build_app_client(settings, mock_client, seed_key: str | None = None):
@@ -169,7 +170,7 @@ def build_app_client(settings, mock_client, seed_key: str | None = None):
 def app_client(mock_upstream, tmp_path):
     client, seen = mock_upstream
     with build_app_client(
-        make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_KEY
+        make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
     ) as tc:
         yield tc, seen
 
@@ -180,7 +181,7 @@ def admin_client(mock_upstream, tmp_path):
 
     client, seen = mock_upstream
     with build_app_client(
-        make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_KEY
+        make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
     ) as tc:
         tc.app.dependency_overrides[require_admin] = lambda: "test-admin"
         yield tc, seen

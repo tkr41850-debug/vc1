@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from llms.proxy.auth import require_admin
 from llms.proxy.config import Settings, settings_from_app
-from llms.proxy.store import ApiKey, ModelEntry, Store
+from llms.proxy.store import ApiKey, ModelEntry, Store, is_secret_key
 
 router = APIRouter()
 
@@ -81,6 +81,11 @@ async def create_key(
 ):
     if not body.key:
         raise HTTPException(status_code=400, detail="key is required")
+    if not is_secret_key(body.key):
+        raise HTTPException(
+            status_code=400,
+            detail="api keys must start with sk- (ak- is affinity, not auth)",
+        )
     store = _store(settings)
     keys = store.load_keys()
     if any(k.key == body.key for k in keys):

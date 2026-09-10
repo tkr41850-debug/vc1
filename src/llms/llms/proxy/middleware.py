@@ -7,8 +7,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from llms.proxy.affinity import parse_affinity_prefix
-from llms.proxy.auth import require_admin, session_login
-from llms.proxy.store import Store
+from llms.proxy.auth import request_secret_key, require_admin, session_login
 
 OPEN_PATHS = {"/healthz"}
 OPEN_ADMIN_PREFIXES = (
@@ -41,8 +40,11 @@ def is_ui_path(path: str) -> bool:
 
 class GateMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # ak- affinity lives in the path: unauthenticated, hashed onto a bucket
+        # so the bucket can pick an egress pool. It is never an API key.
         affinity, stripped = parse_affinity_prefix(request.url.path)
         request.state.affinity = affinity
+        request.state.secret_key = None
         settings = request.app.state.settings
         path = request.url.path
 
@@ -77,13 +79,17 @@ class GateMiddleware(BaseHTTPMiddleware):
                 return RedirectResponse(url="/api/admin/login", status_code=302)
             return await call_next(request)
 
-        store = Store(data_dir=Path(settings.data_dir))
-        if affinity is None or not store.key_allowed(affinity):
+        # sk- secret keys live on the Authorization header. The ak- affinity
+        # prefix (when present) is unauthenticated bucket routing only.
+        secret_key = request_secret_key(request, settings)
+        if secret_key is None:
             return JSONResponse(
                 status_code=401,
-                content={"error": {"message": "unknown or disabled API key"}},
+                content={"error": {"message": "missing or invalid secret key"}},
             )
-        request.scope["path"] = stripped
+        request.state.secret_key = secret_key
+        if affinity is not None:
+            request.scope["path"] = stripped
         return await call_next(request)
 
 

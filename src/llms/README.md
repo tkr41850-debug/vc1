@@ -28,17 +28,20 @@ and models; stored in `data/keys.yaml` / `data/models.yaml` at the repo root.
 
 ## Claude Code (free, via Muse Spark)
 
-Client side (`~/.bashrc`, then `source ~/.bashrc`):
+Client side (`~/.bashrc`, then `source ~/.bashrc`; create the `sk-` key in
+the admin UI first — needs `just up` running):
 
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8789"
-export ANTHROPIC_API_KEY="dummy"
+export ANTHROPIC_API_KEY="sk-your-key"
 export ANTHROPIC_MODEL="muse-spark-1.3-contributor-free"
 ```
 
 `ANTHROPIC_MODEL` matters: plain `claude --model <id>` gets overridden by
-Claude's own default, the env var sticks. The key value is ignored; llms
-authenticates with its own `ZEN_API_KEY` or the anonymous free tier.
+Claude's own default, the env var sticks. The `sk-` secret authenticates you
+to the gateway (usage is attributed to it); the gateway itself authenticates
+upstream with its own `ZEN_API_KEY` or the anonymous free tier. Prefixing the
+path with `ak-<affinity>` is optional and only picks the egress pool.
 
 Server side (same file is fine on the same machine — `just up` inherits it;
 re-run `just up` afterwards so the server picks it up):
@@ -61,9 +64,13 @@ just probe-dsh    # DeepSeek harness (chat) → auto-translated to model endpoin
 just probe-claude # Claude Code headless (needs a messages-capable model)
 ```
 
-All requests (including `/v1/models`) must prefix the path with a key from
-`data/keys.yaml`, e.g. `POST /ak-team1/v1/responses`. Keyless, unknown, or
-disabled keys get `401`. Only `/healthz` and the OAuth login flow stay open.
+All requests (including `/v1/models`) must carry an `sk-` secret key from
+`data/keys.yaml` on the header (`Authorization: Bearer sk-...` or
+`x-api-key`), e.g. `curl -H "Authorization: Bearer sk-team1"
+localhost:8789/v1/models`. Missing, unknown, or disabled secrets get `401`.
+Only `/healthz` and the OAuth login flow stay open. An optional `ak-`
+affinity path prefix (`POST /ak-team1/v1/responses`) picks the egress pool
+but never authenticates.
 
 `GET /v1/models` lists the free catalog with limits, effort tiers, routing,
 and tool/streaming support; `just catalog` checks the seed against live Zen.

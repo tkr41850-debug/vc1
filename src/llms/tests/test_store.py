@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from llms.proxy.store import ApiKey, ModelEntry, Store
+from llms.proxy.store import ApiKey, ModelEntry, Store, is_secret_key
+
+
+def test_is_secret_key():
+    assert is_secret_key("sk-abc") is True
+    assert is_secret_key("ak-abc") is False
+    assert is_secret_key("Bearer sk-abc") is False
+    assert is_secret_key("") is False
 
 
 def test_missing_keys_file_reads_empty(tmp_path: Path):
@@ -13,10 +20,10 @@ def test_missing_keys_file_reads_empty(tmp_path: Path):
 def test_key_roundtrip(tmp_path: Path):
     store = Store(data_dir=tmp_path)
     store.save_keys(
-        [ApiKey(key="ak-team1", label="Team 1"), ApiKey(key="ak-off", enabled=False)]
+        [ApiKey(key="sk-team1", label="Team 1"), ApiKey(key="sk-off", enabled=False)]
     )
     keys = store.load_keys()
-    assert [k.key for k in keys] == ["ak-team1", "ak-off"]
+    assert [k.key for k in keys] == ["sk-team1", "sk-off"]
     assert keys[0].label == "Team 1"
     assert keys[0].enabled is True
     assert keys[1].enabled is False
@@ -24,10 +31,10 @@ def test_key_roundtrip(tmp_path: Path):
 
 def test_key_allowed(tmp_path: Path):
     store = Store(data_dir=tmp_path)
-    store.save_keys([ApiKey(key="ak-on"), ApiKey(key="ak-off", enabled=False)])
-    assert store.key_allowed("ak-on") is True
-    assert store.key_allowed("ak-off") is False
-    assert store.key_allowed("ak-missing") is False
+    store.save_keys([ApiKey(key="sk-on"), ApiKey(key="sk-off", enabled=False)])
+    assert store.key_allowed("sk-on") is True
+    assert store.key_allowed("sk-off") is False
+    assert store.key_allowed("sk-missing") is False
 
 
 def test_missing_models_file_seeds_free_models(tmp_path: Path):

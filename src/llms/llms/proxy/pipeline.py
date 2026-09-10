@@ -152,11 +152,11 @@ def _record_usage(
     from llms.proxy.usage import extract_usage
 
     tracker = getattr(request.app.state, "usage", None)
-    affinity = getattr(request.state, "affinity", None)
-    if tracker is None or affinity is None:
+    secret_key = getattr(request.state, "secret_key", None)
+    if tracker is None or secret_key is None:
         return
     if isinstance(response, StreamingResponse):
-        tracker.record(affinity, model, None, None, None, None)
+        tracker.record(secret_key, model, None, None, None, None)
         return
     if not isinstance(response, JSONResponse) or response.status_code >= 400:
         return
@@ -170,5 +170,5 @@ def _record_usage(
         ingress, payload
     )
     tracker.record(
-        affinity, model, in_tokens, out_tokens, cached_tokens, reasoning_tokens
+        secret_key, model, in_tokens, out_tokens, cached_tokens, reasoning_tokens
     )

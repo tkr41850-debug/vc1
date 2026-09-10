@@ -71,6 +71,9 @@ class FakeEgress:
         return None
 
 
+SECRET_HEADERS = {"Authorization": "Bearer sk-team1"}
+
+
 @pytest.fixture()
 def fake_world(tmp_path_factory):
     calls: list[int] = []
@@ -83,13 +86,17 @@ def fake_world(tmp_path_factory):
     from llms.proxy.store import ApiKey, Store
 
     data_dir = pathlib.Path(tempfile.mkdtemp())
-    Store(data_dir=data_dir).save_keys([ApiKey(key="ak-team1")])
+    Store(data_dir=data_dir).save_keys([ApiKey(key="sk-team1")])
     settings = make_settings(data_dir=str(data_dir))
     app = create_app(settings)
     app.state.egress = egress
     app.state.bucket_table = table
     with TestClient(app) as tc:
         yield tc, table, calls
+
+
+def _post(tc, path, body):
+    return tc.post(path, json=body, headers=SECRET_HEADERS)
 
 
 def _model_in_slot(slot: int, prefix: str = "probe-model") -> str:
@@ -112,11 +119,11 @@ def test_ratelimit_fails_fast_and_rebalances(fake_world):
     tc, table, calls = fake_world
     model = _model_in_slot(0)
     bucket = bucket_for("ak-team1", model, NUM_BUCKETS)
-    first = tc.post("/ak-team1/v1/responses", json={"model": model, "input": "hi"})
+    first = _post(tc, "/ak-team1/v1/responses", {"model": model, "input": "hi"})
     assert first.status_code == 429
     assert first.headers.get("retry-after") == "1"
     assert table.slot_for(bucket) == 1
-    second = tc.post("/ak-team1/v1/responses", json={"model": model, "input": "hi"})
+    second = _post(tc, "/ak-team1/v1/responses", {"model": model, "input": "hi"})
     assert second.status_code == 200
     assert calls == [0, 1]
 
@@ -126,7 +133,7 @@ def test_affinity_prefix_routes_and_buckets_independently(fake_world):
     model = _model_in_affinity_slot("ak-team1", 1)
     plain_bucket = bucket_for(None, model, NUM_BUCKETS)
     aff_bucket = bucket_for("ak-team1", model, NUM_BUCKETS)
-    r = tc.post("/ak-team1/v1/responses", json={"model": model, "input": "hi"})
+    r = _post(tc, "/ak-team1/v1/responses", {"model": model, "input": "hi"})
     assert r.status_code == 200
     assert calls == [1]
     assert table.slot_for(aff_bucket) == 1
@@ -137,13 +144,13 @@ def test_stream_ratelimit_rebalances_next_request(fake_world):
     tc, table, calls = fake_world
     model = _model_in_slot(0)
     bucket = bucket_for("ak-team1", model, NUM_BUCKETS)
-    first = tc.post(
-        "/ak-team1/v1/responses", json={"model": model, "input": "hi", "stream": True}
+    first = _post(
+        tc, "/ak-team1/v1/responses", {"model": model, "input": "hi", "stream": True}
     )
     assert first.status_code == 429
     assert table.slot_for(bucket) == 1
-    second = tc.post(
-        "/ak-team1/v1/responses", json={"model": model, "input": "hi", "stream": True}
+    second = _post(
+        tc, "/ak-team1/v1/responses", {"model": model, "input": "hi", "stream": True}
     )
     assert second.status_code == 200
     assert calls == [0, 1]

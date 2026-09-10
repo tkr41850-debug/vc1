@@ -27,6 +27,10 @@ export default function KeysTab({
       setError("key is required");
       return;
     }
+    if (!form.key.trim().startsWith("sk-")) {
+      setError("secret keys must start with sk- (ak- is affinity, not auth)");
+      return;
+    }
     setError("");
     try {
       await api.createKey({ key: form.key.trim(), label: form.label, enabled: true });
@@ -62,12 +66,13 @@ export default function KeysTab({
     <div>
       <div className="mb-4 flex flex-wrap items-end gap-2">
         <label className="flex flex-col text-sm">
-          Key
+          Secret key
           <input
             className="rounded border px-2 py-1 font-mono"
-            placeholder="ak-team1"
+            placeholder="sk-team1"
             value={form.key}
             onChange={(e) => setForm({ ...form, key: e.target.value })}
+            title="sk- secret, sent on the Authorization header. ak- is affinity, not auth."
           />
         </label>
         <label className="flex flex-col text-sm">

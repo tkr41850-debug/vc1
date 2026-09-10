@@ -105,22 +105,25 @@ def test_tracker_persists_roundtrip(tmp_path):
     assert t2.snapshot() == t.snapshot()
 
 
-def _post(tc, key, path, body):
-    return tc.post(f"/{key}/{path}", json=body)
+def _post(tc, affinity, path, body):
+    from tests.conftest import TEST_HEADERS
+
+    prefix = f"/{affinity}" if affinity else ""
+    return tc.post(f"{prefix}/{path}", json=body, headers=TEST_HEADERS)
 
 
 def test_usage_recorded_for_responses(app_client):
-    from tests.conftest import TEST_KEY
+    from tests.conftest import TEST_SECRET
 
     tc, _ = app_client
     r = _post(
         tc,
-        TEST_KEY,
+        None,
         "v1/responses",
         {"model": "muse-spark-1.3-contributor-free", "input": "hi"},
     )
     assert r.status_code == 200
-    usage = tc.app.state.usage.snapshot()["keys"][TEST_KEY]
+    usage = tc.app.state.usage.snapshot()["keys"][TEST_SECRET]
     assert usage["requests"] == 1
     assert usage["input_tokens"] == 4
     assert usage["output_tokens"] == 2
@@ -129,13 +132,13 @@ def test_usage_recorded_for_responses(app_client):
 
 
 def test_usage_recorded_for_chat_and_messages(app_client):
-    from tests.conftest import TEST_KEY
+    from tests.conftest import TEST_SECRET
 
     tc, _ = app_client
     assert (
         _post(
             tc,
-            TEST_KEY,
+            None,
             "v1/chat/completions",
             {
                 "model": "mimo-v2.5-free",
@@ -147,7 +150,7 @@ def test_usage_recorded_for_chat_and_messages(app_client):
     assert (
         _post(
             tc,
-            TEST_KEY,
+            None,
             "v1/messages",
             {
                 "model": "claude-haiku-4-5",
@@ -157,32 +160,62 @@ def test_usage_recorded_for_chat_and_messages(app_client):
         ).status_code
         == 200
     )
-    snap = tc.app.state.usage.snapshot()["keys"][TEST_KEY]
+    snap = tc.app.state.usage.snapshot()["keys"][TEST_SECRET]
     assert snap["requests"] == 2
     assert snap["input_tokens"] == 8
     assert snap["output_tokens"] == 4
 
 
 def test_stream_counts_request_without_tokens(app_client, mock_upstream):
-    from tests.conftest import TEST_KEY
+    from tests.conftest import TEST_SECRET
 
     tc, _ = app_client
     _, seen_dict = mock_upstream
     seen_dict["mode"] = "stream"
     r = _post(
         tc,
-        TEST_KEY,
+        None,
         "v1/responses",
         {"model": "muse-spark-1.3-contributor-free", "input": "hi", "stream": True},
     )
     assert r.status_code == 200
-    snap = tc.app.state.usage.snapshot()["keys"][TEST_KEY]
+    snap = tc.app.state.usage.snapshot()["keys"][TEST_SECRET]
     assert snap["requests"] == 1
     assert snap["input_tokens"] == 0
 
 
+def test_usage_attributed_to_secret_not_affinity(app_client):
+    # Two requests with different unauthenticated ak- prefixes but the same
+    # sk- header aggregate under one usage key.
+    from tests.conftest import TEST_SECRET
+
+    tc, _ = app_client
+    assert _post(tc, "ak-a", "v1/responses", {"input": "hi"}).status_code == 200
+    assert _post(tc, "ak-b", "v1/responses", {"input": "hi"}).status_code == 200
+    snap = tc.app.state.usage.snapshot()["keys"]
+    assert list(snap) == [TEST_SECRET]
+    assert snap[TEST_SECRET]["requests"] == 2
+
+
 def test_rejected_requests_record_nothing(app_client):
     tc, _ = app_client
+    # ak- prefix alone is not auth; wrong-scheme and unknown sk- also 401
     assert tc.post("/ak-nope/v1/responses", json={"input": "hi"}).status_code == 401
     assert tc.post("/v1/responses", json={"input": "hi"}).status_code == 401
+    assert (
+        tc.post(
+            "/v1/responses",
+            json={"input": "hi"},
+            headers={"Authorization": "Bearer ak-nope"},
+        ).status_code
+        == 401
+    )
+    assert (
+        tc.post(
+            "/v1/responses",
+            json={"input": "hi"},
+            headers={"Authorization": "Bearer sk-nope"},
+        ).status_code
+        == 401
+    )
     assert tc.app.state.usage.snapshot() == {"keys": {}}

@@ -3,30 +3,47 @@
 Local LLM gateway. Accepts OpenAI Responses, OpenAI chat, and Anthropic Messages
 dialects; routes each model to its preferred Zen endpoint, translating as needed.
 
+## Auth vs affinity (never mixed)
+
+Two different key namespaces, two different transports:
+
+- `sk-...` — the API secret key. Lives **only** on the request header:
+  `Authorization: Bearer sk-...` (OpenAI-style) or `x-api-key: sk-...`
+  (Anthropic-style). Must exist and be enabled in `data/keys.yaml`;
+  otherwise `401 {error.message: "missing or invalid secret key"}`.
+  Authenticated here, attributed in usage, **never forwarded upstream**.
+- `ak-...` — the affinity tag. Lives **only** in the request path as an
+  optional first segment (`/{affinity}/...`, matching `ak-[A-Za-z0-9_-]+`).
+  Unauthenticated: it is hashed with the model into a bucket, and the bucket
+  picks the egress pool. Never auth, never billed, never forwarded upstream.
+
 ## Ingress paths
 
-Every request except `/healthz` and the OAuth login flow must carry a key
-prefix from `data/keys.yaml`:
+Every request except `/healthz` and the OAuth login flow must carry an
+`sk-` secret key on the header. The `ak-` affinity prefix is optional
+(bucket routing only):
 
 ```
 GET  /healthz
 GET  /api/admin/login | /api/admin/callback | POST /api/admin/logout
 
-POST /{key}/v1/responses | /{key}/responses
-POST /{key}/v1/chat/completions | /{key}/chat/completions
-POST /{key}/v1/messages | /{key}/messages
-GET  /{key}/v1/models | /{key}/models
+POST /v1/responses | /responses                    (Authorization: Bearer sk-...)
+POST /v1/chat/completions | /chat/completions      (Authorization: Bearer sk-...)
+POST /v1/messages | /messages                      (Authorization: Bearer sk-...)
+GET  /v1/models | /models                          (Authorization: Bearer sk-...)
+
+# same paths with optional unauthenticated affinity prefix:
+POST /{affinity}/v1/responses | ...
 ```
 
-`{key}` matches `ak-[A-Za-z0-9_-]+` and must exist and be enabled in
-`data/keys.yaml`; otherwise `401 {error.message: "unknown or disabled API
-key"}`. The prefix is stripped before routing; the key is carried as request
-affinity, never forwarded upstream.
+The affinity prefix is stripped before routing; usage is attributed to the
+`sk-` key, so different affinities sharing one secret aggregate together.
 
 ## Model catalog
 
-`GET /{key}/v1/models | /{key}/models` returns the enabled models from
-`data/models.yaml`, OpenAI list shape. Each entry carries `id`, `object`,
+`GET /v1/models | /models` (secret-key header required, affinity prefix
+optional) returns the enabled models from `data/models.yaml`, OpenAI list
+shape. Each entry carries `id`, `object`,
 `created`, `owned_by: llms`, plus `zen_endpoint` (model's native Zen path),
 `context_window` / `max_output_tokens` (`null` = unverified),
 `reasoning_effort` tiers (or `null`) with `thinking_toggle` for on/off
@@ -40,7 +57,7 @@ seed against the live Zen free set. Served locally, no upstream call.
 
 ```
 GET    /api/admin/keys            keys with live usage aggregates
-POST   /api/admin/keys            {key, label?, enabled?} -> 201
+POST   /api/admin/keys            {key: sk-..., label?, enabled?} -> 201 (ak- rejected: 400)
 PUT    /api/admin/keys/{key}      {label?, enabled?}
 DELETE /api/admin/keys/{key}
 GET    /api/admin/models          [{id, label, enabled}]
@@ -57,7 +74,7 @@ The admin UI (`/`, same port) 302s to login when unauthenticated.
 
 ## Usage aggregation
 
-In-memory per-key counters (`requests`, `input_tokens`, `output_tokens`,
+In-memory per-`sk-` counters (`requests`, `input_tokens`, `output_tokens`,
 `cached_tokens`, `reasoning_tokens`, per-model breakdown), recorded from
 upstream `usage` payloads for all three dialects (streams count the request,
 tokens `None`). Cache detail sources: responses/chat `*_tokens_details`
@@ -69,8 +86,9 @@ to 0).
 
 ## Affinity buckets
 
-`bucket = sha256("{key}\x00{model.lower()}") mod NUM_BUCKETS`
-(`NUM_BUCKETS`, default 1024). Every gated request carries its key as affinity.
+`bucket = sha256("{affinity or ''}\x00{model.lower()}") mod NUM_BUCKETS`
+(`NUM_BUCKETS`, default 1024). Affinity is the optional unauthenticated
+`ak-` path prefix (empty when absent); traffic still spreads by model.
 Buckets map to egress slots
 (`bucket % NUM_SLOTS` initially); on a rate-limit signal the bucket advances
 to the next slot with cooldown `max(SLOT_COOLDOWN_S, Retry-After)`.

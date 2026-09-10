@@ -9,6 +9,13 @@ KEYS_FILE = "keys.yaml"
 MODELS_FILE = "models.yaml"
 
 
+SECRET_PREFIX = "sk-"
+
+
+def is_secret_key(value: str) -> bool:
+    return value.startswith(SECRET_PREFIX)
+
+
 @dataclass
 class ApiKey:
     key: str

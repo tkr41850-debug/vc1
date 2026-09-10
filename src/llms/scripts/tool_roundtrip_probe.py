@@ -10,6 +10,7 @@ from llms.probe.proc import fail, running_proxy
 PORT = int(os.getenv("PROBE_PORT", "8793"))
 BASE_URL = f"http://127.0.0.1:{PORT}"
 MODEL = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
+PROBE_SECRET = os.getenv("PROBE_SECRET", "sk-probe")
 
 
 def main() -> int:
@@ -58,7 +59,12 @@ def main() -> int:
                 ],
                 "max_tokens": 512,
             }
-            r = httpx.post(f"{BASE_URL}/ak-probe/v1/messages", json=body, timeout=120.0)
+            r = httpx.post(
+                f"{BASE_URL}/v1/messages",
+                json=body,
+                headers={"Authorization": f"Bearer {PROBE_SECRET}"},
+                timeout=120.0,
+            )
             print(f"status={r.status_code} stop={r.json().get('stop_reason')}")
             if r.status_code != 200:
                 return fail(f"tool roundtrip failed: {r.text[:500]}")

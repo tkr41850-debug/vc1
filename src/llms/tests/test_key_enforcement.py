@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from llms.proxy.store import Store
+from tests.conftest import TEST_HEADERS, TEST_SECRET
 
 
-def test_healthz_open_without_key(app_client):
+def test_healthz_open_without_secret(app_client):
     tc, _ = app_client
     assert tc.get("/healthz").status_code == 200
 
 
-def test_keyless_ingress_rejected(app_client):
+def test_missing_secret_rejected_on_all_ingress(app_client):
     tc, _ = app_client
     for path in (
         "/v1/responses",
@@ -21,45 +22,66 @@ def test_keyless_ingress_rejected(app_client):
         kwargs = {"json": {"input": "hi"}} if "models" not in path else {}
         r = tc.get(path, **kwargs) if "models" in path else tc.post(path, **kwargs)
         assert r.status_code == 401, path
-        assert r.json()["error"]["message"] == "unknown or disabled API key"
+        assert r.json()["error"]["message"] == "missing or invalid secret key"
 
 
-def test_unknown_key_rejected(app_client):
+def test_affinity_prefix_alone_is_not_auth(app_client):
+    # ak- in the path is unauthenticated bucket routing only.
     tc, _ = app_client
-    r = tc.post("/ak-nope/v1/responses", json={"input": "hi"})
+    r = tc.post("/ak-team1/v1/responses", json={"input": "hi"})
+    assert r.status_code == 401
+    assert r.json()["error"]["message"] == "missing or invalid secret key"
+
+
+def test_wrong_scheme_and_unknown_secret_rejected(app_client):
+    tc, _ = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={"input": "hi"},
+        headers={"Authorization": "Bearer ak-team1"},
+    )
+    assert r.status_code == 401
+    r = tc.post(
+        "/v1/responses",
+        json={"input": "hi"},
+        headers={"Authorization": "Bearer sk-nope"},
+    )
     assert r.status_code == 401
 
 
-def test_disabled_key_rejected(app_client, tmp_path):
+def test_disabled_secret_rejected(app_client, tmp_path):
     tc, _ = app_client
     store = Store(data_dir=tmp_path)
     keys = store.load_keys()
     for k in keys:
-        if k.key == "ak-test":
+        if k.key == TEST_SECRET:
             k.enabled = False
     store.save_keys(keys)
-    assert tc.post("/ak-test/v1/responses", json={"input": "hi"}).status_code == 401
-
-
-def test_known_key_forwards(app_client, mock_upstream):
-    from tests.conftest import TEST_KEY
-
-    tc, _seen = app_client
-    _, seen_dict = mock_upstream
-    r = tc.post(
-        f"/{TEST_KEY}/v1/responses",
-        json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+    assert (
+        tc.post("/v1/responses", json={"input": "hi"}, headers=TEST_HEADERS).status_code
+        == 401
     )
-    assert r.status_code == 200
-    assert seen_dict["url"].endswith("/responses")
 
 
-def test_models_requires_key_but_lists_for_known_key(app_client):
-    from tests.conftest import TEST_KEY
+def test_secret_header_forwards_with_and_without_affinity(app_client, mock_upstream):
+    tc, _ = app_client
+    _, seen_dict = mock_upstream
+    for path in ("/v1/responses", "/ak-team1/v1/responses"):
+        r = tc.post(
+            path,
+            json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            headers=TEST_HEADERS,
+        )
+        assert r.status_code == 200, path
+        assert seen_dict["url"].endswith("/responses")
+    # the sk- secret never reaches the upstream gateway
+    assert "authorization" not in seen_dict["headers"]
 
+
+def test_models_requires_secret_but_lists_for_known_secret(app_client):
     tc, _ = app_client
     assert tc.get("/v1/models").status_code == 401
-    r = tc.get(f"/{TEST_KEY}/v1/models")
+    r = tc.get("/v1/models", headers=TEST_HEADERS)
     assert r.status_code == 200
     assert r.json()["object"] == "list"
 

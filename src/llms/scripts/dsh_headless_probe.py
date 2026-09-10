@@ -7,8 +7,9 @@ from llms.probe.dirs import probe_dirs
 from llms.probe.proc import fail, running_proxy
 
 PORT = int(os.getenv("PROBE_PORT", "8793"))
-BASE_URL = f"http://127.0.0.1:{PORT}/ak-probe/v1"
+BASE_URL = f"http://127.0.0.1:{PORT}/v1"
 MODEL = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
+PROBE_SECRET = os.getenv("PROBE_SECRET", "sk-probe")
 
 
 def main() -> int:
@@ -31,7 +32,7 @@ def main() -> int:
                 dsh_home=str(home),
                 profile="sdk-minimal",
                 base_url=BASE_URL,
-                api_key="dummy",
+                api_key=PROBE_SECRET,
             )
             with DeepSeekHarness(config) as harness:
                 session = f"probe-{uuid.uuid4().hex[:8]}"
