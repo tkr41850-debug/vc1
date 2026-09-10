@@ -41,6 +41,10 @@ to the next slot with cooldown `max(SLOT_COOLDOWN_S, Retry-After)`.
   `ZEN_API_KEY` is configured **and** `ZEN_ALLOW_CLIENT_KEYS=1`. Otherwise
   the operator credential (or anonymous free tier) wins; harness dummy keys
   are never forwarded.
+- Reasoning effort is translated, not dropped:
+  `responses.reasoning.effort` ↔ `chat.reasoning_effort` (or
+  `thinking: {type: enabled}` → `medium`) ↔ `messages.thinking`
+  (budget ↔ tier via low 1024 / medium 4096 / high 16384).
 
 ## Upstream headers (rebuilt per request, never passthrough)
 

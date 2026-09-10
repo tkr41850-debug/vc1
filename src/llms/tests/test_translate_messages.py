@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from llms.proxy.translate import from_messages, to_zen_messages
+from llms.proxy.translate import (
+    from_chat,
+    from_messages,
+    from_responses,
+    to_zen_messages,
+    to_zen_responses,
+)
 
 
 def test_from_messages_text_and_system():
@@ -116,3 +122,33 @@ def test_to_zen_messages_defaults_max_tokens():
         from_messages({"model": "m", "messages": [{"role": "user", "content": "hi"}]})
     )
     assert body["max_tokens"] == 1024
+
+
+def test_messages_thinking_budget_maps_to_effort():
+    req = from_messages(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "enabled", "budget_tokens": 16384},
+        }
+    )
+    assert req.params.reasoning_effort == "high"
+
+
+def test_effort_maps_to_thinking_budget():
+    body = to_zen_messages(
+        from_chat({"model": "m", "messages": [], "reasoning_effort": "low"})
+    )
+    assert body["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+
+
+def test_effort_round_trip_messages_responses_messages():
+    req = from_messages(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "enabled", "budget_tokens": 4096},
+        }
+    )
+    rebuilt = to_zen_messages(from_responses(to_zen_responses(req)))
+    assert rebuilt["thinking"] == {"type": "enabled", "budget_tokens": 4096}

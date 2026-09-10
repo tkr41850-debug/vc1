@@ -322,3 +322,31 @@ def test_chat_responses_chat_stable():
     assert (
         to_zen_chat(from_responses(to_zen_responses(from_chat(original)))) == original
     )
+
+
+def test_reasoning_effort_survives_chat_to_responses():
+    req = from_chat({"model": "m", "messages": [], "reasoning_effort": "high"})
+    assert req.params.reasoning_effort == "high"
+    assert to_zen_responses(req)["reasoning"] == {"effort": "high"}
+
+
+def test_thinking_enabled_maps_to_medium_effort():
+    req = from_chat({"model": "m", "messages": [], "thinking": {"type": "enabled"}})
+    assert req.params.reasoning_effort == "medium"
+
+
+def test_responses_reasoning_to_chat_effort():
+    req = from_responses({"model": "m", "input": "hi", "reasoning": {"effort": "low"}})
+    assert req.params.reasoning_effort == "low"
+    assert to_zen_chat(req)["reasoning_effort"] == "low"
+
+
+def test_effort_round_trip_chat_responses_chat():
+    original = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_effort": "high",
+    }
+    assert (
+        to_zen_chat(from_responses(to_zen_responses(from_chat(original)))) == original
+    )

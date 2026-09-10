@@ -20,9 +20,27 @@ from llms.proxy.ir import (
 _CHAT_ROLES = (ROLE_SYSTEM, ROLE_USER, ROLE_ASSISTANT, ROLE_TOOL)
 _RESPONSES_ROLES = ("system", "developer", "user", "assistant")
 
+EFFORT_BUDGETS = {"low": 1024, "medium": 4096, "high": 16384}
+
+
+def effort_for_budget(budget: int) -> str:
+    if budget <= 1024:
+        return "low"
+    if budget <= 8192:
+        return "medium"
+    return "high"
+
 
 def _params_from_chat(body: dict) -> LlmParams:
     max_tokens = body.get("max_completion_tokens", body.get("max_tokens"))
+    effort = body.get("reasoning_effort")
+    thinking = body.get("thinking")
+    if (
+        effort is None
+        and isinstance(thinking, dict)
+        and thinking.get("type") == "enabled"
+    ):
+        effort = "medium"
     return LlmParams(
         temperature=body.get("temperature"),
         top_p=body.get("top_p"),
@@ -30,6 +48,7 @@ def _params_from_chat(body: dict) -> LlmParams:
         stop=body.get("stop"),
         frequency_penalty=body.get("frequency_penalty"),
         presence_penalty=body.get("presence_penalty"),
+        reasoning_effort=str(effort) if effort is not None else None,
     )
 
 
@@ -190,6 +209,12 @@ def from_responses(body: dict) -> LlmRequest:
             temperature=body.get("temperature"),
             top_p=body.get("top_p"),
             max_tokens=body.get("max_output_tokens"),
+            reasoning_effort=(
+                str(body["reasoning"].get("effort"))
+                if isinstance(body.get("reasoning"), dict)
+                and body["reasoning"].get("effort")
+                else None
+            ),
         ),
     )
 
@@ -271,6 +296,8 @@ def to_zen_chat(req: LlmRequest) -> dict:
         body["presence_penalty"] = params.presence_penalty
     if params.stop is not None:
         body["stop"] = params.stop
+    if params.reasoning_effort is not None:
+        body["reasoning_effort"] = params.reasoning_effort
     if req.stream:
         body["stream"] = True
     return body
@@ -338,6 +365,8 @@ def to_zen_responses(req: LlmRequest) -> dict:
         body["top_p"] = req.params.top_p
     if req.params.max_tokens is not None:
         body["max_output_tokens"] = req.params.max_tokens
+    if req.params.reasoning_effort is not None:
+        body["reasoning"] = {"effort": req.params.reasoning_effort}
     if req.stream:
         body["stream"] = True
     return body
@@ -527,6 +556,13 @@ def from_messages(body: dict) -> LlmRequest:
             tool_choice = {"name": choice.get("name", "")}
     else:
         tool_choice = choice
+    effort: str | None = None
+    thinking = body.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+        try:
+            effort = effort_for_budget(int(thinking.get("budget_tokens", 4096)))
+        except (TypeError, ValueError):
+            effort = "medium"
     return LlmRequest(
         model=str(body.get("model", "")),
         messages=tuple(messages),
@@ -537,6 +573,7 @@ def from_messages(body: dict) -> LlmRequest:
             temperature=body.get("temperature"),
             top_p=body.get("top_p"),
             max_tokens=body.get("max_tokens"),
+            reasoning_effort=effort,
         ),
     )
 
@@ -609,6 +646,11 @@ def to_zen_messages(req: LlmRequest) -> dict:
         body["temperature"] = params.temperature
     if params.top_p is not None:
         body["top_p"] = params.top_p
+    if params.reasoning_effort is not None:
+        body["thinking"] = {
+            "type": "enabled",
+            "budget_tokens": EFFORT_BUDGETS.get(params.reasoning_effort, 4096),
+        }
     if req.stream:
         body["stream"] = True
     return body

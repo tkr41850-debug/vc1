@@ -47,6 +47,7 @@ class LlmParams:
     stop: list[str] | str | None = None
     frequency_penalty: float | None = None
     presence_penalty: float | None = None
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)
