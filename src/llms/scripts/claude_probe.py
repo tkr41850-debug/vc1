@@ -4,16 +4,14 @@ import os
 import subprocess
 
 from llms.probe.dirs import probe_dirs
-from llms.probe.guards import require_messages_live
 from llms.probe.proc import fail, running_proxy
 
 PORT = int(os.getenv("PROBE_PORT", "8793"))
 BASE_URL = f"http://127.0.0.1:{PORT}"
-MODEL = os.getenv("PROBE_MODEL", "claude-haiku-4-5")
+MODEL = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
 
 
 def main() -> int:
-    require_messages_live()
     try:
         with (
             probe_dirs("claude-probe") as (_home, workspace),
