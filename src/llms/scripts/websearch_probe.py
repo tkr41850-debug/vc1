@@ -10,7 +10,6 @@ from llms.probe.proc import fail, running_proxy
 PORT = int(os.getenv("PROBE_PORT", "8793"))
 BASE_URL = f"http://127.0.0.1:{PORT}"
 MODEL = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
-PROBE_SECRET = os.getenv("PROBE_SECRET", "sk-probe")
 
 
 def main() -> int:
@@ -21,7 +20,8 @@ def main() -> int:
                 PORT,
                 os.getenv("PROXY_LOG", "/tmp/websearch-probe-proxy.log"),
                 data_dir=os.getenv("PROBE_DATA_DIR", "/tmp/websearch-probe-data"),
-            ),
+                probe_secret=os.getenv("PROBE_SECRET"),
+            ) as (_, secret),
         ):
             body = {
                 "model": MODEL,
@@ -39,7 +39,7 @@ def main() -> int:
             r = httpx.post(
                 f"{BASE_URL}/v1/messages",
                 json=body,
-                headers={"Authorization": f"Bearer {PROBE_SECRET}"},
+                headers={"Authorization": f"Bearer {secret}"},
                 timeout=180.0,
             )
             if r.status_code != 200:

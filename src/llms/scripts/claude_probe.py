@@ -9,7 +9,6 @@ from llms.probe.proc import fail, running_proxy
 PORT = int(os.getenv("PROBE_PORT", "8793"))
 BASE_URL = f"http://127.0.0.1:{PORT}"
 MODEL = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
-PROBE_SECRET = os.getenv("PROBE_SECRET", "sk-probe")
 
 
 def main() -> int:
@@ -20,12 +19,13 @@ def main() -> int:
                 PORT,
                 os.getenv("PROXY_LOG", "/tmp/claude-probe-proxy.log"),
                 data_dir=os.getenv("PROBE_DATA_DIR", "/tmp/claude-probe-data"),
-            ),
+                probe_secret=os.getenv("PROBE_SECRET"),
+            ) as (_, secret),
         ):
             env = dict(
                 os.environ,
                 ANTHROPIC_BASE_URL=BASE_URL,
-                ANTHROPIC_API_KEY=PROBE_SECRET,
+                ANTHROPIC_API_KEY=secret,
                 ANTHROPIC_MODEL=MODEL,
             )
 

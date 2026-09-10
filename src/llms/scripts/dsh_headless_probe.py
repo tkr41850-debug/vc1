@@ -9,7 +9,6 @@ from llms.probe.proc import fail, running_proxy
 PORT = int(os.getenv("PROBE_PORT", "8793"))
 BASE_URL = f"http://127.0.0.1:{PORT}/v1"
 MODEL = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
-PROBE_SECRET = os.getenv("PROBE_SECRET", "sk-probe")
 
 
 def main() -> int:
@@ -22,7 +21,8 @@ def main() -> int:
                 PORT,
                 os.getenv("PROXY_LOG", "/tmp/dsh-probe-proxy.log"),
                 data_dir=os.getenv("PROBE_DATA_DIR", "/tmp/dsh-probe-data"),
-            ),
+                probe_secret=os.getenv("PROBE_SECRET"),
+            ) as (_, secret),
         ):
             config = DeepSeekHarnessConfig(
                 provider="deepseek-official",
@@ -32,7 +32,7 @@ def main() -> int:
                 dsh_home=str(home),
                 profile="sdk-minimal",
                 base_url=BASE_URL,
-                api_key=PROBE_SECRET,
+                api_key=secret,
             )
             with DeepSeekHarness(config) as harness:
                 session = f"probe-{uuid.uuid4().hex[:8]}"

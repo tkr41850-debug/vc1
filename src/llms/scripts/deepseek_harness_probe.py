@@ -7,7 +7,6 @@ from llms.probe.proc import fail, running_proxy
 PORT = int(os.getenv("PROBE_PORT", "8793"))
 BASE_URL = os.getenv("PROBE_BASE_URL", f"http://127.0.0.1:{PORT}/v1")
 MODEL = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
-PROBE_SECRET = os.getenv("PROBE_SECRET", "sk-probe")
 
 
 def main() -> int:
@@ -15,9 +14,11 @@ def main() -> int:
 
     try:
         with running_proxy(
-            PORT, data_dir=os.getenv("PROBE_DATA_DIR", "/tmp/dsh-probe-data")
-        ):
-            client = OpenAI(api_key=PROBE_SECRET, base_url=BASE_URL)
+            PORT,
+            data_dir=os.getenv("PROBE_DATA_DIR", "/tmp/dsh-probe-data"),
+            probe_secret=os.getenv("PROBE_SECRET"),
+        ) as (_, secret):
+            client = OpenAI(api_key=secret, base_url=BASE_URL)
             first = client.responses.create(
                 model=MODEL,
                 input="reply with exactly: turn-one",

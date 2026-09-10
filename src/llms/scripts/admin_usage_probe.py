@@ -11,8 +11,6 @@ import urllib.request
 PORT = int(os.getenv("PROBE_PORT", "8793"))
 BASE_URL = f"http://127.0.0.1:{PORT}"
 DATA_DIR = os.getenv("PROBE_DATA_DIR", "")
-PROBE_SECRET = os.getenv("PROBE_SECRET", "sk-probe")
-PROBE_HEADERS = {"Authorization": f"Bearer {PROBE_SECRET}"}
 MODEL = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
 
 
@@ -52,9 +50,11 @@ def post(path: str, body: dict, headers: dict | None = None):
 def main() -> int:
     if not DATA_DIR:
         return fail("PROBE_DATA_DIR must point at the gateway's data dir")
+    secret = os.getenv("PROBE_SECRET") or f"sk-probe-{os.urandom(12).hex()}"
     keys_path = os.path.join(DATA_DIR, "keys.yaml")
     with open(keys_path, "w") as f:
-        f.write(f"- key: {PROBE_SECRET}\n  label: probe\n  enabled: true\n")
+        f.write(f"- key: {secret}\n  label: probe\n  enabled: true\n")
+    probe_headers = {"Authorization": f"Bearer {secret}"}
     proc = subprocess.Popen(
         [
             "uv",
@@ -113,7 +113,7 @@ def main() -> int:
         # 3. seeded sk- header -> 200 with and without ak- prefix, usage recorded
         for path in ("/v1/responses", "/ak-probe/v1/responses"):
             status, body = post(
-                path, {"model": MODEL, "input": "hi"}, headers=PROBE_HEADERS
+                path, {"model": MODEL, "input": "hi"}, headers=probe_headers
             )
             print(f"keyed {path}: {status} {body[:120]}")
             if status != 200:
@@ -125,7 +125,7 @@ def main() -> int:
             return fail("expected token usage in response")
 
         # 4. sk- header on /v1/models -> 200
-        req = urllib.request.Request(BASE_URL + "/v1/models", headers=PROBE_HEADERS)
+        req = urllib.request.Request(BASE_URL + "/v1/models", headers=probe_headers)
         with urllib.request.urlopen(req, timeout=10) as r:
             status = r.status
         print(f"keyed models: {status}")

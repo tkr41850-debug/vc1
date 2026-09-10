@@ -40,3 +40,40 @@ def test_probe_dirs_creates_home_and_workspace(tmp_path):
         assert home.is_dir()
         assert workspace.is_dir()
         assert home.parent.name == "probe-x"
+
+
+def test_probe_secret_seeding(tmp_path, monkeypatch):
+    import re
+
+    import yaml
+
+    from llms.probe import health as health_module
+    from llms.probe import proc as proc_module
+
+    calls: dict = {}
+
+    class FakeProc:
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            pass
+
+    def fake_popen(*args, **kwargs):
+        calls["env"] = kwargs.get("env", {})
+        return FakeProc()
+
+    monkeypatch.setattr(proc_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(health_module, "wait_for_health", lambda *a, **k: True)
+    from llms.probe.proc import running_proxy
+
+    with running_proxy(1, data_dir=str(tmp_path)):
+        secret = calls["env"]["PROBE_SECRET"]
+        assert re.fullmatch(r"sk-probe-[0-9a-f]{24}", secret)
+        keys = yaml.safe_load((tmp_path / "keys.yaml").read_text())
+        assert {"key": secret, "label": "probe", "enabled": True} in keys
+    # explicit secret is honored verbatim
+    with running_proxy(1, data_dir=str(tmp_path), probe_secret="sk-probe-fixed"):
+        assert calls["env"]["PROBE_SECRET"] == "sk-probe-fixed"
+        keys = yaml.safe_load((tmp_path / "keys.yaml").read_text())
+        assert any(k["key"] == "sk-probe-fixed" for k in keys)
