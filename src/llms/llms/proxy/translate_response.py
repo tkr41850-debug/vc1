@@ -44,8 +44,12 @@ def _chat_message_to_ir(message: dict) -> LlmMessage:
 def _usage_details(usage: dict) -> tuple[int, int, int, int]:
     prompt = usage.get("prompt_tokens", usage.get("input_tokens", 0))
     completion = usage.get("completion_tokens", usage.get("output_tokens", 0))
-    prompt_details = usage.get("prompt_tokens_details", usage.get("input_tokens_details", {}))
-    completion_details = usage.get("completion_tokens_details", usage.get("output_tokens_details", {}))
+    prompt_details = usage.get(
+        "prompt_tokens_details", usage.get("input_tokens_details", {})
+    )
+    completion_details = usage.get(
+        "completion_tokens_details", usage.get("output_tokens_details", {})
+    )
     cached = (prompt_details or {}).get("cached_tokens", 0)
     reasoning = (completion_details or {}).get("reasoning_tokens", 0)
     return int(prompt or 0), int(completion or 0), int(cached or 0), int(reasoning or 0)
@@ -56,7 +60,13 @@ def parse_chat_response(payload: dict) -> ResponseIR:
     message = choice.get("message", {})
     finish = choice.get("finish_reason", "stop")
     usage = payload.get("usage", {})
-    status = "completed" if finish in ("stop", "tool_calls") else "incomplete" if finish == "length" else "failed"
+    status = (
+        "completed"
+        if finish in ("stop", "tool_calls")
+        else "incomplete"
+        if finish == "length"
+        else "failed"
+    )
     prompt, completion, cached, reasoning = _usage_details(usage)
     return ResponseIR(
         model=str(payload.get("model", "")),
@@ -67,12 +77,14 @@ def parse_chat_response(payload: dict) -> ResponseIR:
         raw_id=str(payload.get("id", uuid.uuid4().hex[:12])).removeprefix("chatcmpl-"),
         cached_tokens=cached,
         reasoning_tokens=reasoning,
+        incomplete_reason="max_output_tokens" if finish == "length" else None,
     )
 
 
 def parse_responses_response(payload: dict) -> ResponseIR:
     usage = payload.get("usage", {})
     prompt, completion, cached, reasoning = _usage_details(usage)
+    details = payload.get("incomplete_details") or {}
     return ResponseIR(
         model=str(payload.get("model", "")),
         status=str(payload.get("status", "completed")),
@@ -82,6 +94,7 @@ def parse_responses_response(payload: dict) -> ResponseIR:
         raw_id=str(payload.get("id", uuid.uuid4().hex[:12])).removeprefix("resp_"),
         cached_tokens=cached,
         reasoning_tokens=reasoning,
+        incomplete_reason=details.get("reason"),
     )
 
 
@@ -106,6 +119,7 @@ def parse_messages_response(payload: dict) -> ResponseIR:
         input_tokens=int(usage.get("input_tokens", 0)),
         output_tokens=int(usage.get("output_tokens", 0)),
         raw_id=str(payload.get("id", uuid.uuid4().hex[:12])).removeprefix("msg_"),
+        incomplete_reason="max_output_tokens" if stop == "max_tokens" else None,
     )
 
 
@@ -173,7 +187,7 @@ def emit_chat_response(rir: ResponseIR, model: str) -> dict:
 
 
 def emit_responses_response(rir: ResponseIR, model: str) -> dict:
-    return {
+    body: dict = {
         "id": f"resp_{rir.raw_id}",
         "object": "response",
         "created_at": int(time.time()),
@@ -189,6 +203,11 @@ def emit_responses_response(rir: ResponseIR, model: str) -> dict:
             "output_tokens_details": {"reasoning_tokens": rir.reasoning_tokens},
         },
     }
+    if rir.status == "incomplete":
+        body["incomplete_details"] = {
+            "reason": rir.incomplete_reason or "max_output_tokens"
+        }
+    return body
 
 
 def emit_messages_response(rir: ResponseIR, model: str) -> dict:

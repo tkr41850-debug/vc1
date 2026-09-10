@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from llms.proxy.translate_response import chat_to_responses, responses_to_chat
+from llms.proxy.translate_response import (
+    chat_to_responses,
+    messages_to_responses,
+    responses_to_chat,
+    responses_to_messages,
+)
 
 RESP_PAYLOAD = {
     "id": "resp_abc",
@@ -174,3 +179,34 @@ def test_usage_details_survive_translation():
     back = responses_to_chat(out, "m")
     assert back["usage"]["prompt_tokens_details"] == {"cached_tokens": 4}
     assert back["usage"]["completion_tokens_details"] == {"reasoning_tokens": 2}
+
+
+def test_incomplete_reason_survives_translation():
+    chat = {
+        "id": "chatcmpl-t",
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": "par"},
+                "finish_reason": "length",
+            }
+        ],
+        "usage": {"prompt_tokens": 9, "completion_tokens": 9, "total_tokens": 18},
+    }
+    out = chat_to_responses(chat, "m")
+    assert out["status"] == "incomplete"
+    assert out["incomplete_details"] == {"reason": "max_output_tokens"}
+    back = responses_to_chat(out, "m")
+    assert back["choices"][0]["finish_reason"] == "length"
+
+
+def test_incomplete_reason_normalized_through_messages():
+    payload = {
+        "id": "resp-t",
+        "status": "incomplete",
+        "output": [],
+        "incomplete_details": {"reason": "content_filter"},
+        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+    }
+    out = messages_to_responses(responses_to_messages(payload, "m"), "m")
+    assert out["status"] == "incomplete"
+    assert out["incomplete_details"] == {"reason": "max_output_tokens"}
