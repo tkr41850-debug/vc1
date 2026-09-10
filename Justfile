@@ -46,6 +46,9 @@ probe-codex:
 probe-tools:
     uv run python scripts/tool_roundtrip_probe.py
 
+probe-search:
+    uv run python scripts/websearch_probe.py
+
 catalog:
     uv run python scripts/refresh_catalog.py
 
