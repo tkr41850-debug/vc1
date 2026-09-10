@@ -25,3 +25,21 @@ class DirectEgress:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+class WarpPoolEgress:
+    def __init__(self, pool_base_url: str, token: str = "", num_slots: int = 8) -> None:
+        self.pool_base_url = pool_base_url.rstrip("/")
+        self.token = token
+        self._num_slots = num_slots
+
+    def num_slots(self) -> int:
+        return self._num_slots
+
+    def client_for(self, bucket: int, slot: int) -> httpx.AsyncClient:
+        raise NotImplementedError(
+            "warp pool egress not implemented: vsp needs a per-bucket warp selection API"
+        )
+
+    async def aclose(self) -> None:
+        return None
