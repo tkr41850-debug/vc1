@@ -20,6 +20,7 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = ["ignore:.*BlockingPortal.*:DeprecationWarning"]
 
 [tool.ruff]
 target-version = "py311"
