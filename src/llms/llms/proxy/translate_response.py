@@ -41,37 +41,47 @@ def _chat_message_to_ir(message: dict) -> LlmMessage:
     return LlmMessage(role=ROLE_ASSISTANT, blocks=tuple(blocks))
 
 
+def _usage_details(usage: dict) -> tuple[int, int, int, int]:
+    prompt = usage.get("prompt_tokens", usage.get("input_tokens", 0))
+    completion = usage.get("completion_tokens", usage.get("output_tokens", 0))
+    prompt_details = usage.get("prompt_tokens_details", usage.get("input_tokens_details", {}))
+    completion_details = usage.get("completion_tokens_details", usage.get("output_tokens_details", {}))
+    cached = (prompt_details or {}).get("cached_tokens", 0)
+    reasoning = (completion_details or {}).get("reasoning_tokens", 0)
+    return int(prompt or 0), int(completion or 0), int(cached or 0), int(reasoning or 0)
+
+
 def parse_chat_response(payload: dict) -> ResponseIR:
     choice = (payload.get("choices", []) or [{}])[0]
     message = choice.get("message", {})
     finish = choice.get("finish_reason", "stop")
     usage = payload.get("usage", {})
-    status = (
-        "completed"
-        if finish in ("stop", "tool_calls")
-        else "incomplete"
-        if finish == "length"
-        else "failed"
-    )
+    status = "completed" if finish in ("stop", "tool_calls") else "incomplete" if finish == "length" else "failed"
+    prompt, completion, cached, reasoning = _usage_details(usage)
     return ResponseIR(
         model=str(payload.get("model", "")),
         status=status,
         messages=(_chat_message_to_ir(message),),
-        input_tokens=int(usage.get("prompt_tokens", 0)),
-        output_tokens=int(usage.get("completion_tokens", 0)),
+        input_tokens=prompt,
+        output_tokens=completion,
         raw_id=str(payload.get("id", uuid.uuid4().hex[:12])).removeprefix("chatcmpl-"),
+        cached_tokens=cached,
+        reasoning_tokens=reasoning,
     )
 
 
 def parse_responses_response(payload: dict) -> ResponseIR:
     usage = payload.get("usage", {})
+    prompt, completion, cached, reasoning = _usage_details(usage)
     return ResponseIR(
         model=str(payload.get("model", "")),
         status=str(payload.get("status", "completed")),
         messages=responses_output_to_ir_messages(payload.get("output", [])),
-        input_tokens=int(usage.get("input_tokens", 0)),
-        output_tokens=int(usage.get("output_tokens", 0)),
+        input_tokens=prompt,
+        output_tokens=completion,
         raw_id=str(payload.get("id", uuid.uuid4().hex[:12])).removeprefix("resp_"),
+        cached_tokens=cached,
+        reasoning_tokens=reasoning,
     )
 
 
@@ -156,6 +166,8 @@ def emit_chat_response(rir: ResponseIR, model: str) -> dict:
             "prompt_tokens": rir.input_tokens,
             "completion_tokens": rir.output_tokens,
             "total_tokens": _total(rir),
+            "prompt_tokens_details": {"cached_tokens": rir.cached_tokens},
+            "completion_tokens_details": {"reasoning_tokens": rir.reasoning_tokens},
         },
     }
 
@@ -173,6 +185,8 @@ def emit_responses_response(rir: ResponseIR, model: str) -> dict:
             "input_tokens": rir.input_tokens,
             "output_tokens": rir.output_tokens,
             "total_tokens": _total(rir),
+            "input_tokens_details": {"cached_tokens": rir.cached_tokens},
+            "output_tokens_details": {"reasoning_tokens": rir.reasoning_tokens},
         },
     }
 

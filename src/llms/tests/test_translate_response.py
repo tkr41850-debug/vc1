@@ -45,6 +45,8 @@ def test_responses_to_chat_text():
         "prompt_tokens": 10,
         "completion_tokens": 5,
         "total_tokens": 15,
+        "prompt_tokens_details": {"cached_tokens": 0},
+        "completion_tokens_details": {"reasoning_tokens": 0},
     }
 
 
@@ -89,7 +91,13 @@ def test_chat_to_responses_text():
             "content": [{"type": "output_text", "text": "hello", "annotations": []}],
         }
     ]
-    assert out["usage"] == {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+    assert out["usage"] == {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "total_tokens": 15,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": 0},
+    }
 
 
 def test_chat_to_responses_tool_calls():
@@ -141,3 +149,28 @@ def test_response_round_trip_stable():
         ]["content"]
         == "hello"
     )
+
+
+def test_usage_details_survive_translation():
+    chat = {
+        "id": "chatcmpl-u",
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "prompt_tokens_details": {"cached_tokens": 4},
+            "completion_tokens_details": {"reasoning_tokens": 2},
+        },
+    }
+    out = chat_to_responses(chat, "m")
+    assert out["usage"]["input_tokens_details"] == {"cached_tokens": 4}
+    assert out["usage"]["output_tokens_details"] == {"reasoning_tokens": 2}
+    back = responses_to_chat(out, "m")
+    assert back["usage"]["prompt_tokens_details"] == {"cached_tokens": 4}
+    assert back["usage"]["completion_tokens_details"] == {"reasoning_tokens": 2}

@@ -81,6 +81,8 @@ class ResponseIR:
     input_tokens: int = 0
     output_tokens: int = 0
     raw_id: str = ""
+    cached_tokens: int = 0
+    reasoning_tokens: int = 0
 
 
 @dataclass(frozen=True)
