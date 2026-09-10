@@ -32,6 +32,37 @@ def effort_for_budget(budget: int) -> str:
     return "high"
 
 
+def _structured_from_chat(format: object) -> dict | None:
+    if not isinstance(format, dict):
+        return None
+    if format.get("type") == "json_schema" and isinstance(
+        format.get("json_schema"), dict
+    ):
+        schema = format["json_schema"]
+        return {
+            "name": schema.get("name"),
+            "schema": schema.get("schema"),
+            "strict": bool(schema.get("strict", False)),
+        }
+    if format.get("type") == "json_object":
+        return {"name": None, "schema": None, "strict": False}
+    return None
+
+
+def _structured_from_responses(format: object) -> dict | None:
+    if not isinstance(format, dict):
+        return None
+    if format.get("type") == "json_schema":
+        return {
+            "name": format.get("name"),
+            "schema": format.get("schema"),
+            "strict": bool(format.get("strict", False)),
+        }
+    if format.get("type") == "json_object":
+        return {"name": None, "schema": None, "strict": False}
+    return None
+
+
 def _params_from_chat(body: dict) -> LlmParams:
     max_tokens = body.get("max_completion_tokens", body.get("max_tokens"))
     effort = body.get("reasoning_effort")
@@ -52,6 +83,7 @@ def _params_from_chat(body: dict) -> LlmParams:
         presence_penalty=body.get("presence_penalty"),
         reasoning_effort=str(effort) if effort is not None else None,
         parallel_tool_calls=None if parallel is None else bool(parallel),
+        structured_output=_structured_from_chat(body.get("response_format")),
     )
 
 
@@ -238,6 +270,11 @@ def from_responses(body: dict) -> RequestIR:
                 if body.get("parallel_tool_calls") is None
                 else bool(body.get("parallel_tool_calls"))
             ),
+            structured_output=(
+                _structured_from_responses(body.get("text", {}).get("format"))
+                if isinstance(body.get("text"), dict)
+                else None
+            ),
         ),
     )
 
@@ -343,9 +380,35 @@ def to_zen_chat(req: RequestIR) -> dict:
         body["reasoning_effort"] = params.reasoning_effort
     if params.parallel_tool_calls is not None:
         body["parallel_tool_calls"] = params.parallel_tool_calls
+    if params.structured_output is not None:
+        body["response_format"] = _chat_format_from_ir(params.structured_output)
     if req.stream:
         body["stream"] = True
     return body
+
+
+def _chat_format_from_ir(structured: dict) -> dict:
+    if structured.get("schema") is not None:
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": structured.get("name") or "response",
+                "schema": structured["schema"],
+                "strict": bool(structured.get("strict", False)),
+            },
+        }
+    return {"type": "json_object"}
+
+
+def _responses_format_from_ir(structured: dict) -> dict:
+    if structured.get("schema") is not None:
+        return {
+            "type": "json_schema",
+            "name": structured.get("name") or "response",
+            "schema": structured["schema"],
+            "strict": bool(structured.get("strict", False)),
+        }
+    return {"type": "json_object"}
 
 
 def to_zen_responses(req: RequestIR) -> dict:
@@ -430,6 +493,10 @@ def to_zen_responses(req: RequestIR) -> dict:
         body["reasoning"] = {"effort": req.params.reasoning_effort}
     if req.params.parallel_tool_calls is not None:
         body["parallel_tool_calls"] = req.params.parallel_tool_calls
+    if req.params.structured_output is not None:
+        body["text"] = {
+            "format": _responses_format_from_ir(req.params.structured_output)
+        }
     if req.stream:
         body["stream"] = True
     return body

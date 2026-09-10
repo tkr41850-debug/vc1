@@ -355,6 +355,66 @@ def test_effort_round_trip_chat_responses_chat():
     )
 
 
+def test_structured_output_chat_to_responses():
+    req = from_chat(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {"type": "object"},
+                    "strict": True,
+                },
+            },
+        }
+    )
+    assert req.params.structured_output == {
+        "name": "answer",
+        "schema": {"type": "object"},
+        "strict": True,
+    }
+    body = to_zen_responses(req)
+    assert body["text"] == {
+        "format": {
+            "type": "json_schema",
+            "name": "answer",
+            "schema": {"type": "object"},
+            "strict": True,
+        }
+    }
+
+
+def test_structured_output_responses_to_chat():
+    req = from_responses(
+        {
+            "model": "m",
+            "input": "hi",
+            "text": {"format": {"type": "json_object"}},
+        }
+    )
+    assert req.params.structured_output == {
+        "name": None,
+        "schema": None,
+        "strict": False,
+    }
+    assert to_zen_chat(req)["response_format"] == {"type": "json_object"}
+
+
+def test_structured_output_round_trip():
+    original = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "hi"}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "schema": {"type": "object"}},
+        },
+    }
+    rebuilt = to_zen_chat(from_responses(to_zen_responses(from_chat(original))))
+    assert rebuilt["response_format"]["json_schema"]["schema"] == {"type": "object"}
+
+
 def test_assistant_history_uses_output_text():
     req = from_chat(
         {

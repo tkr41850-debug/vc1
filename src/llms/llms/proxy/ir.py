@@ -54,6 +54,7 @@ class LlmParams:
     presence_penalty: float | None = None
     reasoning_effort: str | None = None
     parallel_tool_calls: bool | None = None
+    structured_output: dict | None = None
 
 
 @dataclass(frozen=True)
