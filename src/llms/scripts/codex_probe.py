@@ -67,6 +67,44 @@ def main() -> int:
                     return fail(
                         f"tool turn failed: {tools.returncode} {tools.stderr[-2000:]}"
                     )
+                import json as _json
+
+                schema_file = workspace / "schema.json"
+                schema_file.write_text(
+                    _json.dumps(
+                        {
+                            "type": "object",
+                            "properties": {"ok": {"type": "string"}},
+                            "required": ["ok"],
+                            "additionalProperties": False,
+                        }
+                    )
+                )
+                structured = subprocess.run(
+                    [
+                        "codex",
+                        "exec",
+                        "--skip-git-repo-check",
+                        "--output-schema",
+                        str(schema_file),
+                        "Reply with a JSON object with ok set to schema-ok.",
+                    ],
+                    cwd=str(workspace),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    check=False,
+                )
+                print(structured.stdout[-2000:])
+                try:
+                    parsed = _json.loads(structured.stdout.strip().splitlines()[-1])
+                except Exception:
+                    parsed = {}
+                if structured.returncode != 0 or parsed.get("ok") != "schema-ok":
+                    return fail(
+                        f"schema turn failed: {structured.returncode} {structured.stderr[-2000:]}"
+                    )
         return 0
     except Exception as exc:
         return fail(f"probe failed: {type(exc).__name__}: {exc}")
