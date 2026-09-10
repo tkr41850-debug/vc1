@@ -151,7 +151,7 @@ def test_web_search_tool_kind_preserved():
     assert req.tools[0].kind == "web_search_20260205"
     assert req.tools[0].options == {"max_uses": 3}
     resp = to_zen_responses(req)
-    assert resp["tools"] == [{"type": "web_search", "max_uses": 3}]
+    assert resp["tools"] == [{"type": "web_search"}]
     msg = to_zen_messages(req)
     assert msg["tools"] == [
         {"type": "web_search_20260205", "name": "web_search", "max_uses": 3}

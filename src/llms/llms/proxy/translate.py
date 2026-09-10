@@ -440,10 +440,7 @@ def _responses_tool_from_ir(t: ToolDef) -> dict:
             "parameters": t.parameters,
         }
     if t.kind.startswith("web_search"):
-        tool: dict = {"type": "web_search"}
-        if "max_uses" in t.options:
-            tool["max_uses"] = t.options["max_uses"]
-        return tool
+        return {"type": "web_search"}
     raise ValueError(f"unsupported tool type for responses endpoint: {t.kind}")
 
 
