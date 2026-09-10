@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from llms.proxy.router import normalize_model, pick
+from llms.proxy.router import normalize_model, pick, resolve_alias
 
 
 @pytest.mark.parametrize(
@@ -37,3 +37,17 @@ def test_pick_unknown_falls_back_to_ingress():
 def test_normalize_strips_prefix_and_case():
     assert normalize_model("opencode/GPT-5.5") == "gpt-5.5"
     assert normalize_model("  mimo-v2.5-free ") == "mimo-v2.5-free"
+
+
+def test_resolve_alias_prefix_and_exact():
+    aliases = (
+        ("gpt-*", "muse-spark-1.3-contributor-free"),
+        ("claude-opus-4-5", "muse-spark-1.2"),
+    )
+    assert (
+        resolve_alias("gpt-5.4-xhigh-fast", aliases)
+        == "muse-spark-1.3-contributor-free"
+    )
+    assert resolve_alias("opencode/claude-opus-4-5", aliases) == "muse-spark-1.2"
+    assert resolve_alias("mimo-v2.5-free", aliases) == "mimo-v2.5-free"
+    assert resolve_alias("anything", ()) == "anything"

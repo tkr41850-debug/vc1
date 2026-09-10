@@ -25,6 +25,7 @@ def make_settings(**overrides) -> Settings:
         "num_slots": 8,
         "slot_cooldown_s": 60.0,
         "egress_mode": "direct",
+        "model_aliases": (),
         "vsp_base_url": "",
         "vsp_token": "",
         "port": 8789,

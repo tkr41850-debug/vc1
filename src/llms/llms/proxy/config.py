@@ -37,6 +37,7 @@ class Settings:
         )
     )
     free_models: tuple = field(default_factory=lambda: _free_models())
+    model_aliases: tuple = field(default_factory=lambda: _model_aliases())
     allow_client_keys: bool = field(
         default_factory=lambda: os.getenv("ZEN_ALLOW_CLIENT_KEYS", "0") == "1"
     )
@@ -56,6 +57,17 @@ class Settings:
     request_timeout_s: float = field(
         default_factory=lambda: float(os.getenv("ZEN_TIMEOUT_S", "120"))
     )
+
+
+def _model_aliases() -> tuple:
+    aliases: list = []
+    for pair in os.getenv("MODEL_ALIASES", "").split(","):
+        if "=" not in pair:
+            continue
+        pattern, _, target = pair.partition("=")
+        if pattern.strip() and target.strip():
+            aliases.append((pattern.strip(), target.strip()))
+    return tuple(aliases)
 
 
 def _free_models() -> tuple:

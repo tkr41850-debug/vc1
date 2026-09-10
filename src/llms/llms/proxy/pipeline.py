@@ -11,7 +11,7 @@ from llms.proxy.forward import forward, parse_body
 from llms.proxy.ir import RequestIR
 from llms.proxy.logging import log_ingress, log_upstream, new_trace_id, setup_logging
 from llms.proxy.rate_limit import classify
-from llms.proxy.router import ENDPOINT_PATH, pick
+from llms.proxy.router import ENDPOINT_PATH, pick, resolve_alias
 from llms.proxy.stream_translate import (
     chat_to_messages as stream_chat_to_messages,
 )
@@ -97,6 +97,8 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         return JSONResponse(status_code=400, content={"error": {"message": str(exc)}})
     if not req.model:
         req = with_model(req, getattr(settings, DEFAULT_MODEL_ATTR[ingress]))
+    requested = req.model
+    req = with_model(req, resolve_alias(req.model, settings.model_aliases))
     egress = pick(req.model, ingress)
     outbound = TO[egress](req)
     affinity = getattr(request.state, "affinity", None)
@@ -108,6 +110,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         request.url.path,
         {
             "model": req.model,
+            "requested_model": requested,
             "ingress": ingress,
             "egress": egress,
             "affinity": affinity,

@@ -92,6 +92,9 @@ opencode identity set; omitting it yields `MissingSessionID`.
   `north-*`, `hy3*`
 - `/messages`: `claude-*`, `qwen*` (except `qwen3-coder`)
 - Unknown models stay on the ingress endpoint (passthrough).
+- `MODEL_ALIASES` (`pattern=target,...`, `*` suffix = prefix match) rewrites
+  the requested id before routing; both ids are logged. Bucketing and rate
+  limits apply to the resolved model.
 
 ## Egress contract (for vsp)
 

@@ -86,3 +86,26 @@ def test_responses_ingress_routes_claude_to_messages(app_client):
     body = r.json()
     assert body["object"] == "response"
     assert body["status"] == "completed"
+
+
+def test_model_alias_remaps_before_routing(mock_upstream):
+    from tests.conftest import build_app_client, make_settings
+
+    client, seen = mock_upstream
+    settings = make_settings(
+        model_aliases=(
+            ("gpt-*", "muse-spark-1.3-contributor-free"),
+            ("claude-*", "muse-spark-1.3-contributor-free"),
+        )
+    )
+    with build_app_client(settings, client) as tc:
+        r = tc.post(
+            "/v1/messages",
+            json={
+                "model": "claude-sonnet-4-5",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert r.status_code == 200
+        assert seen["url"].endswith("/responses")
+        assert seen["json"]["model"] == "muse-spark-1.3-contributor-free"

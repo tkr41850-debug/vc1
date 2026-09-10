@@ -48,6 +48,17 @@ def normalize_model(model: str) -> str:
     return name
 
 
+def resolve_alias(model: str, aliases: tuple = ()) -> str:
+    name = normalize_model(model)
+    for pattern, target in aliases:
+        pattern = pattern.strip().lower()
+        if pattern.endswith("*") and name.startswith(pattern[:-1]):
+            return target
+        if pattern == name:
+            return target
+    return model
+
+
 def pick(model: str, ingress: str) -> str:
     name = normalize_model(model)
     if name.startswith(MESSAGES_PREFIXES) and not name.startswith("qwen3-coder"):

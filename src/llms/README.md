@@ -61,6 +61,7 @@ and tool/streaming support; `just catalog` checks the seed against live Zen.
 | `NUM_SLOTS` | `8` | Egress slots (warp pool size) |
 | `SLOT_COOLDOWN_S` | `60` | Minimum bucket cooldown after a rate limit |
 | `EGRESS_MODE` | `direct` | `direct` today; warp pool once vsp is ready |
+| `MODEL_ALIASES` | — | Opt-in remap, e.g. `gpt-*=muse-spark-1.3-contributor-free,claude-*=muse-spark-1.3-contributor-free`. Stabilizes clients pinned to billed models, but the client sees the requested id while another model answers |
 | `VSP_BASE_URL`, `VSP_TOKEN` | — | Warp pool endpoint/credential (future) |
 | `ZEN_GATEWAY_PORT` | `8789` | Listen port |
 | `ZEN_TIMEOUT_S` | `120` | Upstream timeout |
