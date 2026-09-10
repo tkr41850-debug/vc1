@@ -176,7 +176,8 @@ def test_from_responses_list_input_with_history_and_outputs():
     assert req.messages[2] == LlmMessage(
         role=ROLE_TOOL, blocks=(ToolResultBlock("c1", "a b"),)
     )
-    assert req.tools == (ToolDef("bash", "run", {"type": "object"}),)
+    assert req.tools[0] == ToolDef("bash", "run", {"type": "object"})
+    assert req.tools[1].kind == "web_search"
     assert req.params.max_tokens == 64
     assert req.stream is True
 

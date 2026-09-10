@@ -42,6 +42,8 @@ class ToolDef:
     name: str
     description: str = ""
     parameters: dict = field(default_factory=dict)
+    kind: str = "function"
+    options: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

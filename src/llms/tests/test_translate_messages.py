@@ -138,6 +138,42 @@ def test_to_zen_messages_defaults_max_tokens():
     assert body["max_tokens"] == 1024
 
 
+def test_web_search_tool_kind_preserved():
+    req = from_messages(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [
+                {"type": "web_search_20260205", "name": "web_search", "max_uses": 3}
+            ],
+        }
+    )
+    assert req.tools[0].kind == "web_search_20260205"
+    assert req.tools[0].options == {"max_uses": 3}
+    resp = to_zen_responses(req)
+    assert resp["tools"] == [{"type": "web_search", "max_uses": 3}]
+    msg = to_zen_messages(req)
+    assert msg["tools"] == [
+        {"type": "web_search_20260205", "name": "web_search", "max_uses": 3}
+    ]
+
+
+def test_web_search_rejected_on_chat_endpoint():
+    import pytest
+
+    from llms.proxy.translate import to_zen_chat
+
+    req = from_messages(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "web_search_20260205", "name": "web_search"}],
+        }
+    )
+    with pytest.raises(ValueError):
+        to_zen_chat(req)
+
+
 def test_messages_thinking_budget_maps_to_effort():
     req = from_messages(
         {

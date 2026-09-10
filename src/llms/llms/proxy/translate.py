@@ -177,6 +177,26 @@ def _responses_content_to_blocks(content, role: str = "user") -> list:
     return blocks
 
 
+def _responses_tool_to_ir(t: dict) -> ToolDef:
+    if t.get("type", "function") == "function":
+        return ToolDef(
+            str(t.get("name", "")),
+            str(t.get("description", "")),
+            dict(t.get("parameters", {})),
+        )
+    return ToolDef(
+        str(t.get("name", "web_search")),
+        "",
+        {},
+        kind=str(t.get("type", "")),
+        options={
+            k: v
+            for k, v in t.items()
+            if k not in ("type", "name", "description", "parameters")
+        },
+    )
+
+
 def from_responses(body: dict) -> RequestIR:
     messages: list[LlmMessage] = []
     if body.get("instructions"):
@@ -241,13 +261,10 @@ def from_responses(body: dict) -> RequestIR:
         else:
             raise ValueError(f"unsupported responses input item: {kind}")
     tools = tuple(
-        ToolDef(
-            str(t.get("name", "")),
-            str(t.get("description", "")),
-            dict(t.get("parameters", {})),
-        )
+        _responses_tool_to_ir(t)
         for t in body.get("tools", [])
-        if t.get("type") == "function"
+        if t.get("type", "function") == "function"
+        or str(t.get("type", "")).startswith("web_search")
     )
     return RequestIR(
         model=str(body.get("model", "")),
@@ -349,6 +366,9 @@ def to_zen_chat(req: RequestIR) -> dict:
                 out["reasoning_content"] = "\n".join(thinking)
             body["messages"].append(out)
         body["messages"].extend(results)
+    for t in req.tools:
+        if t.kind != "function":
+            raise ValueError(f"tool type {t.kind} not supported on chat endpoint")
     if req.tools:
         body["tools"] = [
             {
@@ -409,6 +429,22 @@ def _responses_format_from_ir(structured: dict) -> dict:
             "strict": bool(structured.get("strict", False)),
         }
     return {"type": "json_object"}
+
+
+def _responses_tool_from_ir(t: ToolDef) -> dict:
+    if t.kind == "function":
+        return {
+            "type": "function",
+            "name": t.name,
+            "description": t.description,
+            "parameters": t.parameters,
+        }
+    if t.kind.startswith("web_search"):
+        tool: dict = {"type": "web_search"}
+        if "max_uses" in t.options:
+            tool["max_uses"] = t.options["max_uses"]
+        return tool
+    raise ValueError(f"unsupported tool type for responses endpoint: {t.kind}")
 
 
 def to_zen_responses(req: RequestIR) -> dict:
@@ -472,15 +508,7 @@ def to_zen_responses(req: RequestIR) -> dict:
                 {"type": "message", "role": msg.role, "content": content}
             )
     if req.tools:
-        body["tools"] = [
-            {
-                "type": "function",
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.parameters,
-            }
-            for t in req.tools
-        ]
+        body["tools"] = [_responses_tool_from_ir(t) for t in req.tools]
     if req.tool_choice is not None:
         body["tool_choice"] = req.tool_choice
     if req.params.temperature is not None:
@@ -700,9 +728,22 @@ def from_messages(body: dict) -> RequestIR:
         messages.append(LlmMessage(role=role, blocks=tuple(blocks)))
     tools = tuple(
         ToolDef(
-            str(t.get("name", "")),
+            str(
+                t.get("name", "")
+                or (
+                    "web_search"
+                    if str(t.get("type", "")).startswith("web_search")
+                    else ""
+                )
+            ),
             str(t.get("description", "")),
             dict(t.get("input_schema", {})),
+            kind=str(t.get("type", "function")),
+            options={
+                k: v
+                for k, v in t.items()
+                if k not in ("type", "name", "description", "input_schema")
+            },
         )
         for t in body.get("tools", [])
     )
@@ -734,6 +775,18 @@ def from_messages(body: dict) -> RequestIR:
             reasoning_effort=effort,
         ),
     )
+
+
+def _messages_tool_from_ir(t: ToolDef) -> dict:
+    if t.kind == "function":
+        return {
+            "name": t.name,
+            "description": t.description,
+            "input_schema": t.parameters,
+        }
+    tool = {"type": t.kind, "name": t.name}
+    tool.update(t.options)
+    return tool
 
 
 def to_zen_messages(req: RequestIR) -> dict:
@@ -788,10 +841,7 @@ def to_zen_messages(req: RequestIR) -> dict:
             content = parts
         body["messages"].append({"role": role, "content": content})
     if req.tools:
-        body["tools"] = [
-            {"name": t.name, "description": t.description, "input_schema": t.parameters}
-            for t in req.tools
-        ]
+        body["tools"] = [_messages_tool_from_ir(t) for t in req.tools]
     if req.tool_choice is not None:
         choice = req.tool_choice
         if choice == "required":
