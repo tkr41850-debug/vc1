@@ -42,3 +42,16 @@ def test_bucket_varies_with_inputs():
 def test_bucket_spreads_uniformly():
     seen = {bucket_for(f"ak-{i}", "m") for i in range(200)}
     assert len(seen) > 150
+
+
+def test_bucket_mixes_secret_key_with_affinity():
+    # Same affinity + model but different sk- keys spread across buckets,
+    # affinities still spread under one sk-, and omitting the secret is stable.
+    seen = {bucket_for("ak-team1", "m", 1024, f"sk-{i}") for i in range(50)}
+    assert len(seen) > 1
+    aff = {bucket_for(f"ak-{i}", "m", 1024, "sk-same") for i in range(50)}
+    assert len(aff) > 1
+    assert bucket_for("ak-team1", "m") == bucket_for("ak-team1", "m", 1024, None)
+    assert bucket_for("ak-team1", "m", 1024, "sk-x") == bucket_for(
+        "ak-team1", "m", 1024, "sk-x"
+    )

@@ -102,7 +102,8 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     egress = pick(req.model, ingress)
     outbound = TO[egress](req)
     affinity = getattr(request.state, "affinity", None)
-    bucket = bucket_for(affinity, req.model, settings.num_buckets)
+    secret_key = getattr(request.state, "secret_key", None)
+    bucket = bucket_for(affinity, req.model, settings.num_buckets, secret_key)
     table = request.app.state.bucket_table
     slot = table.slot_for(bucket)
     log_ingress(

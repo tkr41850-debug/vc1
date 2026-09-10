@@ -16,8 +16,14 @@ def parse_affinity_prefix(path: str) -> tuple[str | None, str]:
 
 
 def bucket_for(
-    affinity: str | None, model: str, num_buckets: int = DEFAULT_BUCKETS
+    affinity: str | None,
+    model: str,
+    num_buckets: int = DEFAULT_BUCKETS,
+    secret_key: str | None = None,
 ) -> int:
-    key = f"{affinity or ''}\x00{model.strip().lower()}"
+    # affinity (ak- path prefix) and the secret key (sk- header) are separate
+    # namespaces but both enter the bucket hash, so different teams sharing a
+    # model still spread across pools — while neither leaks upstream.
+    key = f"{affinity or ''}\x00{secret_key or ''}\x00{model.strip().lower()}"
     digest = hashlib.sha256(key.encode()).hexdigest()
     return int(digest, 16) % num_buckets

@@ -86,9 +86,11 @@ to 0).
 
 ## Affinity buckets
 
-`bucket = sha256("{affinity or ''}\x00{model.lower()}") mod NUM_BUCKETS`
+`bucket = sha256("{affinity or ''}\x00{secret or ''}\x00{model.lower()}") mod NUM_BUCKETS`
 (`NUM_BUCKETS`, default 1024). Affinity is the optional unauthenticated
-`ak-` path prefix (empty when absent); traffic still spreads by model.
+`ak-` path prefix (empty when absent), secret is the authenticated `sk-`
+header — separate namespaces, both hashed, neither forwarded upstream.
+Traffic still spreads by model when both are absent.
 Buckets map to egress slots
 (`bucket % NUM_SLOTS` initially); on a rate-limit signal the bucket advances
 to the next slot with cooldown `max(SLOT_COOLDOWN_S, Retry-After)`.

@@ -102,7 +102,7 @@ def _post(tc, path, body):
 def _model_in_slot(slot: int, prefix: str = "probe-model") -> str:
     for i in range(500):
         model = f"{prefix}-{i}"
-        if bucket_for("ak-team1", model, NUM_BUCKETS) % NUM_SLOTS == slot:
+        if bucket_for("ak-team1", model, NUM_BUCKETS, "sk-team1") % NUM_SLOTS == slot:
             return model
     raise AssertionError("no model found for slot")
 
@@ -110,7 +110,7 @@ def _model_in_slot(slot: int, prefix: str = "probe-model") -> str:
 def _model_in_affinity_slot(affinity: str, slot: int, prefix: str = "aff-model") -> str:
     for i in range(500):
         model = f"{prefix}-{i}"
-        if bucket_for(affinity, model, NUM_BUCKETS) % NUM_SLOTS == slot:
+        if bucket_for(affinity, model, NUM_BUCKETS, "sk-team1") % NUM_SLOTS == slot:
             return model
     raise AssertionError("no model found for affinity slot")
 
@@ -118,7 +118,7 @@ def _model_in_affinity_slot(affinity: str, slot: int, prefix: str = "aff-model")
 def test_ratelimit_fails_fast_and_rebalances(fake_world):
     tc, table, calls = fake_world
     model = _model_in_slot(0)
-    bucket = bucket_for("ak-team1", model, NUM_BUCKETS)
+    bucket = bucket_for("ak-team1", model, NUM_BUCKETS, "sk-team1")
     first = _post(tc, "/ak-team1/v1/responses", {"model": model, "input": "hi"})
     assert first.status_code == 429
     assert first.headers.get("retry-after") == "1"
@@ -131,8 +131,8 @@ def test_ratelimit_fails_fast_and_rebalances(fake_world):
 def test_affinity_prefix_routes_and_buckets_independently(fake_world):
     tc, table, calls = fake_world
     model = _model_in_affinity_slot("ak-team1", 1)
-    plain_bucket = bucket_for(None, model, NUM_BUCKETS)
-    aff_bucket = bucket_for("ak-team1", model, NUM_BUCKETS)
+    plain_bucket = bucket_for(None, model, NUM_BUCKETS, "sk-team1")
+    aff_bucket = bucket_for("ak-team1", model, NUM_BUCKETS, "sk-team1")
     r = _post(tc, "/ak-team1/v1/responses", {"model": model, "input": "hi"})
     assert r.status_code == 200
     assert calls == [1]
@@ -143,7 +143,7 @@ def test_affinity_prefix_routes_and_buckets_independently(fake_world):
 def test_stream_ratelimit_rebalances_next_request(fake_world):
     tc, table, calls = fake_world
     model = _model_in_slot(0)
-    bucket = bucket_for("ak-team1", model, NUM_BUCKETS)
+    bucket = bucket_for("ak-team1", model, NUM_BUCKETS, "sk-team1")
     first = _post(
         tc, "/ak-team1/v1/responses", {"model": model, "input": "hi", "stream": True}
     )
