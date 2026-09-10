@@ -43,8 +43,10 @@ def test_same_dialect_passes_through_untouched(app_client):
     assert r.json()["choices"][0]["message"]["content"] == "hello"
 
 
-def test_cross_dialect_stream_rejected_for_now(app_client):
-    tc, _ = app_client
+def test_cross_dialect_stream_translates(app_client, mock_upstream):
+    tc, _seen = app_client
+    _, seen_dict = mock_upstream
+    seen_dict["mode"] = "stream"
     r = tc.post(
         "/v1/chat/completions",
         json={
@@ -53,4 +55,7 @@ def test_cross_dialect_stream_rejected_for_now(app_client):
             "stream": True,
         },
     )
-    assert r.status_code == 400
+    assert r.status_code == 200
+    assert "hi" in r.text
+    assert "data: [DONE]" in r.text
+    assert "inference-cost" not in r.text

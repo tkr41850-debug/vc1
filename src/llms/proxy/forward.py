@@ -52,6 +52,7 @@ async def forward(
     body: dict,
     trace_id: str,
     convert=None,
+    translate_stream=None,
 ) -> Response:
     if body.get("stream") is True:
         req = client.build_request("POST", url, headers=headers, json=body)
@@ -75,6 +76,15 @@ async def forward(
                     "error": {"message": payload.decode(errors="replace")[:2000]}
                 }
             return JSONResponse(status_code=upstream.status_code, content=content)
+        if translate_stream is not None:
+            lines = [line async for line in upstream.aiter_lines()]
+            try:
+                await upstream.aclose()
+            except Exception:
+                pass
+            return StreamingResponse(
+                translate_stream(lines, trace_id), media_type="text/event-stream"
+            )
         media = upstream.headers.get("content-type", "text/event-stream")
         return StreamingResponse(stream_upstream(upstream, trace_id), media_type=media)
     try:

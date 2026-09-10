@@ -8,6 +8,12 @@ from proxy.forward import forward, parse_body
 from proxy.ir import LlmRequest
 from proxy.logging import log_ingress, log_upstream, new_trace_id
 from proxy.router import ENDPOINT_PATH, pick
+from proxy.stream_translate import (
+    chat_to_responses as stream_chat_to_responses,
+)
+from proxy.stream_translate import (
+    responses_to_chat as stream_responses_to_chat,
+)
 from proxy.translate import (
     from_chat,
     from_responses,
@@ -24,6 +30,23 @@ DEFAULT_MODEL_ATTR = {"responses": "default_model", "chat": "default_chat_model"
 
 
 def _convert_for(ingress: str, egress: str, model: str):
+    if ingress == egress:
+        return None
+    if ingress == "chat" and egress == "responses":
+        return lambda payload: responses_to_chat(payload, model)
+    if ingress == "responses" and egress == "chat":
+        return lambda payload: chat_to_responses(payload, model)
+    return None
+
+
+def _stream_for(ingress: str, egress: str, model: str):
+    if ingress == egress:
+        return None
+    if ingress == "chat" and egress == "responses":
+        return lambda lines, trace_id: stream_responses_to_chat(lines, trace_id, model)
+    if ingress == "responses" and egress == "chat":
+        return lambda lines, trace_id: stream_chat_to_responses(lines, trace_id, model)
+    return None
     if ingress == egress:
         return None
     if ingress == "chat" and egress == "responses":
@@ -59,11 +82,6 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     headers = build_zen_headers(settings, request.headers.get("authorization"))
     url = settings.zen_base_url.rstrip("/") + ENDPOINT_PATH[egress]
     log_upstream(trace_id, url, headers, outbound)
-    if req.stream and ingress != egress:
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"message": "streaming translation not supported yet"}},
-        )
     client = request.app.state.upstream_client
     return await forward(
         client,
@@ -72,4 +90,5 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         outbound,
         trace_id,
         convert=_convert_for(ingress, egress, req.model),
+        translate_stream=_stream_for(ingress, egress, req.model),
     )
