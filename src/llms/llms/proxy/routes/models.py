@@ -6,21 +6,21 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 
 from llms.proxy.catalog import BY_ID
-from llms.proxy.config import Settings, get_settings
+from llms.proxy.config import Settings, settings_from_app
 
 router = APIRouter()
 
 
 @router.get("/v1/models", response_model=None)
 async def list_models_v1(
-    request: Request, settings: Settings = Depends(get_settings)
+    request: Request, settings: Settings = Depends(settings_from_app)
 ) -> Response:
     return await handle_models(settings)
 
 
 @router.get("/models", response_model=None)
 async def list_models_bare(
-    request: Request, settings: Settings = Depends(get_settings)
+    request: Request, settings: Settings = Depends(settings_from_app)
 ) -> Response:
     return await handle_models(settings)
 

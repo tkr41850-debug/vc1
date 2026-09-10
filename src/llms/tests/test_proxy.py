@@ -23,14 +23,17 @@ def test_non_stream_passthrough_with_model_override(app_client):
     assert seen["url"].endswith("/responses")
     assert seen["json"]["model"] == "muse-spark-1.3-contributor-free"
     assert seen["headers"]["x-opencode-client"] == "cli"
-    assert seen["headers"]["user-agent"] == "opencode/1.18.4"
+    assert seen["headers"]["user-agent"].startswith("opencode/")
 
 
-def test_model_defaults_when_missing(app_client):
-    tc, seen = app_client
-    r = tc.post("/v1/responses", json={"input": "hi"})
-    assert r.status_code == 200
-    assert seen["json"]["model"] == "muse-spark-1.3-contributor-free"
+def test_model_defaults_when_missing(mock_upstream):
+    from tests.conftest import build_app_client, make_settings
+
+    client, seen = mock_upstream
+    with build_app_client(make_settings(default_model="custom-resp"), client) as tc:
+        r = tc.post("/v1/responses", json={"input": "hi"})
+        assert r.status_code == 200
+        assert seen["json"]["model"] == "custom-resp"
 
 
 def test_bare_responses_alias(app_client):

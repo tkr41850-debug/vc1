@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from fastapi import Request
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -67,3 +69,7 @@ def _free_models() -> tuple:
 
 def get_settings() -> Settings:
     return Settings()
+
+
+def settings_from_app(request: Request) -> Settings:
+    return request.app.state.settings

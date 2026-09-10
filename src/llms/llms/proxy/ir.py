@@ -103,3 +103,5 @@ class ReasoningDelta:
 class StreamDone:
     status: str
     has_tool_calls: bool = False
+    input_tokens: int = 0
+    output_tokens: int = 0

@@ -135,6 +135,37 @@ def test_chat_stream_without_done_still_completes():
     assert events[-1]["type"] == "response.completed"
 
 
+def test_usage_flows_responses_to_messages_stream():
+    lines = [
+        'data: {"type":"response.output_text.delta","delta":"hi"}',
+        "",
+        'data: {"type":"response.completed","response":{"id":"r","status":"completed","usage":{"input_tokens":7,"output_tokens":3}}}',
+        "",
+    ]
+    events = collect(responses_to_messages(lines, "t1", "m"))
+    delta = next(e for e in events if e["type"] == "message_delta")
+    assert delta["usage"] == {"input_tokens": 7, "output_tokens": 3}
+
+
+def test_usage_flows_messages_to_responses_stream():
+    lines = [
+        "event: message_delta",
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":7,"output_tokens":3}}',
+        "",
+        "event: message_stop",
+        'data: {"type":"message_stop"}',
+        "",
+    ]
+    events = collect(messages_to_responses(lines, "t1", "m"))
+    completed = events[-1]
+    assert completed["type"] == "response.completed"
+    assert completed["response"]["usage"] == {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "total_tokens": 10,
+    }
+
+
 def test_reasoning_deltas_flow_to_messages_thinking():
     lines = [
         'data: {"type":"response.reasoning_text.delta","delta":"ponder"}',

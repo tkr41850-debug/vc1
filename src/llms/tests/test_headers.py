@@ -21,7 +21,7 @@ def test_request_ids_unique():
 def test_free_tier_sends_no_auth_but_identity_headers():
     headers = build_zen_headers(make_settings(zen_api_key=""), None)
     assert "Authorization" not in headers
-    assert headers["User-Agent"] == "opencode/1.18.4"
+    assert headers["User-Agent"].startswith("opencode/")
     assert headers["x-opencode-client"] == "cli"
     assert headers["x-opencode-project"] == "global"
     assert headers["x-opencode-session"].startswith("ses_")

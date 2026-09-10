@@ -142,8 +142,12 @@ def mock_upstream(upstream_seen):
 @pytest.fixture()
 def app_client(mock_upstream):
     client, seen = mock_upstream
-    app = create_app(make_settings())
-    app.state.egress = DirectEgress(client)
-    app.state.bucket_table = BucketTable(num_buckets=1024, num_slots=1)
-    with TestClient(app) as tc:
+    with build_app_client(make_settings(), client) as tc:
         yield tc, seen
+
+
+def build_app_client(settings, mock_client):
+    app = create_app(settings)
+    app.state.egress = DirectEgress(mock_client)
+    app.state.bucket_table = BucketTable(num_buckets=1024, num_slots=1)
+    return TestClient(app)

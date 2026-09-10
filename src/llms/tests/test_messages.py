@@ -19,9 +19,16 @@ def test_messages_passthrough(app_client):
     assert body["content"] == [{"type": "text", "text": "hello"}]
 
 
-def test_messages_model_defaults(app_client):
-    tc, seen = app_client
-    r = tc.post("/v1/messages", json={"messages": [{"role": "user", "content": "hi"}]})
-    assert r.status_code == 200
-    assert seen["json"]["model"] == "claude-haiku-4-5"
-    assert seen["json"]["max_tokens"] == 1024
+def test_messages_model_defaults(mock_upstream):
+    from tests.conftest import build_app_client, make_settings
+
+    client, seen = mock_upstream
+    with build_app_client(
+        make_settings(default_messages_model="custom-msg"), client
+    ) as tc:
+        r = tc.post(
+            "/v1/messages", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+        assert r.status_code == 200
+        assert seen["json"]["model"] == "custom-msg"
+        assert seen["json"]["max_tokens"] == 1024

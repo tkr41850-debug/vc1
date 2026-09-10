@@ -16,8 +16,10 @@ def test_drops_unknown_harness_fields():
 
 
 def test_applies_default_model():
-    request = build_zen_request({"input": "hi"}, make_settings())
-    assert request["model"] == "muse-spark-1.3-contributor-free"
+    request = build_zen_request(
+        {"input": "hi"}, make_settings(default_model="custom-default")
+    )
+    assert request["model"] == "custom-default"
 
 
 def test_keeps_known_responses_fields():

@@ -127,7 +127,13 @@ def parse_responses_sse(
                 "response.completed": "completed",
                 "response.failed": "failed",
             }.get(kind, "incomplete")
-            yield StreamDone(status, has_tool_calls=saw_calls or bool(names))
+            usage = event.get("response", {}).get("usage", {})
+            yield StreamDone(
+                status,
+                has_tool_calls=saw_calls or bool(names),
+                input_tokens=int(usage.get("input_tokens", 0)),
+                output_tokens=int(usage.get("output_tokens", 0)),
+            )
             return
     yield StreamDone("completed", has_tool_calls=saw_calls or bool(names))
 
@@ -138,6 +144,8 @@ def parse_messages_sse(
     ids: dict[int, str] = {}
     names: dict[int, str] = {}
     stop = "end_turn"
+    in_tok = 0
+    out_tok = 0
     for payload in split_events(lines):
         if skip_payload(payload):
             continue
@@ -167,6 +175,9 @@ def parse_messages_sse(
             continue
         if kind == "message_delta":
             stop = event.get("delta", {}).get("stop_reason", stop)
+            usage = event.get("usage", {})
+            in_tok = int(usage.get("input_tokens", in_tok))
+            out_tok = int(usage.get("output_tokens", out_tok))
             continue
         if kind == "message_stop":
             yield StreamDone(
@@ -174,7 +185,9 @@ def parse_messages_sse(
                 if stop in ("end_turn", "tool_use", "stop_sequence")
                 else "incomplete"
                 if stop == "max_tokens"
-                else "failed"
+                else "failed",
+                input_tokens=in_tok,
+                output_tokens=out_tok,
             )
             return
     yield StreamDone("completed")
@@ -463,7 +476,16 @@ def emit_responses_sse(
             yield _resp_event(
                 {
                     "type": f"response.{delta.status}",
-                    "response": {"id": resp_id, "status": delta.status, "model": model},
+                    "response": {
+                        "id": resp_id,
+                        "status": delta.status,
+                        "model": model,
+                        "usage": {
+                            "input_tokens": delta.input_tokens,
+                            "output_tokens": delta.output_tokens,
+                            "total_tokens": delta.input_tokens + delta.output_tokens,
+                        },
+                    },
                 }
             )
             return
@@ -586,7 +608,13 @@ def emit_messages_sse(
                 stop = "end_turn"
             yield _msg_event(
                 "message_delta",
-                {"delta": {"stop_reason": stop}, "usage": {"output_tokens": 0}},
+                {
+                    "delta": {"stop_reason": stop},
+                    "usage": {
+                        "input_tokens": delta.input_tokens,
+                        "output_tokens": delta.output_tokens,
+                    },
+                },
             )
             yield _msg_event("message_stop", {})
             return
