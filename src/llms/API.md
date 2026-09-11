@@ -96,6 +96,10 @@ Traffic still spreads by model when both are absent.
 Buckets map to egress slots
 (`bucket % NUM_SLOTS` initially); on a rate-limit signal the bucket advances
 to the next slot with cooldown `max(SLOT_COOLDOWN_S, Retry-After)`.
+Warp pool providers created after startup (admin UI or
+`/api/admin/providers`) resize the table to their live ready-exit count on
+create/update/delete and on health refreshes; direct-only deploys stay at
+one slot.
 
 ## Request contract (all dialects)
 
