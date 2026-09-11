@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { ApiError, api, type ApiKeyEntry } from "../api";
+import { api, type ApiKeyEntry } from "../api";
+import { useCrudTab } from "../useCrudTab";
 
 function fmt(n: number): string {
   return n.toLocaleString("en-US");
@@ -51,12 +52,7 @@ export default function KeysTab({
   onAuthError: () => void;
 }) {
   const [form, setForm] = useState({ key: "", label: "" });
-  const [error, setError] = useState("");
-
-  const fail = (e: unknown) => {
-    if (e instanceof ApiError && e.status === 401) return onAuthError();
-    setError(e instanceof Error ? e.message : String(e));
-  };
+  const { error, setError, run } = useCrudTab(onAuthError);
 
   const add = async () => {
     if (!form.key.trim()) {
@@ -67,46 +63,23 @@ export default function KeysTab({
       setError("secret keys must start with sk- (ak- is affinity, not auth)");
       return;
     }
-    setError("");
-    try {
+    await run(async () => {
       await api.createKey({ key: form.key.trim(), label: form.label, enabled: true });
       setForm({ key: "", label: "" });
-      reload();
-    } catch (e) {
-      fail(e);
-    }
+    }, reload);
   };
 
-  const toggle = async (k: ApiKeyEntry) => {
-    setError("");
-    try {
-      await api.updateKey(k.key, { enabled: !k.enabled });
-      reload();
-    } catch (e) {
-      fail(e);
-    }
-  };
+  const toggle = (k: ApiKeyEntry) =>
+    run(() => api.updateKey(k.key, { enabled: !k.enabled }), reload);
 
-  const remove = async (k: ApiKeyEntry) => {
+  const remove = (k: ApiKeyEntry) => {
     if (!window.confirm(`Delete key ${k.key}? This orphans its usage history.`)) return;
-    setError("");
-    try {
-      await api.deleteKey(k.key);
-      reload();
-    } catch (e) {
-      fail(e);
-    }
+    return run(() => api.deleteKey(k.key), reload);
   };
 
-  const rotate = async (k: ApiKeyEntry) => {
+  const rotate = (k: ApiKeyEntry) => {
     if (!window.confirm(`Rotate ${k.key}? A new secret is issued; the old one is disabled and usage carries over.`)) return;
-    setError("");
-    try {
-      await api.rotateKey(k.key);
-      reload();
-    } catch (e) {
-      fail(e);
-    }
+    return run(() => api.rotateKey(k.key), reload);
   };
 
   return (

@@ -91,37 +91,27 @@ const json = (body: unknown) => ({
   body: JSON.stringify(body),
 });
 
-export const api = {
-  keys: () => req<{ keys: ApiKeyEntry[] }>("/api/admin/keys"),
-  createKey: (body: { key: string; label: string; enabled: boolean }) =>
-    req<ApiKeyEntry>("/api/admin/keys", json(body)),
-  updateKey: (key: string, body: { label?: string; enabled?: boolean }) =>
-    req<ApiKeyEntry>(`/api/admin/keys/${encodeURIComponent(key)}`, {
-      ...json(body),
-      method: "PUT",
-    }),
-  deleteKey: (key: string) =>
-    req<{ status: string }>(`/api/admin/keys/${encodeURIComponent(key)}`, {
-      method: "DELETE",
-    }),
-  rotateKey: (key: string, new_key?: string) =>
-    req<ApiKeyEntry>(`/api/admin/keys/${encodeURIComponent(key)}/rotate`, {
-      ...json({ new_key: new_key ?? "" }),
-    }),
-  models: () => req<{ models: ModelEntry[] }>("/api/admin/models"),
-  createModel: (body: { id: string; label: string; enabled: boolean }) =>
-    req<ModelEntry>("/api/admin/models", json(body)),
-  updateModel: (id: string, body: { label?: string; enabled?: boolean }) =>
-    req<ModelEntry>(`/api/admin/models/${encodeURIComponent(id)}`, {
-      ...json(body),
-      method: "PUT",
-    }),
-  deleteModel: (id: string) =>
-    req<{ status: string }>(`/api/admin/models/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-    }),
-  providers: () => req<{ providers: ProviderEntry[] }>("/api/admin/providers"),
-  createProvider: (body: {
+/** Generic CRUD client for one admin collection: list/create/update/delete. */
+function resource<List, Entry, Create, Patch>(base: string) {
+  const url = (id?: string) =>
+    id === undefined ? base : `${base}/${encodeURIComponent(id)}`;
+  return {
+    list: () => req<List>(url()),
+    create: (body: Create) => req<Entry>(url(), json(body)),
+    update: (id: string, body: Patch) =>
+      req<Entry>(url(id), { ...json(body), method: "PUT" }),
+    remove: (id: string) => req<{ status: string }>(url(id), { method: "DELETE" }),
+  };
+}
+
+const keysRes = resource<{ keys: ApiKeyEntry[] }, ApiKeyEntry,
+  { key: string; label: string; enabled: boolean },
+  { label?: string; enabled?: boolean }>("/api/admin/keys");
+const modelsRes = resource<{ models: ModelEntry[] }, ModelEntry,
+  { id: string; label: string; enabled: boolean },
+  { label?: string; enabled?: boolean }>("/api/admin/models");
+const providersRes = resource<{ providers: ProviderEntry[] }, { id: string },
+  {
     id: string;
     label: string;
     kind: string;
@@ -129,19 +119,31 @@ export const api = {
     token: string;
     models: string[];
     enabled: boolean;
-  }) => req<{ id: string }>("/api/admin/providers", json(body)),
-  updateProvider: (
-    id: string,
-    body: { label?: string; base_url?: string; token?: string; models?: string[]; enabled?: boolean },
-  ) =>
-    req<{ id: string; enabled: boolean }>(
-      `/api/admin/providers/${encodeURIComponent(id)}`,
-      { ...json(body), method: "PUT" },
-    ),
-  deleteProvider: (id: string) =>
-    req<{ status: string }>(`/api/admin/providers/${encodeURIComponent(id)}`, {
-      method: "DELETE",
+  },
+  { label?: string; base_url?: string; token?: string; models?: string[]; enabled?: boolean }
+>("/api/admin/providers");
+
+export const api = {
+  keys: keysRes.list,
+  createKey: keysRes.create,
+  updateKey: keysRes.update,
+  deleteKey: keysRes.remove,
+  rotateKey: (key: string, new_key?: string) =>
+    req<ApiKeyEntry>(`/api/admin/keys/${encodeURIComponent(key)}/rotate`, {
+      ...json({ new_key: new_key ?? "" }),
     }),
+  models: modelsRes.list,
+  createModel: modelsRes.create,
+  updateModel: (id: string, body: { label?: string; enabled?: boolean }) =>
+    req<ModelEntry>(`/api/admin/models/${encodeURIComponent(id)}`, {
+      ...json(body),
+      method: "PUT",
+    }),
+  deleteModel: modelsRes.remove,
+  providers: providersRes.list,
+  createProvider: providersRes.create,
+  updateProvider: providersRes.update,
+  deleteProvider: providersRes.remove,
   providerHealth: (id: string) =>
     req<ProviderEntry & { debug: Record<string, unknown> }>(
       `/api/admin/providers/${encodeURIComponent(id)}/health`,

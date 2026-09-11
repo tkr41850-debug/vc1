@@ -32,8 +32,19 @@ export default function App() {
 
   useEffect(() => {
     reload();
-    const t = setInterval(reload, 15000);
-    return () => clearInterval(t);
+    // Pause background polling while the tab is hidden: an idle admin page
+    // shouldn't keep churning the server's YAML parses + usage snapshots.
+    const onVis = () => {
+      if (!document.hidden) reload();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    const t = setInterval(() => {
+      if (!document.hidden) reload();
+    }, 15000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      clearInterval(t);
+    };
   }, [reload]);
 
   const logout = async () => {

@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { ApiError, api, type ModelEntry } from "../api";
+import { api, type ModelEntry } from "../api";
+import { useCrudTab } from "../useCrudTab";
 
 export default function ModelsTab({
   models,
@@ -11,47 +12,25 @@ export default function ModelsTab({
   onAuthError: () => void;
 }) {
   const [form, setForm] = useState({ id: "", label: "" });
-  const [error, setError] = useState("");
-
-  const fail = (e: unknown) => {
-    if (e instanceof ApiError && e.status === 401) return onAuthError();
-    setError(e instanceof Error ? e.message : String(e));
-  };
+  const { error, setError, run } = useCrudTab(onAuthError);
 
   const add = async () => {
     if (!form.id.trim()) {
       setError("id is required");
       return;
     }
-    setError("");
-    try {
+    await run(async () => {
       await api.createModel({ id: form.id.trim(), label: form.label, enabled: true });
       setForm({ id: "", label: "" });
-      reload();
-    } catch (e) {
-      fail(e);
-    }
+    }, reload);
   };
 
-  const toggle = async (m: ModelEntry) => {
-    setError("");
-    try {
-      await api.updateModel(m.id, { enabled: !m.enabled });
-      reload();
-    } catch (e) {
-      fail(e);
-    }
-  };
+  const toggle = (m: ModelEntry) =>
+    run(() => api.updateModel(m.id, { enabled: !m.enabled }), reload);
 
-  const remove = async (m: ModelEntry) => {
+  const remove = (m: ModelEntry) => {
     if (!window.confirm(`Delete model ${m.id}?`)) return;
-    setError("");
-    try {
-      await api.deleteModel(m.id);
-      reload();
-    } catch (e) {
-      fail(e);
-    }
+    return run(() => api.deleteModel(m.id), reload);
   };
 
   return (

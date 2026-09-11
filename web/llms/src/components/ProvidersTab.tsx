@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiError, api, type ProviderEntry, type RecentEntry } from "../api";
+import { useCrudTab } from "../useCrudTab";
 
 function fmtRetry(sec: number): string {
   if (sec <= 0) return "—";
@@ -189,21 +190,15 @@ export default function ProvidersTab({
   onAuthError: () => void;
 }) {
   const [form, setForm] = useState({ id: "", label: "", base_url: "", token: "", models: "" });
-  const [error, setError] = useState("");
   const [debugId, setDebugId] = useState<string | null>(null);
-
-  const fail = (e: unknown) => {
-    if (e instanceof ApiError && e.status === 401) return onAuthError();
-    setError(e instanceof Error ? e.message : String(e));
-  };
+  const { error, setError, run } = useCrudTab(onAuthError);
 
   const add = async () => {
     if (!form.id.trim() || !form.base_url.trim()) {
       setError("id and pool base URL are required");
       return;
     }
-    setError("");
-    try {
+    await run(async () => {
       await api.createProvider({
         id: form.id.trim(),
         label: form.label,
@@ -214,31 +209,15 @@ export default function ProvidersTab({
         enabled: true,
       });
       setForm({ id: "", label: "", base_url: "", token: "", models: "" });
-      reload();
-    } catch (e) {
-      fail(e);
-    }
+    }, reload);
   };
 
-  const toggle = async (p: ProviderEntry) => {
-    setError("");
-    try {
-      await api.updateProvider(p.id, { enabled: !p.enabled });
-      reload();
-    } catch (e) {
-      fail(e);
-    }
-  };
+  const toggle = (p: ProviderEntry) =>
+    run(() => api.updateProvider(p.id, { enabled: !p.enabled }), reload);
 
-  const remove = async (p: ProviderEntry) => {
+  const remove = (p: ProviderEntry) => {
     if (!window.confirm(`Delete provider ${p.id}?`)) return;
-    setError("");
-    try {
-      await api.deleteProvider(p.id);
-      reload();
-    } catch (e) {
-      fail(e);
-    }
+    return run(() => api.deleteProvider(p.id), reload);
   };
 
   const debugProvider = debugId ? providers.find((p) => p.id === debugId) ?? null : null;
