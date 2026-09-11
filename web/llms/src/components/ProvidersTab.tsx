@@ -26,10 +26,14 @@ function DebugModal({
   onClose: () => void;
   onAuthError: () => void;
 }) {
+  const [live, setLive] = useState<ProviderEntry | null>(null);
   const [recent, setRecent] = useState<RecentEntry[]>([]);
   const [debug, setDebug] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState("");
+  const [streamError, setStreamError] = useState("");
   const esRef = useRef<EventSource | null>(null);
+
+  const shown = live ?? provider;
 
   useEffect(() => {
     let cancelled = false;
@@ -37,8 +41,8 @@ function DebugModal({
       .providerHealth(provider.id)
       .then((h) => {
         if (!cancelled) {
+          setLive(h);
           setDebug((h.debug as Record<string, unknown>) ?? null);
-          setRecent((h as unknown as { recent?: RecentEntry[] }).recent ?? recent);
         }
       })
       .catch((e) => {
@@ -62,7 +66,11 @@ function DebugModal({
         /* keep old */
       }
     };
-    es.onerror = () => {};
+    es.onerror = () => {
+      if (!cancelled) {
+        setStreamError("Live stream disconnected — recent requests may be stale.");
+      }
+    };
     return () => {
       cancelled = true;
       es.close();
@@ -87,6 +95,7 @@ function DebugModal({
           </button>
         </div>
         {error && <p className="mb-2 text-sm text-red-600">{error}</p>}
+        {streamError && <p className="mb-2 text-sm text-amber-600">{streamError}</p>}
         <h3 className="mb-1 text-sm font-medium text-gray-600">Warp exits</h3>
         <table className="mb-4 w-full border-collapse text-sm">
           <thead>
@@ -100,7 +109,7 @@ function DebugModal({
             </tr>
           </thead>
           <tbody>
-            {provider.health.exits.map((w) => (
+            {shown.health.exits.map((w) => (
               <tr key={w.idx} className="border-b font-mono text-xs">
                 <td className="py-1 pr-3">{w.idx}</td>
                 <td className="py-1 pr-3">{w.ready ? "yes" : "no"}</td>
@@ -110,7 +119,7 @@ function DebugModal({
                 <td className="py-1">{w.error || w.reason || "—"}</td>
               </tr>
             ))}
-            {provider.health.exits.length === 0 && (
+            {shown.health.exits.length === 0 && (
               <tr>
                 <td colSpan={6} className="py-2 text-center text-gray-500">
                   {provider.kind === "noproxy"

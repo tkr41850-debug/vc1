@@ -37,8 +37,13 @@ export default function App() {
   }, [reload]);
 
   const logout = async () => {
-    await api.logout();
-    setAuthed(false);
+    try {
+      await api.logout();
+    } catch {
+      /* expired session already logged out server-side; fall through */
+    } finally {
+      setAuthed(false);
+    }
   };
 
   if (loading) {

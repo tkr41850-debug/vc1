@@ -1,3 +1,7 @@
+# NOTE: repo paths are absolute to this checkout. When merging to main (or
+# checking out elsewhere), replace with justfile-relative paths once just
+# supports function calls in const context (justfile_directory() is rejected
+# in 1.50 for `set working-directory` and := assignments).
 repo := "/home/uqmm/vc1/.claude/worktrees/web-ui"
 set working-directory := repo + "/src/llms"
 
