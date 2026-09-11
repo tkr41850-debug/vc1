@@ -106,13 +106,18 @@ class ProviderEgress:
             egress = self._warp.get(p.id)
             if egress is None:
                 egress = WarpPoolEgress(p.base_url, p.token)
+                self._warp[p.id] = egress
+            registry._egresses = self._warp
+            rt = registry.runtime(p.id)
+            if rt.health.fetched_at > 0:
+                ready = sum(1 for w in rt.health.exits if w.ready)
+                egress.set_num_slots(ready)
+                if ready == 0:
+                    continue
+            else:
                 saved = registry.ready_exits(p.id)
                 if saved is not None:
                     egress.set_num_slots(saved)
-                self._warp[p.id] = egress
-            registry._egresses = self._warp
-            if registry.runtime(p.id).health.fetched_at > 0 and egress.num_slots() == 0:
-                continue
             return p.id, "warp", egress
         for p in providers:
             if p.enabled and p.serves(model):
