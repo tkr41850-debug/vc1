@@ -19,7 +19,7 @@ def test_request_ids_unique():
 
 
 def test_free_tier_sends_no_auth_but_identity_headers():
-    headers = build_zen_headers(make_settings(zen_api_key=""), None)
+    headers = build_zen_headers(make_settings(zen_api_key=""))
     assert "Authorization" not in headers
     assert headers["User-Agent"].startswith("opencode/")
     assert headers["x-opencode-client"] == "cli"
@@ -28,24 +28,20 @@ def test_free_tier_sends_no_auth_but_identity_headers():
     assert headers["x-opencode-request"].startswith("msg_")
 
 
-def test_incoming_bearer_ignored_by_default():
+def test_incoming_credentials_never_forwarded():
+    # sk- secrets, harness dummy keys, anything client-sent: never upstream.
     settings: Settings = make_settings(zen_api_key="")
-    headers = build_zen_headers(settings, "Bearer incoming-key")
-    assert "Authorization" not in headers
+    for incoming in ("Bearer sk-client", "Bearer dummy", "Bearer incoming-key"):
+        headers = build_zen_headers(settings, incoming)
+        assert "Authorization" not in headers
 
 
-def test_env_key_wins_over_incoming():
+def test_env_key_used_when_set():
     settings: Settings = make_settings(zen_api_key="env-key")
-    headers = build_zen_headers(settings, "Bearer incoming-key")
+    headers = build_zen_headers(settings, "Bearer sk-client")
     assert headers["Authorization"] == "Bearer env-key"
 
 
-def test_incoming_forwarded_when_allowed():
-    settings: Settings = make_settings(zen_api_key="", allow_client_keys=True)
-    headers = build_zen_headers(settings, "Bearer incoming-key")
-    assert headers["Authorization"] == "Bearer incoming-key"
-
-
 def test_env_key_used_when_no_incoming_auth():
-    headers = build_zen_headers(make_settings(zen_api_key="env-key"), None)
+    headers = build_zen_headers(make_settings(zen_api_key="env-key"))
     assert headers["Authorization"] == "Bearer env-key"

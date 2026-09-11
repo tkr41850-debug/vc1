@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from llms.proxy.catalog import BY_ID
 from llms.proxy.routes.models import entry_for
+from tests.conftest import TEST_HEADERS
 
 
 def test_models_lists_free_catalog(app_client):
     tc, _ = app_client
-    r = tc.get("/v1/models")
+    r = tc.get("/v1/models", headers=TEST_HEADERS)
     assert r.status_code == 200
     body = r.json()
     assert body["object"] == "list"
@@ -17,19 +18,21 @@ def test_models_lists_free_catalog(app_client):
 
 def test_models_bare_alias(app_client):
     tc, _ = app_client
-    assert tc.get("/models").status_code == 200
+    assert tc.get("/models", headers=TEST_HEADERS).status_code == 200
 
 
-def test_models_behind_affinity_prefix(app_client):
+def test_models_missing_secret_rejected(app_client):
     tc, _ = app_client
-    r = tc.get("/ak-team1/v1/models")
-    assert r.status_code == 200
-    assert r.json()["object"] == "list"
+    r = tc.get("/v1/models")
+    assert r.status_code == 401
+    assert r.json() == {"error": {"message": "missing or invalid secret key"}}
 
 
 def test_models_exposes_limits_effort_routing_and_tools(app_client):
     tc, _ = app_client
-    data = {m["id"]: m for m in tc.get("/v1/models").json()["data"]}
+    data = {
+        m["id"]: m for m in tc.get("/v1/models", headers=TEST_HEADERS).json()["data"]
+    }
     spark = data["muse-spark-1.3-contributor-free"]
     assert spark["context_window"] == 1000000
     assert spark["max_output_tokens"] == 131072

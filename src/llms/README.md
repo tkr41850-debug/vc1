@@ -7,29 +7,47 @@ See [API.md](API.md) for the wire contracts.
 ## Quickstart
 
 ```sh
-just sync   # install deps with uv
-just up     # start in background (kills any existing instance)
-just down   # stop it
-just test   # mocked unit suite
-just lint   # ruff check + format
+cp ../../.env.example ../../.env  # once; fill in GitHub OAuth + admin users
+just sync       # install deps with uv
+just up         # build web UI + start gateway in background
+just keygen     # bootstrap an sk- key without the admin UI (prints export lines)
+just down       # stop it
+just test       # mocked unit suite
+just lint       # ruff check + format
+just docker-up  # or: containerized (same port, ./data mounted)
 ```
+
+First key without OAuth: `just keygen [label]` appends a random `sk-` secret
+to `data/keys.yaml` and prints `export`/`curl` lines. (The admin UI can manage
+keys afterwards, but needs a configured GitHub OAuth app — keygen breaks the
+chicken-and-egg.)
 
 Health: `curl localhost:8789/healthz` → `{"status":"ok"}`.
 Port via `ZEN_GATEWAY_PORT` (default `8789`).
 
+## Admin UI
+
+`just up`, then open `http://localhost:8789/` and sign in with GitHub
+(register an OAuth app; callback `http://localhost:8789/api/admin/callback`;
+put your login in `ADMIN_GITHUB_USERS`). Manage keys (with aggregate usage)
+and models; stored in `data/keys.yaml` / `data/models.yaml` at the repo root.
+
 ## Claude Code (free, via Muse Spark)
 
-Client side (`~/.bashrc`, then `source ~/.bashrc`):
+Client side (`~/.bashrc`, then `source ~/.bashrc`; create the `sk-` key in
+the admin UI first — needs `just up` running):
 
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8789"
-export ANTHROPIC_API_KEY="dummy"
+export ANTHROPIC_API_KEY="sk-your-key"
 export ANTHROPIC_MODEL="muse-spark-1.3-contributor-free"
 ```
 
 `ANTHROPIC_MODEL` matters: plain `claude --model <id>` gets overridden by
-Claude's own default, the env var sticks. The key value is ignored; llms
-authenticates with its own `ZEN_API_KEY` or the anonymous free tier.
+Claude's own default, the env var sticks. The `sk-` secret authenticates you
+to the gateway (usage is attributed to it); the gateway itself authenticates
+upstream with its own `ZEN_API_KEY` or the anonymous free tier. Prefixing the
+path with `ak-<affinity>` is optional and only picks the egress pool.
 
 Server side (same file is fine on the same machine — `just up` inherits it;
 re-run `just up` afterwards so the server picks it up):
@@ -52,9 +70,13 @@ just probe-dsh    # DeepSeek harness (chat) → auto-translated to model endpoin
 just probe-claude # Claude Code headless (needs a messages-capable model)
 ```
 
-Affinity routing: prefix any path with your key, e.g.
-`POST /ak-team1/v1/responses`. Keys match `ak-[A-Za-z0-9_-]+`; requests
-without a key are bucketed by model alone.
+All requests (including `/v1/models`) must carry an `sk-` secret key from
+`data/keys.yaml` on the header (`Authorization: Bearer sk-...` or
+`x-api-key`), e.g. `curl -H "Authorization: Bearer sk-team1"
+localhost:8789/v1/models`. Missing, unknown, or disabled secrets get `401`.
+Only `/healthz` and the OAuth login flow stay open. An optional `ak-`
+affinity path prefix (`POST /ak-team1/v1/responses`) picks the egress pool
+but never authenticates.
 
 `GET /v1/models` lists the free catalog with limits, effort tiers, routing,
 and tool/streaming support; `just catalog` checks the seed against live Zen.
@@ -64,7 +86,6 @@ and tool/streaming support; `just catalog` checks the seed against live Zen.
 | Variable | Default | Purpose |
 |---|---|---|
 | `ZEN_API_KEY` | — | Operator Zen key; empty = anonymous free tier |
-| `ZEN_ALLOW_CLIENT_KEYS` | `0` | `1` lets harness `Bearer` keys through when no operator key set |
 | `ZEN_BASE_URL` | `https://opencode.ai/zen/v1` | Upstream gateway |
 | `ZEN_DEFAULT_MODEL` | `muse-spark-1.3-contributor-free` | Responses fallback |
 | `ZEN_DEFAULT_CHAT_MODEL` | `muse-spark-1.3-contributor-free` | Chat fallback |
@@ -78,3 +99,8 @@ and tool/streaming support; `just catalog` checks the seed against live Zen.
 | `VSP_BASE_URL`, `VSP_TOKEN` | — | Warp pool endpoint/credential (future) |
 | `ZEN_GATEWAY_PORT` | `8789` | Listen port |
 | `ZEN_TIMEOUT_S` | `120` | Upstream timeout |
+| `DATA_DIR` | `./data` | Keys/models YAML + usage.json |
+| `GITHUB_CLIENT_ID/SECRET` | — | OAuth app for the admin UI |
+| `GITHUB_REDIRECT_URI` | `http://localhost:8789/api/admin/callback` | OAuth callback |
+| `ADMIN_GITHUB_USERS` | — | Comma-separated admin logins |
+| `ADMIN_SESSION_SECRET` | — | Session cookie signing secret |

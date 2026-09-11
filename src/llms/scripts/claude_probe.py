@@ -15,12 +15,17 @@ def main() -> int:
     try:
         with (
             probe_dirs("claude-probe") as (_home, workspace),
-            running_proxy(PORT, os.getenv("PROXY_LOG", "/tmp/claude-probe-proxy.log")),
+            running_proxy(
+                PORT,
+                os.getenv("PROXY_LOG", "/tmp/claude-probe-proxy.log"),
+                data_dir=os.getenv("PROBE_DATA_DIR", "/tmp/claude-probe-data"),
+                probe_secret=os.getenv("PROBE_SECRET"),
+            ) as (_, secret),
         ):
             env = dict(
                 os.environ,
                 ANTHROPIC_BASE_URL=BASE_URL,
-                ANTHROPIC_API_KEY="dummy",
+                ANTHROPIC_API_KEY=secret,
                 ANTHROPIC_MODEL=MODEL,
             )
 

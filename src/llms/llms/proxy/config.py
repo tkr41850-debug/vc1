@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from fastapi import Request
 
@@ -38,9 +39,6 @@ class Settings:
     )
     free_models: tuple = field(default_factory=lambda: _free_models())
     model_aliases: tuple = field(default_factory=lambda: _model_aliases())
-    allow_client_keys: bool = field(
-        default_factory=lambda: os.getenv("ZEN_ALLOW_CLIENT_KEYS", "0") == "1"
-    )
     num_buckets: int = field(
         default_factory=lambda: int(os.getenv("NUM_BUCKETS", "1024"))
     )
@@ -56,6 +54,39 @@ class Settings:
     )
     request_timeout_s: float = field(
         default_factory=lambda: float(os.getenv("ZEN_TIMEOUT_S", "120"))
+    )
+    data_dir: str = field(default_factory=lambda: os.getenv("DATA_DIR", "./data"))
+    static_dir: str = field(
+        default_factory=lambda: os.getenv(
+            "STATIC_DIR",
+            str(
+                Path(__file__).resolve().parent.parent.parent
+                / "llms"
+                / "proxy"
+                / "static"
+            ),
+        )
+    )
+    github_client_id: str = field(
+        default_factory=lambda: os.getenv("GITHUB_CLIENT_ID", "")
+    )
+    github_client_secret: str = field(
+        default_factory=lambda: os.getenv("GITHUB_CLIENT_SECRET", "")
+    )
+    github_redirect_uri: str = field(
+        default_factory=lambda: os.getenv(
+            "GITHUB_REDIRECT_URI", "http://localhost:8789/api/admin/callback"
+        )
+    )
+    admin_github_users: tuple = field(
+        default_factory=lambda: tuple(
+            u.strip().lower()
+            for u in os.getenv("ADMIN_GITHUB_USERS", "").split(",")
+            if u.strip()
+        )
+    )
+    admin_session_secret: str = field(
+        default_factory=lambda: os.getenv("ADMIN_SESSION_SECRET", "")
     )
 
 

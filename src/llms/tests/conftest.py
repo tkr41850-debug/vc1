@@ -20,7 +20,6 @@ def make_settings(**overrides) -> Settings:
         "default_model": "muse-spark-1.3-contributor-free",
         "default_chat_model": "muse-spark-1.3-contributor-free",
         "default_messages_model": "claude-haiku-4-5",
-        "allow_client_keys": False,
         "num_buckets": 1024,
         "num_slots": 8,
         "slot_cooldown_s": 60.0,
@@ -30,6 +29,13 @@ def make_settings(**overrides) -> Settings:
         "vsp_token": "",
         "port": 8789,
         "request_timeout_s": 30.0,
+        "data_dir": "",
+        "static_dir": "",
+        "github_client_id": "",
+        "github_client_secret": "",
+        "github_redirect_uri": "http://localhost:8789/api/admin/callback",
+        "admin_github_users": (),
+        "admin_session_secret": "test-secret",
     }
     base.update(overrides)
     return Settings(**base)
@@ -140,15 +146,46 @@ def mock_upstream(upstream_seen):
     yield client, upstream_seen
 
 
-@pytest.fixture()
-def app_client(mock_upstream):
-    client, seen = mock_upstream
-    with build_app_client(make_settings(), client) as tc:
-        yield tc, seen
+TEST_SECRET = "sk-test"
+TEST_HEADERS = {"Authorization": f"Bearer {TEST_SECRET}"}
 
 
-def build_app_client(settings, mock_client):
+def build_app_client(settings, mock_client, seed_key: str | None = None):
+    from llms.proxy.keys import reset_cache
+    from llms.proxy.store import ApiKey, Store
+
+    reset_cache()
+    if seed_key is not None:
+        from pathlib import Path
+
+        Store(data_dir=Path(settings.data_dir)).save_keys(
+            [ApiKey(key=seed_key, label="test")]
+        )
     app = create_app(settings)
     app.state.egress = DirectEgress(mock_client)
     app.state.bucket_table = BucketTable(num_buckets=1024, num_slots=1)
     return TestClient(app)
+
+
+@pytest.fixture()
+def app_client(mock_upstream, tmp_path):
+    client, seen = mock_upstream
+    with build_app_client(
+        make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        yield tc, seen
+
+
+@pytest.fixture()
+def admin_client(mock_upstream, tmp_path, monkeypatch):
+    from llms.proxy.auth import require_admin
+
+    # The gate only honors dependency_overrides when explicitly enabled,
+    # so prod never consults a test hook in its hot path.
+    monkeypatch.setenv("ALLOW_ADMIN_OVERRIDE", "1")
+    client, seen = mock_upstream
+    with build_app_client(
+        make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        tc.app.dependency_overrides[require_admin] = lambda: "test-admin"
+        yield tc, seen

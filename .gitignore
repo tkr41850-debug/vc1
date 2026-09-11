@@ -1,1 +1,5 @@
 .claude/
+.env
+data/usage.json
+web/llms/node_modules/
+src/llms/llms/proxy/static/

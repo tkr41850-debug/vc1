@@ -3,43 +3,97 @@
 Local LLM gateway. Accepts OpenAI Responses, OpenAI chat, and Anthropic Messages
 dialects; routes each model to its preferred Zen endpoint, translating as needed.
 
+## Auth vs affinity (never mixed)
+
+Two different key namespaces, two different transports:
+
+- `sk-...` — the API secret key. Lives **only** on the request header:
+  `Authorization: Bearer sk-...` (OpenAI-style) or `x-api-key: sk-...`
+  (Anthropic-style). Must exist and be enabled in `data/keys.yaml`;
+  otherwise `401 {error.message: "missing or invalid secret key"}`.
+  Authenticated here, attributed in usage, **never forwarded upstream**.
+- `ak-...` — the affinity tag. Lives **only** in the request path as an
+  optional first segment (`/{affinity}/...`, matching `ak-[A-Za-z0-9_-]+`).
+  Unauthenticated: it is hashed with the model into a bucket, and the bucket
+  picks the egress pool. Never auth, never billed, never forwarded upstream.
+
 ## Ingress paths
 
-Plain and affinity-prefixed forms serve identically:
+Every request except `/healthz` and the OAuth login flow must carry an
+`sk-` secret key on the header. The `ak-` affinity prefix is optional
+(bucket routing only):
 
 ```
-POST /v1/responses | /responses
-POST /v1/chat/completions | /chat/completions
-POST /v1/messages | /messages
 GET  /healthz
+GET  /api/admin/login | /api/admin/callback | POST /api/admin/logout
 
-POST /{affinity}/v1/responses | /{affinity}/responses
-POST /{affinity}/v1/chat/completions | /{affinity}/chat/completions
-POST /{affinity}/v1/messages | /{affinity}/messages
+POST /v1/responses | /responses                    (Authorization: Bearer sk-...)
+POST /v1/chat/completions | /chat/completions      (Authorization: Bearer sk-...)
+POST /v1/messages | /messages                      (Authorization: Bearer sk-...)
+GET  /v1/models | /models                          (Authorization: Bearer sk-...)
+
+# same paths with optional unauthenticated affinity prefix:
+POST /{affinity}/v1/responses | ...
 ```
 
-`{affinity}` matches `ak-[A-Za-z0-9_-]+`. Any other first segment falls through
-to normal routing (usually 404). The prefix is stripped before routing; the key
-is carried as request affinity, never forwarded upstream.
+The affinity prefix is stripped before routing; usage is attributed to the
+`sk-` key, so different affinities sharing one secret aggregate together.
 
 ## Model catalog
 
-`GET /v1/models | /models` (affinity prefix also accepted) returns the free
-models ready to serve, OpenAI list shape. Each entry carries `id`, `object`,
+`GET /v1/models | /models` (secret-key header required, affinity prefix
+optional) returns the enabled models from `data/models.yaml`, OpenAI list
+shape. Each entry carries `id`, `object`,
 `created`, `owned_by: llms`, plus `zen_endpoint` (model's native Zen path),
 `context_window` / `max_output_tokens` (`null` = unverified),
 `reasoning_effort` tiers (or `null`) with `thinking_toggle` for on/off
 reasoning models, `tools` / `streaming` support (`null` = unverified),
 `pricing` (all catalog entries are free), and `contributor_terms` (prompts
-may train future models). Override the set with `ZEN_FREE_MODELS`
-(comma-separated); unknown ids get a minimal entry. `just catalog` diffs the
-seed against the live Zen free set.
+may train future models). `data/models.yaml` — managed via the admin UI —
+supersedes the seed set: the served list is exactly the enabled ids in the
+file (missing file falls back to the seed). Unknown ids get a minimal entry.
+`just catalog` diffs the seed against the live Zen free set. Served locally,
+no upstream call.
+
+## Admin API (GitHub OAuth session required)
+
+```
+GET    /api/admin/keys            keys with live usage aggregates
+POST   /api/admin/keys            {key: sk-..., label?, enabled?} -> 201 (ak- rejected: 400)
+PUT    /api/admin/keys/{key}      {label?, enabled?}
+DELETE /api/admin/keys/{key}
+GET    /api/admin/models          [{id, label, enabled}]
+POST   /api/admin/models          {id, label?, enabled?} -> 201
+PUT    /api/admin/models/{id}     {label?, enabled?}
+DELETE /api/admin/models/{id}
+GET    /api/admin/usage           {keys: {<key>: {requests, input_tokens, output_tokens, models}}}
+```
+
+Unauthenticated: `401 {error.message: "admin login required"}`. OAuth:
+`GET /api/admin/login` redirects to GitHub; `GET /api/admin/callback?code=`
+exchanges, allowlists `ADMIN_GITHUB_USERS`, sets a session, redirects to `/`.
+The admin UI (`/`, same port) 302s to login when unauthenticated.
+
+## Usage aggregation
+
+In-memory per-`sk-` counters (`requests`, `input_tokens`, `output_tokens`,
+`cached_tokens`, `reasoning_tokens`, per-model breakdown), recorded from
+upstream `usage` payloads for all three dialects (streams count the request,
+tokens `None`). Cache detail sources: responses/chat `*_tokens_details`
+(`cached_tokens`/`reasoning_tokens`), messages `cache_read_input_tokens`.
+Token usage carries `cached_tokens` / `reasoning_tokens` breakdowns across
+dialects and streams. Flushed to `data/usage.json` every 60s and on shutdown;
+reloaded as baseline on startup (old snapshots without the new fields migrate
+to 0).
 
 ## Affinity buckets
 
-`bucket = sha256("{affinity or ''}\x00{model.lower()}") mod NUM_BUCKETS`
-(`NUM_BUCKETS`, default 1024). Plain-path traffic hashes with empty affinity,
-so it still spreads by model. Buckets map to egress slots
+`bucket = sha256("{affinity or ''}\x00{secret or ''}\x00{model.lower()}") mod NUM_BUCKETS`
+(`NUM_BUCKETS`, default 1024). Affinity is the optional unauthenticated
+`ak-` path prefix (empty when absent), secret is the authenticated `sk-`
+header — separate namespaces, both hashed, neither forwarded upstream.
+Traffic still spreads by model when both are absent.
+Buckets map to egress slots
 (`bucket % NUM_SLOTS` initially); on a rate-limit signal the bucket advances
 to the next slot with cooldown `max(SLOT_COOLDOWN_S, Retry-After)`.
 
@@ -50,10 +104,9 @@ to the next slot with cooldown `max(SLOT_COOLDOWN_S, Retry-After)`.
 - Unknown top-level fields are dropped; the proxy rebuilds a whitelisted
   request from its intermediate format. Unknown roles/content-block types
   yield `400 {error.message}` naming the offender.
-- `Authorization: Bearer <key>` from the client is used **only** when no
-  `ZEN_API_KEY` is configured **and** `ZEN_ALLOW_CLIENT_KEYS=1`. Otherwise
-  the operator credential (or anonymous free tier) wins; harness dummy keys
-  are never forwarded.
+- Client credentials (`sk-` secrets, harness dummy keys) are **never**
+  forwarded upstream. The operator `ZEN_API_KEY` authenticates upstream when
+  set; otherwise requests ride the anonymous free tier.
 - Reasoning effort is translated, not dropped:
   `responses.reasoning.effort` ↔ `chat.reasoning_effort` (or
   `thinking: {type: enabled}` → `medium`) ↔ `messages.thinking`
@@ -63,7 +116,8 @@ to the next slot with cooldown `max(SLOT_COOLDOWN_S, Retry-After)`.
 
 `User-Agent: opencode/<ver>`, `x-opencode-client`, `x-opencode-project`,
 per-key stable `x-opencode-session`, per-request `x-opencode-request`,
-`Content-Type: application/json`, plus `Authorization` per the rule above.
+`Content-Type: application/json`, plus `Authorization: Bearer <ZEN_API_KEY>`
+when the operator key is set (never the client's).
 `host`, `content-length`, `accept-*`, and harness identity headers are dropped;
 httpx regenerates transport headers. Free-tier Zen access depends on the
 opencode identity set; omitting it yields `MissingSessionID`.

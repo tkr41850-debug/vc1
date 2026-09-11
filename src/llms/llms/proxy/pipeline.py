@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
+import time
 
 from fastapi import Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from llms.proxy.affinity import bucket_for
 from llms.proxy.config import Settings
 from llms.proxy.forward import forward, parse_body
 from llms.proxy.ir import RequestIR
 from llms.proxy.logging import log_ingress, log_upstream, new_trace_id, setup_logging
+from llms.proxy.providers import RecentRequest, pool_active_warp
 from llms.proxy.rate_limit import classify
 from llms.proxy.router import ENDPOINT_PATH, pick, resolve_alias
 from llms.proxy.stream_translate import (
@@ -102,7 +104,8 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     egress = pick(req.model, ingress)
     outbound = TO[egress](req)
     affinity = getattr(request.state, "affinity", None)
-    bucket = bucket_for(affinity, req.model, settings.num_buckets)
+    secret_key = getattr(request.state, "secret_key", None)
+    bucket = bucket_for(affinity, req.model, settings.num_buckets, secret_key)
     table = request.app.state.bucket_table
     slot = table.slot_for(bucket)
     log_ingress(
@@ -118,11 +121,52 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             "slot": slot,
         },
     )
-    headers = build_zen_headers(settings, request.headers.get("authorization"))
+    headers = build_zen_headers(settings)
     url = settings.zen_base_url.rstrip("/") + ENDPOINT_PATH[egress]
     log_upstream(trace_id, url, headers, outbound)
     egress_provider = request.app.state.egress
-    client = egress_provider.client_for(bucket, slot)
+    started = time.monotonic()
+    provider_id: str | None = None
+    via_pool: dict | None = None
+    pool_active: int | None = None
+    registry = getattr(request.app.state, "providers", None)
+    resolve = getattr(egress_provider, "resolve", None)
+    if callable(resolve):
+        provider_id, kind, warp_egress = resolve(req.model)
+        if kind == "warp" and warp_egress is not None:
+            if outbound.get("stream") is True:
+                # Pools buffer /fetch: no true streaming through a relay.
+                # Fall back to direct egress so dsh-style streaming clients
+                # keep working on warp-routed models.
+                logger.info(
+                    "[%s] warp-routed stream falls back to direct egress",
+                    trace_id,
+                )
+                provider_id, via_pool = None, None
+                client = egress_provider.client_for(bucket, slot)
+            else:
+                provider = None
+                if registry is not None:
+                    for p in registry.load():
+                        if p.id == provider_id:
+                            provider = p
+                            break
+                pool_base = provider.base_url if provider else warp_egress.pool_base_url
+                pool_token = provider.token if provider else warp_egress.token
+                if registry is not None and provider is not None:
+                    health = await registry.refresh_health(provider)
+                    pool_active = pool_active_warp(health)
+                via_pool = {
+                    "base_url": pool_base,
+                    "token": pool_token,
+                    "provider_id": provider_id or "",
+                    "pool_active_warp": pool_active,
+                }
+                client = warp_egress.client_for(bucket, slot)
+        else:
+            client = egress_provider.client_for(bucket, slot)
+    else:
+        client = egress_provider.client_for(bucket, slot)
     response = await forward(
         client,
         url,
@@ -131,7 +175,9 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         trace_id,
         convert=_convert_for(ingress, egress, req.model),
         translate_stream=_stream_for(ingress, egress, req.model),
+        via_pool=via_pool,
     )
+    elapsed_ms = (time.monotonic() - started) * 1000.0
     outcome, retry_after = _outcome_of(response)
     if outcome == "ratelimited":
         new_slot = table.note_ratelimited(bucket, retry_after)
@@ -142,4 +188,68 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             slot,
             new_slot,
         )
+        registry = getattr(request.app.state, "providers", None)
+        if registry is not None and provider_id:
+            reason = ""
+            if isinstance(response, JSONResponse):
+                try:
+                    reason = (
+                        json.loads(response.body.decode())
+                        .get("error", {})
+                        .get("message", "")
+                    )
+                except Exception:
+                    reason = ""
+            registry.runtime(provider_id).note_ratelimited(retry_after, reason)
+    _record_usage(request, ingress, req.model, response)
+    if registry is not None and provider_id:
+        status = response.status_code if hasattr(response, "status_code") else 0
+        error = ""
+        if isinstance(response, JSONResponse) and status >= 400:
+            try:
+                error = (
+                    json.loads(response.body.decode())
+                    .get("error", {})
+                    .get("message", "")
+                )
+            except Exception:
+                error = ""
+        await registry.runtime(provider_id).record(
+            RecentRequest(
+                ts=time.time(),
+                model=req.model,
+                status=status,
+                ms=elapsed_ms,
+                warp_idx=pool_active,
+                error=str(error)[:200],
+            )
+        )
     return response
+
+
+def _record_usage(
+    request: Request, ingress: str, model: str, response: Response
+) -> None:
+    from llms.proxy.usage import extract_usage
+
+    tracker = getattr(request.app.state, "usage", None)
+    secret_key = getattr(request.state, "secret_key", None)
+    if tracker is None or secret_key is None:
+        return
+    if isinstance(response, StreamingResponse):
+        tracker.record(secret_key, model, None, None, None, None)
+        return
+    if not isinstance(response, JSONResponse) or response.status_code >= 400:
+        return
+    try:
+        payload = json.loads(response.body.decode())
+    except Exception:
+        payload = None
+    if not isinstance(payload, dict):
+        return
+    in_tokens, out_tokens, cached_tokens, reasoning_tokens = extract_usage(
+        ingress, payload
+    )
+    tracker.record(
+        secret_key, model, in_tokens, out_tokens, cached_tokens, reasoning_tokens
+    )

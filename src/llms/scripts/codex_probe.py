@@ -24,12 +24,15 @@ def main() -> int:
                 'wire_api = "responses"\n'
             )
             with running_proxy(
-                PORT, os.getenv("PROXY_LOG", "/tmp/codex-probe-proxy.log")
-            ):
+                PORT,
+                os.getenv("PROXY_LOG", "/tmp/codex-probe-proxy.log"),
+                data_dir=os.getenv("PROBE_DATA_DIR", "/tmp/codex-probe-data"),
+                probe_secret=os.getenv("PROBE_SECRET"),
+            ) as (_, secret):
                 env = dict(
                     os.environ,
                     CODEX_HOME=str(home),
-                    OPENAI_API_KEY="dummy",
+                    OPENAI_API_KEY=secret,
                 )
                 completed = subprocess.run(
                     [

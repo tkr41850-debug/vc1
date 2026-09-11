@@ -8,7 +8,8 @@ from llms.proxy.catalog import BY_ID
 
 def main() -> int:
     request = urllib.request.Request(
-        "https://opencode.ai/zen/v1/models", headers={"User-Agent": "llms-catalog-refresh/1.0"}
+        "https://opencode.ai/zen/v1/models",
+        headers={"User-Agent": "llms-catalog-refresh/1.0"},
     )
     with urllib.request.urlopen(request, timeout=20) as r:
         live = json.load(r)

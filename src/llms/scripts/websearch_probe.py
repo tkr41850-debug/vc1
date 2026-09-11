@@ -14,8 +14,14 @@ MODEL = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
 
 def main() -> int:
     try:
-        with probe_dirs("websearch-probe"), running_proxy(
-            PORT, os.getenv("PROXY_LOG", "/tmp/websearch-probe-proxy.log")
+        with (
+            probe_dirs("websearch-probe"),
+            running_proxy(
+                PORT,
+                os.getenv("PROXY_LOG", "/tmp/websearch-probe-proxy.log"),
+                data_dir=os.getenv("PROBE_DATA_DIR", "/tmp/websearch-probe-data"),
+                probe_secret=os.getenv("PROBE_SECRET"),
+            ) as (_, secret),
         ):
             body = {
                 "model": MODEL,
@@ -25,16 +31,31 @@ def main() -> int:
                         "content": "Use web search to find what Opencode Zen is, then reply briefly.",
                     }
                 ],
-                "tools": [{"type": "web_search_20260205", "name": "web_search", "max_uses": 3}],
+                "tools": [
+                    {"type": "web_search_20260205", "name": "web_search", "max_uses": 3}
+                ],
                 "max_tokens": 2048,
             }
-            r = httpx.post(f"{BASE_URL}/v1/messages", json=body, timeout=180.0)
+            r = httpx.post(
+                f"{BASE_URL}/v1/messages",
+                json=body,
+                headers={"Authorization": f"Bearer {secret}"},
+                timeout=180.0,
+            )
             if r.status_code != 200:
                 return fail(f"web search failed: {r.text[:500]}")
             payload = r.json()
-            texts = [b.get("text", "") for b in payload.get("content", []) if b.get("type") == "text"]
+            texts = [
+                b.get("text", "")
+                for b in payload.get("content", [])
+                if b.get("type") == "text"
+            ]
             print(f"stop={payload.get('stop_reason')} text={''.join(texts)[:300]!r}")
-            if payload.get("stop_reason") not in ("end_turn", "tool_use", "stop_sequence"):
+            if payload.get("stop_reason") not in (
+                "end_turn",
+                "tool_use",
+                "stop_sequence",
+            ):
                 return fail(f"unexpected stop: {payload.get('stop_reason')}")
             if not any("zen" in t.lower() for t in texts):
                 return fail("answer shows no sign of search grounding")

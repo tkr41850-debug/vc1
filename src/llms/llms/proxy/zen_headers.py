@@ -16,15 +16,14 @@ def new_request_id() -> str:
     return f"msg_{uuid.uuid4().hex[:16]}"
 
 
-def build_zen_headers(settings: Settings, incoming_auth: str | None) -> dict[str, str]:
+def build_zen_headers(
+    settings: Settings, incoming_auth: str | None = None
+) -> dict[str, str]:
+    # Client credentials (sk- secrets, harness dummy keys) must never reach
+    # the upstream gateway. Only the operator ZEN_API_KEY authenticates
+    # upstream; without it requests ride the anonymous free tier.
+    _ = incoming_auth
     api_key = settings.zen_api_key
-    if (
-        not api_key
-        and settings.allow_client_keys
-        and incoming_auth
-        and incoming_auth.lower().startswith("bearer ")
-    ):
-        api_key = incoming_auth.split(" ", 1)[1].strip()
     headers = {
         "User-Agent": f"opencode/{settings.opencode_version}",
         "x-opencode-client": settings.opencode_client,

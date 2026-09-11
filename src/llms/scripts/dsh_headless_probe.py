@@ -17,7 +17,12 @@ def main() -> int:
     try:
         with (
             probe_dirs("dsh-probe") as (home, workspace),
-            running_proxy(PORT, os.getenv("PROXY_LOG", "/tmp/dsh-probe-proxy.log")),
+            running_proxy(
+                PORT,
+                os.getenv("PROXY_LOG", "/tmp/dsh-probe-proxy.log"),
+                data_dir=os.getenv("PROBE_DATA_DIR", "/tmp/dsh-probe-data"),
+                probe_secret=os.getenv("PROBE_SECRET"),
+            ) as (_, secret),
         ):
             config = DeepSeekHarnessConfig(
                 provider="deepseek-official",
@@ -27,7 +32,7 @@ def main() -> int:
                 dsh_home=str(home),
                 profile="sdk-minimal",
                 base_url=BASE_URL,
-                api_key="dummy",
+                api_key=secret,
             )
             with DeepSeekHarness(config) as harness:
                 session = f"probe-{uuid.uuid4().hex[:8]}"

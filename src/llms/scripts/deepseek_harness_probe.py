@@ -13,8 +13,12 @@ def main() -> int:
     from openai import OpenAI
 
     try:
-        with running_proxy(PORT):
-            client = OpenAI(api_key="test-key", base_url=BASE_URL)
+        with running_proxy(
+            PORT,
+            data_dir=os.getenv("PROBE_DATA_DIR", "/tmp/dsh-probe-data"),
+            probe_secret=os.getenv("PROBE_SECRET"),
+        ) as (_, secret):
+            client = OpenAI(api_key=secret, base_url=BASE_URL)
             first = client.responses.create(
                 model=MODEL,
                 input="reply with exactly: turn-one",
