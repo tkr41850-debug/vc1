@@ -98,6 +98,8 @@ async def create_provider(
         )
     )
     registry.save(providers)
+    if body.kind == "warp":
+        registry.ensure_warp_dir(body.id)
     _sync_slots(request)
     return {"id": body.id}
 
@@ -146,6 +148,7 @@ async def delete_provider(
     except StoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     registry.save(providers)
+    registry.drop_warp_dir(provider_id)
     _sync_slots(request)
     return {"status": "ok"}
 

@@ -13,6 +13,8 @@ import httpx
 import yaml
 
 PROVIDERS_FILE = "providers.yaml"
+WARPS_DIR = "warps"
+WARP_STATUS_FILE = "status.json"
 RECENT_CAP = 10
 HEALTH_TTL_S = 30.0
 
@@ -138,6 +140,49 @@ class ProviderRegistry:
     def path(self) -> Path:
         return self.data_dir / PROVIDERS_FILE
 
+    def warp_dir(self, provider_id: str) -> Path:
+        return self.data_dir / WARPS_DIR / provider_id
+
+    def ensure_warp_dir(self, provider_id: str) -> Path:
+        path = self.warp_dir(provider_id)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def drop_warp_dir(self, provider_id: str) -> None:
+        import shutil
+
+        shutil.rmtree(self.warp_dir(provider_id), ignore_errors=True)
+
+    def save_warp_status(self, provider_id: str, health: ProviderHealth) -> None:
+        path = self.ensure_warp_dir(provider_id) / WARP_STATUS_FILE
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps(
+                {
+                    "fetched_at": health.fetched_at,
+                    "active": health.active,
+                    "exits": [{"idx": w.idx, "ready": w.ready} for w in health.exits],
+                }
+            )
+        )
+        tmp.replace(path)
+
+    def load_warp_status(self, provider_id: str) -> dict:
+        path = self.warp_dir(provider_id) / WARP_STATUS_FILE
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def ready_exits(self, provider_id: str) -> int | None:
+        """Persisted ready-exit count, or None when never polled."""
+        status = self.load_warp_status(provider_id)
+        exits = status.get("exits")
+        if not isinstance(exits, list):
+            return None
+        return sum(1 for w in exits if isinstance(w, dict) and w.get("ready"))
+
     def _seed(self) -> list[Provider]:
         from llms.proxy.router import FREE_MODELS
 
@@ -261,11 +306,15 @@ class ProviderRegistry:
         except Exception as exc:
             health.error = str(exc)[:300]
         rt.health = health
-        # Keep the egress slot spread in sync with ready exits (at least 1).
+        # Keep the egress slot spread in sync with ready exits (0 until any).
         egress = self._egresses.get(provider.id) if self._egresses is not None else None
         if egress is not None:
             ready = sum(1 for w in health.exits if w.ready)
-            egress.set_num_slots(max(1, ready or len(health.exits) or 1))
+            egress.set_num_slots(ready)
+        try:
+            self.save_warp_status(provider.id, health)
+        except OSError:
+            pass
         return health
 
     async def fetch_debug_config(self, provider: Provider) -> dict:

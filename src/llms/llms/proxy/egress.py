@@ -32,19 +32,20 @@ class WarpPoolEgress:
 
     The pool picks the warp exit internally (its active/healthy instance);
     num_slots mirrors the pool's ready-exit count (refreshed by the registry
-    health poll) so bucket slot math spreads across real exits.
+    health poll), starting at 0 before the first poll. Zero slots means no
+    ready exits: resolve() skips such pools so traffic fails open to direct.
     """
 
     def __init__(
         self,
         pool_base_url: str,
         token: str = "",
-        num_slots: int = 8,
+        num_slots: int = 0,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.pool_base_url = pool_base_url.rstrip("/")
         self.token = token
-        self._num_slots = max(1, num_slots)
+        self._num_slots = max(0, num_slots)
         self._client = client
         self._owned = client is None
 
@@ -52,7 +53,7 @@ class WarpPoolEgress:
         return self._num_slots
 
     def set_num_slots(self, n: int) -> None:
-        self._num_slots = max(1, int(n))
+        self._num_slots = max(0, int(n))
 
     def client_for(self, bucket: int, slot: int) -> httpx.AsyncClient:
         # The httpx client targets the pool; relay wrapping happens in
@@ -91,27 +92,32 @@ class ProviderEgress:
 
         Warp providers take precedence over noproxy when both serve the
         model — noproxy is the default fallback, not the first match.
+        A warp pool with known-zero ready exits is skipped so traffic
+        fails open to direct until exits come up; unknown health is
+        treated as eligible so the first request triggers a poll.
         """
         registry = self._registry
         if registry is None:
             return None, "noproxy", None
         providers = registry.load()
-        provider = None
         for p in providers:
-            if p.enabled and p.kind == "warp" and p.serves(model):
-                provider = p
-                break
-        if provider is None:
-            for p in providers:
-                if p.enabled and p.serves(model):
-                    return p.id, "noproxy", None
-            return None, "noproxy", None
-        egress = self._warp.get(provider.id)
-        if egress is None:
-            egress = WarpPoolEgress(provider.base_url, provider.token)
-            self._warp[provider.id] = egress
-        registry._egresses = self._warp
-        return provider.id, "warp", egress
+            if not p.enabled or p.kind != "warp" or not p.serves(model):
+                continue
+            egress = self._warp.get(p.id)
+            if egress is None:
+                egress = WarpPoolEgress(p.base_url, p.token)
+                saved = registry.ready_exits(p.id)
+                if saved is not None:
+                    egress.set_num_slots(saved)
+                self._warp[p.id] = egress
+            registry._egresses = self._warp
+            if registry.runtime(p.id).health.fetched_at > 0 and egress.num_slots() == 0:
+                continue
+            return p.id, "warp", egress
+        for p in providers:
+            if p.enabled and p.serves(model):
+                return p.id, "noproxy", None
+        return None, "noproxy", None
 
     def client_for(self, bucket: int, slot: int) -> httpx.AsyncClient:
         return self._direct.client_for(bucket, slot)
@@ -120,9 +126,10 @@ class ProviderEgress:
         """Resize the bucket table to the live warp pool spread.
 
         Slots track the largest ready-exit count across enabled warp
-        providers (direct-only deploys stay at 1). Resizing reshuffles
-        bucket placement; callers already holding a slot keep it for
-        their in-flight request.
+        providers (direct-only deploys stay at 1; pools with no ready
+        exits contribute 0). Resizing reshuffles bucket placement;
+        callers already holding a slot keep it for their in-flight
+        request.
         """
         num_slots = 1
         registry = self._registry
@@ -135,7 +142,11 @@ class ProviderEgress:
                 if not p.enabled or p.kind != "warp":
                     continue
                 egress = self._warp.get(p.id)
-                slots = egress.num_slots() if egress is not None else 8
+                if egress is not None:
+                    slots = egress.num_slots()
+                else:
+                    saved = registry.ready_exits(p.id)
+                    slots = saved if saved is not None else 0
                 num_slots = max(num_slots, slots)
         return table.set_num_slots(num_slots)
 
