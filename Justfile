@@ -57,6 +57,15 @@ docker-down:
     docker compose down
     echo stopped
 
+docker-rebuild:
+    #!/usr/bin/env bash
+    # Bust poisoned layer cache (e.g. truncated npm packages from an
+    # interrupted fetch surfacing as cryptic tsc crashes).
+    set -eu
+    cd "{{ _root }}"
+    if ! docker compose version >/dev/null 2>&1; then echo "docker compose plugin required"; exit 1; fi
+    docker compose --env-file .env build --no-cache
+
 sync:
     uv sync --group dev
 

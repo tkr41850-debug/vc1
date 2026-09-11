@@ -1,0 +1,16 @@
+node_modules/
+.git/
+.claude/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+data/
+.env
+*.log
+/tmp/
+web/llms/dist/
+.vscode/
+.idea/
+*.pid

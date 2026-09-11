@@ -2,7 +2,7 @@
 FROM node:24-slim AS web
 WORKDIR /build/web/llms
 COPY web/llms/package.json web/llms/package-lock.json ./
-RUN npm ci
+RUN npm ci && npx tsc --version
 COPY web/llms/ ./
 RUN npm run build
 
