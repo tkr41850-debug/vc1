@@ -55,7 +55,7 @@ class Settings:
     request_timeout_s: float = field(
         default_factory=lambda: float(os.getenv("ZEN_TIMEOUT_S", "120"))
     )
-    data_dir: str = field(default_factory=lambda: os.getenv("DATA_DIR", "./data"))
+    data_dir: str = field(default_factory=lambda: _default_data_dir())
     static_dir: str = field(
         default_factory=lambda: os.getenv(
             "STATIC_DIR",
@@ -99,6 +99,12 @@ def _model_aliases() -> tuple:
         if pattern.strip() and target.strip():
             aliases.append((pattern.strip(), target.strip()))
     return tuple(aliases)
+
+
+def _default_data_dir() -> str:
+    if explicit := os.getenv("DATA_DIR"):
+        return explicit
+    return str(Path(__file__).resolve().parent.parent.parent.parent.parent / "data")
 
 
 def _free_models() -> tuple:

@@ -106,7 +106,7 @@ and tool/streaming support; `just catalog` checks the seed against live Zen.
 | `VSP_BASE_URL`, `VSP_TOKEN` | — | Warp pool endpoint/credential (future) |
 | `ZEN_GATEWAY_PORT` | `8789` | Listen port |
 | `ZEN_TIMEOUT_S` | `120` | Upstream timeout |
-| `DATA_DIR` | `./data` | Keys/models YAML + usage.json |
+| `DATA_DIR` | repo-root `data/` | Keys/models YAML + usage.json |
 | `GITHUB_CLIENT_ID/SECRET` | — | OAuth app for the admin UI |
 | `GITHUB_REDIRECT_URI` | `http://localhost:8789/api/admin/callback` | OAuth callback |
 | `ADMIN_GITHUB_USERS` | — | Comma-separated admin logins |

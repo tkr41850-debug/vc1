@@ -24,7 +24,9 @@ up: web-build
     root="{{ _root }}"
     if [ ! -f "$root/.env" ]; then echo "missing $root/.env (copy .env.example)"; exit 1; fi
     set -a; source "$root/.env"; set +a
+    export DATA_DIR="$root/data"
     echo "aliases: ${MODEL_ALIASES:-none}"
+    echo "data: $DATA_DIR"
     if [ -f {{pidfile}} ] && kill -0 "$(cat {{pidfile}})" 2>/dev/null; then kill "$(cat {{pidfile}})"; sleep 1; fi
     pkill -f "uvicorn llms.proxy.main" 2>/dev/null || true; sleep 1
     nohup uv run uvicorn llms.proxy.main:app --host 127.0.0.1 --port {{port}} > {{logfile}} 2>&1 & echo $! > {{pidfile}}
@@ -70,6 +72,8 @@ sync:
     uv sync --group dev
 
 dev:
+    #!/usr/bin/env bash
+    export DATA_DIR="{{ _root }}/data"
     uv run uvicorn llms.proxy.main:app --host 127.0.0.1 --port 8789
 
 test:
