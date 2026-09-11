@@ -156,6 +156,9 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 if registry is not None and provider is not None:
                     health = await registry.refresh_health(provider)
                     pool_active = pool_active_warp(health)
+                    sync = getattr(egress_provider, "sync_bucket_slots", None)
+                    if callable(sync):
+                        sync(table)
                 via_pool = {
                     "base_url": pool_base,
                     "token": pool_token,

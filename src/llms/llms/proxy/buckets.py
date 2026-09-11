@@ -22,7 +22,17 @@ class BucketTable:
         self._cooldown_until = [0.0] * num_buckets
 
     def slot_for(self, bucket: int) -> int:
-        return self._slots[bucket % self.num_buckets]
+        with self._lock:
+            return self._slots[bucket % self.num_buckets]
+
+    def set_num_slots(self, num_slots: int) -> bool:
+        num_slots = max(1, int(num_slots))
+        with self._lock:
+            if num_slots == self.num_slots:
+                return False
+            self.num_slots = num_slots
+            self._slots = [b % num_slots for b in range(self.num_buckets)]
+            return True
 
     def cooldown_remaining(self, bucket: int) -> float:
         return max(0.0, self._cooldown_until[bucket % self.num_buckets] - self._now())

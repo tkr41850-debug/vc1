@@ -116,6 +116,29 @@ class ProviderEgress:
     def client_for(self, bucket: int, slot: int) -> httpx.AsyncClient:
         return self._direct.client_for(bucket, slot)
 
+    def sync_bucket_slots(self, table) -> bool:
+        """Resize the bucket table to the live warp pool spread.
+
+        Slots track the largest ready-exit count across enabled warp
+        providers (direct-only deploys stay at 1). Resizing reshuffles
+        bucket placement; callers already holding a slot keep it for
+        their in-flight request.
+        """
+        num_slots = 1
+        registry = self._registry
+        if registry is not None:
+            try:
+                providers = registry.load()
+            except Exception:
+                providers = []
+            for p in providers:
+                if not p.enabled or p.kind != "warp":
+                    continue
+                egress = self._warp.get(p.id)
+                slots = egress.num_slots() if egress is not None else 8
+                num_slots = max(num_slots, slots)
+        return table.set_num_slots(num_slots)
+
     async def aclose(self) -> None:
         await self._direct.aclose()
         for egress in self._warp.values():

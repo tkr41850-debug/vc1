@@ -31,6 +31,14 @@ def _find(registry: ProviderRegistry, provider_id: str) -> Provider:
     raise HTTPException(status_code=404, detail="provider not found")
 
 
+def _sync_slots(request: Request) -> None:
+    egress = getattr(request.app.state, "egress", None)
+    table = getattr(request.app.state, "bucket_table", None)
+    sync = getattr(egress, "sync_bucket_slots", None)
+    if callable(sync) and table is not None:
+        sync(table)
+
+
 class ProviderBody(BaseModel):
     id: str = ""
     label: str = ""
@@ -90,6 +98,7 @@ async def create_provider(
         )
     )
     registry.save(providers)
+    _sync_slots(request)
     return {"id": body.id}
 
 
@@ -118,6 +127,7 @@ async def update_provider(
             if body.enabled is not None:
                 p.enabled = body.enabled
             registry.save(providers)
+            _sync_slots(request)
             return {"id": p.id, "enabled": p.enabled}
     raise HTTPException(status_code=404, detail="provider not found")
 
@@ -136,6 +146,7 @@ async def delete_provider(
     except StoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     registry.save(providers)
+    _sync_slots(request)
     return {"status": "ok"}
 
 
@@ -146,6 +157,7 @@ async def provider_health(
     registry = _registry(request)
     provider = _find(registry, provider_id)
     health = await registry.refresh_health(provider, force=True)
+    _sync_slots(request)
     debug = await registry.fetch_debug_config(provider)
     rt = registry.runtime(provider_id)
     from llms.proxy.providers import provider_snapshot
