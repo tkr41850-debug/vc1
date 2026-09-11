@@ -24,6 +24,7 @@ def running_proxy(
     if data_dir is not None:
         import yaml
 
+        os.makedirs(data_dir, exist_ok=True)
         keys_path = os.path.join(data_dir, "keys.yaml")
         keys = []
         if os.path.exists(keys_path):
