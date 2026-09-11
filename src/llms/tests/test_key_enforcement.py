@@ -9,6 +9,84 @@ def test_healthz_open_without_secret(app_client):
     assert tc.get("/healthz").status_code == 200
 
 
+def test_sk_ant_prefix_falls_back_to_allowlisted_key(app_client):
+    tc, _ = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={"input": "hi"},
+        headers={"Authorization": "Bearer sk-ant-test"},
+    )
+    assert r.status_code == 200
+
+
+def test_sk_ant_prefix_without_allowlisted_base_rejected(app_client):
+    tc, _ = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={"input": "hi"},
+        headers={"Authorization": "Bearer sk-ant-nope"},
+    )
+    assert r.status_code == 401
+
+
+def test_sk_ant_prefix_via_x_api_key_header(app_client):
+    tc, _ = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={"input": "hi"},
+        headers={"x-api-key": "sk-ant-test"},
+    )
+    assert r.status_code == 200
+
+
+def test_sk_ant_fallback_rejected_when_canonical_disabled(app_client, tmp_path):
+    from llms.proxy.keys import reset_cache
+
+    tc, _ = app_client
+    store = Store(data_dir=tmp_path)
+    keys = store.load_keys()
+    for k in keys:
+        if k.key == TEST_SECRET:
+            k.enabled = False
+    store.save_keys(keys)
+    reset_cache()
+    try:
+        assert (
+            tc.post(
+                "/v1/responses",
+                json={"input": "hi"},
+                headers={"Authorization": "Bearer sk-ant-test"},
+            ).status_code
+            == 401
+        )
+    finally:
+        reset_cache()
+
+
+def test_exact_match_wins_over_prefix_fallback(app_client, tmp_path):
+    from llms.proxy.keys import reset_cache
+    from llms.proxy.store import ApiKey
+
+    tc, _ = app_client
+    store = Store(data_dir=tmp_path)
+    store.save_keys(
+        [
+            ApiKey(key=TEST_SECRET, label="t"),
+            ApiKey(key="sk-ant-test", label="other"),
+        ]
+    )
+    reset_cache()
+    try:
+        r = tc.post(
+            "/v1/responses",
+            json={"input": "hi"},
+            headers={"Authorization": "Bearer sk-ant-test"},
+        )
+        assert r.status_code == 200
+    finally:
+        reset_cache()
+
+
 def test_corrupt_store_fails_closed_but_healthz_reports(app_client, tmp_path):
     from llms.proxy.keys import reset_cache
 

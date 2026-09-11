@@ -39,9 +39,16 @@ the admin UI first — needs `just up` running):
 
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8789"
-export ANTHROPIC_API_KEY="sk-your-key"
+export ANTHROPIC_AUTH_TOKEN="sk-your-key"
 export ANTHROPIC_MODEL="muse-spark-1.3-contributor-free"
 ```
+
+Prefer `ANTHROPIC_AUTH_TOKEN` over `ANTHROPIC_API_KEY` here: it is sent as
+`Authorization: Bearer` (Anthropic's documented gateway path) with no
+approval prompt, while `ANTHROPIC_API_KEY` goes out as `x-api-key` and
+triggers Claude Code's one-time key approval, which may display the key in
+`sk-ant-` form. The gateway accepts both headers, and also accepts an
+`sk-ant-<rest>` key when `sk-<rest>` is allowlisted.
 
 `ANTHROPIC_MODEL` matters: plain `claude --model <id>` gets overridden by
 Claude's own default, the env var sticks. The `sk-` secret authenticates you

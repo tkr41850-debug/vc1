@@ -48,14 +48,25 @@ def resolve_secret_key(request: Request, settings: Settings) -> str | None:
     never mixed with the ak- affinity prefix (see middleware).
     """
     from llms.proxy.auth import presented_secret_key
+    from llms.proxy.logging import setup_logging
 
     presented = presented_secret_key(request)
     if presented is None:
         return None
     snapshot = _snapshot(settings)
-    if not snapshot.get(presented, False):
-        return None
-    return presented
+    if snapshot.get(presented, False):
+        return presented
+    canonical = _strip_ant_infix(presented)
+    if canonical is not None and snapshot.get(canonical, False):
+        setup_logging().info("accepted sk-ant- key form for an allowlisted key")
+        return canonical
+    return None
+
+
+def _strip_ant_infix(value: str) -> str | None:
+    if value.startswith("sk-ant-"):
+        return "sk-" + value[len("sk-ant-") :]
+    return None
 
 
 def reset_cache() -> None:
