@@ -80,6 +80,16 @@ providers:
     set -a; source "$root/.env"; set +a
     curl -s --max-time 10 -b /tmp/llms-admin-cookie.txt -c /tmp/llms-admin-cookie.txt http://127.0.0.1:{{port}}/api/admin/providers | python3 -m json.tool
 
+reconnect-pool id:
+    #!/usr/bin/env bash
+    # Manual pool reconnect: bounce the pool, drop cached egress, re-poll
+    # health. Needs an admin session (log into the UI first).
+    set -u
+    root="{{ _root }}"
+    if [ ! -f "$root/.env" ]; then echo "missing $root/.env (copy .env.example)"; exit 1; fi
+    set -a; source "$root/.env"; set +a
+    curl -s --max-time 60 -X POST -b /tmp/llms-admin-cookie.txt -c /tmp/llms-admin-cookie.txt http://127.0.0.1:{{port}}/api/admin/providers/{{id}}/reconnect | python3 -m json.tool
+
 probe-dsh:
     uv run --with deepseek-harness-sdk python scripts/dsh_headless_probe.py
 

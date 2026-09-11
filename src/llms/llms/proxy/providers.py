@@ -257,6 +257,72 @@ class ProviderRegistry:
             self._runtimes[provider_id] = rt
         return rt
 
+    async def drop_egress(self, provider_id: str) -> bool:
+        egresses = self._egresses
+        if not egresses:
+            return False
+        egress = egresses.pop(provider_id, None)
+        if egress is None:
+            return False
+        try:
+            await egress.aclose()
+        except Exception:
+            pass
+        return True
+
+    async def rotate_pool(self, provider: Provider) -> dict:
+        """Bounce the pool itself via its /rotate endpoint (best-effort).
+
+        Returns {"ok": bool, ...}; transport failures report ok False rather
+        than raising, so reconnect can still reset local state and re-poll.
+        """
+        if provider.kind != "warp" or not provider.base_url:
+            return {"ok": False, "error": "not a warp pool provider"}
+        try:
+            client = await self._http()
+            headers = {}
+            if provider.token:
+                headers["Authorization"] = f"Bearer {provider.token}"
+            resp = await client.post(
+                provider.base_url.rstrip("/") + "/rotate", headers=headers
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            return {
+                "ok": True,
+                "response": payload if isinstance(payload, dict) else {},
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:300]}
+
+    def _health_summary(self, health: ProviderHealth) -> dict:
+        return {
+            "active": health.active,
+            "ready": sum(1 for w in health.exits if w.ready),
+            "exits": len(health.exits),
+            "error": health.error,
+        }
+
+    async def reconnect(self, provider: Provider) -> dict:
+        """Manual reconnect: bounce the pool, drop cached egress, re-poll.
+
+        Disconnects the pool itself (/rotate), closes and forgets the
+        llms-side egress client so the next request rebuilds it, then
+        force-refreshes health (re-seeding slots + persisted status).
+        """
+        before = self._health_summary(self.runtime(provider.id).health)
+        pool = await self.rotate_pool(provider)
+        await self.drop_egress(provider.id)
+        self.runtime(provider.id).retry_until = 0.0
+        self.runtime(provider.id).retry_reason = ""
+        health = await self.refresh_health(provider, force=True)
+        return {
+            "ok": pool.get("ok", False),
+            "pool": pool,
+            "before": before,
+            "after": self._health_summary(health),
+        }
+
     def route(self, model: str) -> Provider | None:
         """First enabled provider serving the model; noproxy seed always present."""
         for p in self.load():

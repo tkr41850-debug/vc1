@@ -52,6 +52,14 @@ export interface ProviderEntry {
   };
 }
 
+export interface ReconnectResult {
+  id: string;
+  ok: boolean;
+  pool: Record<string, unknown>;
+  before: { active: number; ready: number; exits: number; error: string };
+  after: { active: number; ready: number; exits: number; error: string };
+}
+
 export interface RecentEntry {
   ts: number;
   model: string;
@@ -147,6 +155,11 @@ export const api = {
   providerHealth: (id: string) =>
     req<ProviderEntry & { debug: Record<string, unknown> }>(
       `/api/admin/providers/${encodeURIComponent(id)}/health`,
+    ),
+  reconnectProvider: (id: string) =>
+    req<ReconnectResult>(
+      `/api/admin/providers/${encodeURIComponent(id)}/reconnect`,
+      { method: "POST" },
     ),
   providerRecent: (id: string) =>
     req<{ recent: RecentEntry[] }>(

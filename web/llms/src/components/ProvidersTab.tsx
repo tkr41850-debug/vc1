@@ -32,9 +32,42 @@ function DebugModal({
   const [debug, setDebug] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState("");
   const [streamError, setStreamError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [reconnecting, setReconnecting] = useState(false);
   const esRef = useRef<EventSource | null>(null);
 
   const shown = live ?? provider;
+
+  const refresh = () => {
+    api
+      .providerHealth(provider.id)
+      .then((h) => {
+        setLive(h);
+        setDebug((h.debug as Record<string, unknown>) ?? null);
+      })
+      .catch((e) => {
+        if (e instanceof ApiError && e.status === 401) return onAuthError();
+        setError(e instanceof Error ? e.message : String(e));
+      });
+  };
+
+  const reconnect = () => {
+    setReconnecting(true);
+    setNotice("");
+    api
+      .reconnectProvider(provider.id)
+      .then((r) => {
+        setNotice(
+          `reconnected: ${r.after.ready}/${r.after.exits} exits ready (was ${r.before.ready}/${r.before.exits})`,
+        );
+        refresh();
+      })
+      .catch((e) => {
+        if (e instanceof ApiError && e.status === 401) return onAuthError();
+        setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => setReconnecting(false));
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -91,11 +124,24 @@ function DebugModal({
       >
         <div className="mb-3 flex items-center justify-between">
           <h2 className="font-mono text-lg">{provider.id}</h2>
-          <button className="text-sm text-gray-600 hover:underline" onClick={onClose}>
-            Close
-          </button>
+          <div className="flex items-center gap-2">
+            {provider.kind === "warp" && (
+              <button
+                className="rounded bg-blue-600 px-2 py-1 text-xs text-white hover:bg-blue-700 disabled:opacity-50"
+                onClick={reconnect}
+                disabled={reconnecting}
+                title="Bounce the pool, drop cached egress, re-poll health"
+              >
+                {reconnecting ? "reconnecting…" : "reconnect"}
+              </button>
+            )}
+            <button className="text-sm text-gray-600 hover:underline" onClick={onClose}>
+              Close
+            </button>
+          </div>
         </div>
         {error && <p className="mb-2 text-sm text-red-600">{error}</p>}
+        {notice && <p className="mb-2 text-sm text-green-700">{notice}</p>}
         {streamError && <p className="mb-2 text-sm text-amber-600">{streamError}</p>}
         <h3 className="mb-1 text-sm font-medium text-gray-600">Warp exits</h3>
         <table className="mb-4 w-full border-collapse text-sm">

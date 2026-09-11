@@ -171,6 +171,21 @@ async def provider_health(
     return snap
 
 
+@router.post("/api/admin/providers/{provider_id:path}/reconnect")
+async def provider_reconnect(
+    request: Request, provider_id: str, _admin: str = Depends(require_admin)
+):
+    registry = _registry(request)
+    provider = _find(registry, provider_id)
+    if provider.kind != "warp":
+        raise HTTPException(
+            status_code=400, detail="only warp pool providers reconnect"
+        )
+    result = await registry.reconnect(provider)
+    _sync_slots(request)
+    return {"id": provider_id, **result}
+
+
 @router.get("/api/admin/providers/{provider_id:path}/recent")
 async def provider_recent(
     request: Request, provider_id: str, _admin: str = Depends(require_admin)
