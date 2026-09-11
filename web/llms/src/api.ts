@@ -23,6 +23,44 @@ export interface ModelEntry {
   enabled: boolean;
 }
 
+export interface WarpExitEntry {
+  idx: number;
+  ready: boolean;
+  status: string;
+  reason: string;
+  socks: number;
+  registered: boolean;
+  error: string;
+}
+
+export interface ProviderEntry {
+  id: string;
+  label: string;
+  kind: string;
+  base_url: string;
+  has_token: boolean;
+  models: string[];
+  enabled: boolean;
+  deletable: boolean;
+  retry_in: number;
+  retry_reason: string;
+  health: {
+    active: number;
+    fetched_at: number;
+    error: string;
+    exits: WarpExitEntry[];
+  };
+}
+
+export interface RecentEntry {
+  ts: number;
+  model: string;
+  status: number;
+  ms: number;
+  warp_idx: number | null;
+  error: string;
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -78,5 +116,35 @@ export const api = {
     req<{ status: string }>(`/api/admin/models/${encodeURIComponent(id)}`, {
       method: "DELETE",
     }),
+  providers: () => req<{ providers: ProviderEntry[] }>("/api/admin/providers"),
+  createProvider: (body: {
+    id: string;
+    label: string;
+    kind: string;
+    base_url: string;
+    token: string;
+    models: string[];
+    enabled: boolean;
+  }) => req<{ id: string }>("/api/admin/providers", json(body)),
+  updateProvider: (
+    id: string,
+    body: { label?: string; base_url?: string; token?: string; models?: string[]; enabled?: boolean },
+  ) =>
+    req<{ id: string; enabled: boolean }>(
+      `/api/admin/providers/${encodeURIComponent(id)}`,
+      { ...json(body), method: "PUT" },
+    ),
+  deleteProvider: (id: string) =>
+    req<{ status: string }>(`/api/admin/providers/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  providerHealth: (id: string) =>
+    req<ProviderEntry & { debug: Record<string, unknown> }>(
+      `/api/admin/providers/${encodeURIComponent(id)}/health`,
+    ),
+  providerRecent: (id: string) =>
+    req<{ recent: RecentEntry[] }>(
+      `/api/admin/providers/${encodeURIComponent(id)}/recent`,
+    ),
   logout: () => req<{ status: string }>("/api/admin/logout", { method: "POST" }),
 };

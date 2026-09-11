@@ -67,6 +67,16 @@ probe:
 probe-admin:
     uv run python scripts/admin_usage_probe.py
 
+probe-warp:
+    uv run python scripts/warp_probe.py
+
+providers:
+    #!/usr/bin/env bash
+    set -u
+    if [ ! -f {{repo}}/.env ]; then echo "missing {{repo}}/.env (copy .env.example)"; exit 1; fi
+    set -a; source {{repo}}/.env; set +a
+    curl -s --max-time 10 -b /tmp/llms-admin-cookie.txt -c /tmp/llms-admin-cookie.txt http://127.0.0.1:{{port}}/api/admin/providers | python3 -m json.tool
+
 probe-dsh:
     uv run --with deepseek-harness-sdk python scripts/dsh_headless_probe.py
 

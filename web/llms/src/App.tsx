@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
-import { ApiError, api, type ApiKeyEntry, type ModelEntry } from "./api";
+import { ApiError, api, type ApiKeyEntry, type ModelEntry, type ProviderEntry } from "./api";
 import KeysTab from "./components/KeysTab";
 import ModelsTab from "./components/ModelsTab";
+import ProvidersTab from "./components/ProvidersTab";
 
-type Tab = "keys" | "models";
+type Tab = "keys" | "models" | "providers";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("keys");
   const [keys, setKeys] = useState<ApiKeyEntry[]>([]);
   const [models, setModels] = useState<ModelEntry[]>([]);
+  const [providers, setProviders] = useState<ProviderEntry[]>([]);
   const [authed, setAuthed] = useState(true);
   const [loading, setLoading] = useState(true);
 
@@ -16,9 +18,10 @@ export default function App() {
 
   const reload = useCallback(async () => {
     try {
-      const [k, m] = await Promise.all([api.keys(), api.models()]);
+      const [k, m, p] = await Promise.all([api.keys(), api.models(), api.providers()]);
       setKeys(k.keys);
       setModels(m.models);
+      setProviders(p.providers);
       setAuthed(true);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) setAuthed(false);
@@ -66,7 +69,7 @@ export default function App() {
         </button>
       </header>
       <nav className="mb-4 flex gap-2 border-b">
-        {(["keys", "models"] as Tab[]).map((t) => (
+        {(["keys", "models", "providers"] as Tab[]).map((t) => (
           <button
             key={t}
             className={`px-3 py-2 text-sm capitalize ${
@@ -82,8 +85,10 @@ export default function App() {
       </nav>
       {tab === "keys" ? (
         <KeysTab keys={keys} reload={reload} onAuthError={onAuthError} />
-      ) : (
+      ) : tab === "models" ? (
         <ModelsTab models={models} reload={reload} onAuthError={onAuthError} />
+      ) : (
+        <ProvidersTab providers={providers} reload={reload} onAuthError={onAuthError} />
       )}
     </div>
   );

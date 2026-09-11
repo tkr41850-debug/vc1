@@ -11,15 +11,17 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from llms.proxy.buckets import BucketTable
 from llms.proxy.config import Settings, get_settings
-from llms.proxy.egress import DirectEgress
+from llms.proxy.egress import DirectEgress, ProviderEgress
 from llms.proxy.logging import setup_logging
 from llms.proxy.middleware import GateMiddleware
+from llms.proxy.providers import ProviderRegistry
 from llms.proxy.routes import router as health_router
 from llms.proxy.routes.admin import router as admin_router
 from llms.proxy.routes.auth import router as auth_router
 from llms.proxy.routes.chat import router as chat_router
 from llms.proxy.routes.messages import router as messages_router
 from llms.proxy.routes.models import router as models_router
+from llms.proxy.routes.providers import router as providers_router
 from llms.proxy.routes.responses import router as responses_router
 from llms.proxy.usage import UsageTracker
 
@@ -59,10 +61,14 @@ async def lifespan(app: FastAPI):
                 app.state.usage.save_file(settings.data_dir)
 
     task = asyncio.create_task(_flush_loop())
+    if getattr(app.state, "providers", None) is None:
+        app.state.providers = ProviderRegistry(data_dir=settings.data_dir)
     async with httpx.AsyncClient(
         base_url=settings.zen_base_url, timeout=settings.request_timeout_s
     ) as client:
-        app.state.egress = DirectEgress(client)
+        app.state.egress = ProviderEgress(
+            DirectEgress(client), registry=app.state.providers
+        )
         app.state.bucket_table = BucketTable(
             num_buckets=settings.num_buckets,
             num_slots=app.state.egress.num_slots(),
@@ -74,6 +80,7 @@ async def lifespan(app: FastAPI):
             stop.set()
             await task
             app.state.usage.save_file(settings.data_dir)
+            await app.state.providers.aclose()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -82,6 +89,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings or get_settings()
     app.state.usage = UsageTracker()
     app.state.usage.load_file(app.state.settings.data_dir)
+    app.state.providers = ProviderRegistry(data_dir=app.state.settings.data_dir)
     # Starlette executes middleware in reverse insertion order, so Gate runs
     # last (outermost) and sees the session populated by SessionMiddleware.
     # Without a session secret the admin UI cannot work: sign with a random
@@ -96,6 +104,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(admin_router)
+    app.include_router(providers_router)
     app.include_router(models_router)
     app.include_router(responses_router)
     app.include_router(chat_router)
