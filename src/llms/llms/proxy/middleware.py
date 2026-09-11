@@ -56,7 +56,14 @@ class GateMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         if is_admin_path(path):
+            # dependency_overrides is the documented FastAPI seam for tests;
+            # only honor it when explicitly enabled so prod never consults a
+            # test hook in its hot path.
+            import os as _os
+
             override = request.app.dependency_overrides.get(require_admin)
+            if _os.getenv("ALLOW_ADMIN_OVERRIDE", "") != "1":
+                override = None
             if (
                 path
                 in (

@@ -95,6 +95,10 @@ async def create_key(
     return {"key": body.key, "label": body.label, "enabled": body.enabled}
 
 
+class KeyRotate(BaseModel):
+    new_key: str = ""
+
+
 @router.put("/api/admin/keys/{key:path}")
 async def update_key(
     key: str,
@@ -113,6 +117,40 @@ async def update_key(
             store.save_keys(keys)
             return {"key": k.key, "label": k.label, "enabled": k.enabled}
     raise HTTPException(status_code=404, detail="key not found")
+
+
+@router.post("/api/admin/keys/{key:path}/rotate", status_code=201)
+async def rotate_key(
+    key: str,
+    body: KeyRotate,
+    request: Request,
+    settings: Settings = Depends(settings_from_app),
+    _admin: str = Depends(require_admin),
+):
+    """Replace a secret, preserving usage attribution under the new key.
+
+    The old key is disabled (not deleted) so its history stays visible;
+    the new key inherits the old key's counters going forward.
+    """
+    import secrets as _secrets
+
+    new_key = body.new_key.strip() or f"sk-{_secrets.token_hex(16)}"
+    if not is_secret_key(new_key):
+        raise HTTPException(status_code=400, detail="rotated key must start with sk-")
+    store = _store(settings)
+    keys = store.load_keys()
+    old = next((k for k in keys if k.key == key), None)
+    if old is None:
+        raise HTTPException(status_code=404, detail="key not found")
+    if any(k.key == new_key for k in keys):
+        raise HTTPException(status_code=409, detail="key already exists")
+    old.enabled = False
+    keys.append(ApiKey(key=new_key, label=old.label, enabled=True))
+    store.save_keys(keys)
+    tracker = getattr(request.app.state, "usage", None)
+    if tracker is not None:
+        tracker.rekey(key, new_key)
+    return {"key": new_key, "label": old.label, "enabled": True}
 
 
 @router.delete("/api/admin/keys/{key:path}")

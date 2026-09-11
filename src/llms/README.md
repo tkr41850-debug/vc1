@@ -10,11 +10,17 @@ See [API.md](API.md) for the wire contracts.
 cp ../../.env.example ../../.env  # once; fill in GitHub OAuth + admin users
 just sync       # install deps with uv
 just up         # build web UI + start gateway in background
+just keygen     # bootstrap an sk- key without the admin UI (prints export lines)
 just down       # stop it
 just test       # mocked unit suite
 just lint       # ruff check + format
 just docker-up  # or: containerized (same port, ./data mounted)
 ```
+
+First key without OAuth: `just keygen [label]` appends a random `sk-` secret
+to `data/keys.yaml` and prints `export`/`curl` lines. (The admin UI can manage
+keys afterwards, but needs a configured GitHub OAuth app — keygen breaks the
+chicken-and-egg.)
 
 Health: `curl localhost:8789/healthz` → `{"status":"ok"}`.
 Port via `ZEN_GATEWAY_PORT` (default `8789`).

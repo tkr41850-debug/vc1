@@ -131,6 +131,9 @@ class ProviderRegistry:
         self._runtimes: dict[str, ProviderRuntime] = {}
         self._health_checked: dict[str, float] = {}
         self._client: httpx.AsyncClient | None = None
+        # Populated by ProviderEgress.resolve() so refresh_health() can keep
+        # each warp egress's slot spread in sync with ready exits.
+        self._egresses: dict | None = None
 
     def path(self) -> Path:
         return self.data_dir / PROVIDERS_FILE
@@ -258,6 +261,11 @@ class ProviderRegistry:
         except Exception as exc:
             health.error = str(exc)[:300]
         rt.health = health
+        # Keep the egress slot spread in sync with ready exits (at least 1).
+        egress = self._egresses.get(provider.id) if self._egresses is not None else None
+        if egress is not None:
+            ready = sum(1 for w in health.exits if w.ready)
+            egress.set_num_slots(max(1, ready or len(health.exits) or 1))
         return health
 
     async def fetch_debug_config(self, provider: Provider) -> dict:
@@ -286,15 +294,25 @@ class ProviderRegistry:
             self._client = None
 
 
+def pool_active_warp(provider_health: ProviderHealth) -> int | None:
+    """The pool's currently-active warp exit, if it reports one healthy.
+
+    The pool routes every /fetch through its own active exit internally, so
+    this is an observability snapshot — not a pin. Returns None when the
+    pool reports no ready exits or the active exit isn't ready.
+    """
+    ready = {w.idx for w in provider_health.exits if w.ready}
+    if provider_health.active in ready:
+        return provider_health.active
+    return None
+
+
 def warp_exit_for(
-    provider_health: ProviderHealth, bucket: int, slot: int
+    provider_health: ProviderHealth, bucket: int = 0, slot: int = 0
 ) -> int | None:
-    """Stable pinning of (bucket, slot) onto a ready warp exit."""
-    ready = [w.idx for w in provider_health.exits if w.ready]
-    if not ready:
-        return None
-    ready.sort()
-    return ready[(bucket + slot) % len(ready)]
+    """Deprecated alias of pool_active_warp (kept for tests)."""
+    _ = (bucket, slot)
+    return pool_active_warp(provider_health)
 
 
 def fetch_spec(

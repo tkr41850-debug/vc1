@@ -71,6 +71,41 @@ class UsageTracker:
             key_entry["reasoning_tokens"] += reasoning_tokens
             model_entry["reasoning_tokens"] += reasoning_tokens
 
+    def rekey(self, old_key: str, new_key: str) -> None:
+        """Move attribution from old_key to new_key (rotation).
+
+        Merges counters when new_key already has traffic; drops the old key
+        entry so the admin list shows one live key.
+        """
+        if old_key == new_key or old_key not in self._keys:
+            return
+        old = self._keys.pop(old_key)
+        if new_key not in self._keys:
+            self._keys[new_key] = old
+            return
+        new = self._keys[new_key]
+        new["requests"] += old.get("requests", 0)
+        for field in (
+            "input_tokens",
+            "output_tokens",
+            "cached_tokens",
+            "reasoning_tokens",
+        ):
+            new[field] = new.get(field, 0) + old.get(field, 0)
+        for model, m_old in (old.get("models") or {}).items():
+            if not isinstance(m_old, dict):
+                continue
+            m_new = new.setdefault("models", {}).setdefault(model, _blank_entry())
+            m_new.pop("models", None)
+            m_new["requests"] += m_old.get("requests", 0)
+            for field in (
+                "input_tokens",
+                "output_tokens",
+                "cached_tokens",
+                "reasoning_tokens",
+            ):
+                m_new[field] = m_new.get(field, 0) + m_old.get(field, 0)
+
     def snapshot(self) -> dict:
         return {"keys": copy.deepcopy(self._keys)}
 
@@ -94,7 +129,17 @@ class UsageTracker:
     def save_file(self, data_dir: str | Path) -> None:
         path = Path(data_dir) / USAGE_FILE
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.snapshot()))
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(self.snapshot()))
+        tmp.replace(path)
+
+
+def _to_int(value) -> int | None:
+    """Best-effort int coercion; malformed upstream usage never fails requests."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def extract_usage(
@@ -104,30 +149,29 @@ def extract_usage(
     if not isinstance(usage, dict):
         return None, None, None, None
     if ingress == "chat":
-        in_tok = usage.get("prompt_tokens")
-        out_tok = usage.get("completion_tokens")
+        in_tok = _to_int(usage.get("prompt_tokens"))
+        out_tok = _to_int(usage.get("completion_tokens"))
         in_details = usage.get("prompt_tokens_details", {})
         out_details = usage.get("completion_tokens_details", {})
     elif ingress == "messages":
-        in_tok = usage.get("input_tokens")
-        out_tok = usage.get("output_tokens")
-        cached = usage.get("cache_read_input_tokens")
-        cached = int(cached) if cached is not None else None
-        return in_tok, out_tok, cached, None
+        return (
+            _to_int(usage.get("input_tokens")),
+            _to_int(usage.get("output_tokens")),
+            _to_int(usage.get("cache_read_input_tokens")),
+            None,
+        )
     else:
-        in_tok = usage.get("input_tokens")
-        out_tok = usage.get("output_tokens")
+        in_tok = _to_int(usage.get("input_tokens"))
+        out_tok = _to_int(usage.get("output_tokens"))
         in_details = usage.get("input_tokens_details", {})
         out_details = usage.get("output_tokens_details", {})
     if not isinstance(in_details, dict):
         in_details = {}
     if not isinstance(out_details, dict):
         out_details = {}
-    cached = in_details.get("cached_tokens")
-    reasoning = out_details.get("reasoning_tokens")
     return (
         in_tok,
         out_tok,
-        int(cached) if cached is not None else None,
-        int(reasoning) if reasoning is not None else None,
+        _to_int(in_details.get("cached_tokens")),
+        _to_int(out_details.get("reasoning_tokens")),
     )

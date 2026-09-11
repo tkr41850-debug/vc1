@@ -177,9 +177,12 @@ def app_client(mock_upstream, tmp_path):
 
 
 @pytest.fixture()
-def admin_client(mock_upstream, tmp_path):
+def admin_client(mock_upstream, tmp_path, monkeypatch):
     from llms.proxy.auth import require_admin
 
+    # The gate only honors dependency_overrides when explicitly enabled,
+    # so prod never consults a test hook in its hot path.
+    monkeypatch.setenv("ALLOW_ADMIN_OVERRIDE", "1")
     client, seen = mock_upstream
     with build_app_client(
         make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET

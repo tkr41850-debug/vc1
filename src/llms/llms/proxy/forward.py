@@ -64,8 +64,9 @@ async def forward(
     via_pool: dict | None = None,
 ) -> Response:
     # via_pool relays the Zen request through a vsp warp pool /fetch endpoint:
-    # {"base_url", "token"}. The pool returns {ok, status, headers, body_b64};
-    # streams are not supported through the relay (pools buffer /fetch).
+    # {"base_url", "token"}. The pool returns {ok, status, headers, body_b64}.
+    # Pools buffer /fetch so true streaming is impossible; streamed bodies go
+    # direct (noproxy) instead — see pipeline's warp_stream_fallback.
     if via_pool is not None:
         from llms.proxy.providers import fetch_spec, parse_fetch_result
 
@@ -126,9 +127,13 @@ async def forward(
             content=payload,
             headers=passthrough_headers(resp_headers) if status >= 400 else None,
         )
+        # Observability only: the provider that relayed this request, and the
+        # pool's currently-active warp exit at send time. The pool chooses the
+        # actual egress warp internally per request — warp_idx is a snapshot
+        # of pool state, not a pin.
         response.headers["x-egress-provider"] = via_pool.get("provider_id", "")
-        if via_pool.get("warp_idx") is not None:
-            response.headers["x-egress-warp"] = str(via_pool["warp_idx"])
+        if via_pool.get("pool_active_warp") is not None:
+            response.headers["x-pool-active-warp"] = str(via_pool["pool_active_warp"])
         return response
     if body.get("stream") is True:
         req = client.build_request("POST", url, headers=headers, json=body)

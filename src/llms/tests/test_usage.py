@@ -105,6 +105,45 @@ def test_tracker_persists_roundtrip(tmp_path):
     assert t2.snapshot() == t.snapshot()
 
 
+def test_extract_usage_malformed_values_fail_open():
+    # Malformed upstream usage never 500s the request: unparseable fields
+    # come back None and record as request-only.
+    assert extract_usage(
+        "responses",
+        {
+            "usage": {
+                "input_tokens": "lots",
+                "output_tokens": None,
+                "input_tokens_details": {"cached_tokens": "many"},
+                "output_tokens_details": {"reasoning_tokens": [1]},
+            }
+        },
+    ) == (None, None, None, None)
+    assert extract_usage(
+        "chat",
+        {
+            "usage": {
+                "prompt_tokens": 4,
+                "completion_tokens": 2,
+                "prompt_tokens_details": "nope",
+            }
+        },
+    ) == (4, 2, None, None)
+
+
+def test_tracker_rekey_merges_attribution():
+    t = UsageTracker()
+    t.record("sk-old", "m1", 4, 2, 1, 0)
+    t.record("sk-new", "m1", 1, 1, 0, 1)
+    t.rekey("sk-old", "sk-new")
+    snap = t.snapshot()["keys"]
+    assert "sk-old" not in snap
+    assert snap["sk-new"]["requests"] == 2
+    assert snap["sk-new"]["input_tokens"] == 5
+    assert snap["sk-new"]["cached_tokens"] == 1
+    assert snap["sk-new"]["reasoning_tokens"] == 1
+
+
 def _post(tc, affinity, path, body):
     from tests.conftest import TEST_HEADERS
 

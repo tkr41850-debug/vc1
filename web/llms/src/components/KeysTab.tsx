@@ -5,6 +5,42 @@ function fmt(n: number): string {
   return n.toLocaleString("en-US");
 }
 
+function mask(secret: string): string {
+  if (secret.length <= 8) return "••••";
+  return `${secret.slice(0, 6)}…${secret.slice(-4)}`;
+}
+
+function SecretCell({ value }: { value: string }) {
+  const [revealed, setRevealed] = useState(false);
+  const shown = revealed ? value : mask(value);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      /* clipboard unavailable; reveal still works */
+    }
+  };
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span title={revealed ? undefined : "Click reveal to show full secret"}>{shown}</span>
+      <button
+        className="rounded px-1 text-xs text-gray-500 hover:bg-gray-100"
+        onClick={() => setRevealed((v) => !v)}
+        title={revealed ? "Mask" : "Reveal"}
+      >
+        {revealed ? "🙈" : "👁"}
+      </button>
+      <button
+        className="rounded px-1 text-xs text-gray-500 hover:bg-gray-100"
+        onClick={copy}
+        title="Copy full secret"
+      >
+        📋
+      </button>
+    </span>
+  );
+}
+
 export default function KeysTab({
   keys,
   reload,
@@ -52,10 +88,21 @@ export default function KeysTab({
   };
 
   const remove = async (k: ApiKeyEntry) => {
-    if (!window.confirm(`Delete key ${k.key}?`)) return;
+    if (!window.confirm(`Delete key ${k.key}? This orphans its usage history.`)) return;
     setError("");
     try {
       await api.deleteKey(k.key);
+      reload();
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  const rotate = async (k: ApiKeyEntry) => {
+    if (!window.confirm(`Rotate ${k.key}? A new secret is issued; the old one is disabled and usage carries over.`)) return;
+    setError("");
+    try {
+      await api.rotateKey(k.key);
       reload();
     } catch (e) {
       fail(e);
@@ -110,7 +157,9 @@ export default function KeysTab({
         <tbody>
           {keys.map((k) => (
             <tr key={k.key} className="border-b hover:bg-gray-50">
-              <td className="py-2 pr-4 font-mono">{k.key}</td>
+              <td className="py-2 pr-4 font-mono">
+                <SecretCell value={k.key} />
+              </td>
               <td className="py-2 pr-4">{k.label || "—"}</td>
               <td className="py-2 pr-4">
                 <button
@@ -136,6 +185,13 @@ export default function KeysTab({
               <td className="py-2 pr-4 text-right">{fmt(k.usage.output_tokens)}</td>
               <td className="py-2 pr-4 text-right">{fmt(k.usage.reasoning_tokens ?? 0)}</td>
               <td className="py-2 text-right">
+                <button
+                  className="mr-1 rounded px-2 py-0.5 text-xs text-blue-600 hover:bg-blue-50"
+                  onClick={() => rotate(k)}
+                  title="Issue a new secret; old disabled, usage carries over"
+                >
+                  rotate
+                </button>
                 <button
                   className="rounded px-2 py-0.5 text-xs text-red-600 hover:bg-red-50"
                   onClick={() => remove(k)}

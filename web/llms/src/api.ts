@@ -104,6 +104,10 @@ export const api = {
     req<{ status: string }>(`/api/admin/keys/${encodeURIComponent(key)}`, {
       method: "DELETE",
     }),
+  rotateKey: (key: string, new_key?: string) =>
+    req<ApiKeyEntry>(`/api/admin/keys/${encodeURIComponent(key)}/rotate`, {
+      ...json({ new_key: new_key ?? "" }),
+    }),
   models: () => req<{ models: ModelEntry[] }>("/api/admin/models"),
   createModel: (body: { id: string; label: string; enabled: boolean }) =>
     req<ModelEntry>("/api/admin/models", json(body)),

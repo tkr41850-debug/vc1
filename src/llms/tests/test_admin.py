@@ -24,6 +24,14 @@ def test_admin_keys_crud(admin_client, tmp_path):
     assert r.json() == {"key": "sk-new", "label": "Renamed", "enabled": False}
     assert Store(data_dir=tmp_path).key_allowed("sk-new") is False
 
+    r = tc.post("/api/admin/keys/sk-new/rotate", json={"new_key": "sk-rotated"})
+    assert r.status_code == 201
+    assert r.json()["key"] == "sk-rotated"
+    store = Store(data_dir=tmp_path)
+    assert store.key_allowed("sk-rotated") is True
+    assert store.key_allowed("sk-new") is False
+    assert tc.post("/api/admin/keys/sk-new/rotate", json={}).status_code == 201
+
     r = tc.delete("/api/admin/keys/sk-new")
     assert r.status_code == 200
     assert Store(data_dir=tmp_path).find_key("sk-new") is None

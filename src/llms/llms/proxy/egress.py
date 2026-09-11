@@ -31,9 +31,8 @@ class WarpPoolEgress:
     """Route Zen requests through a vsp warp pool via its /fetch relay.
 
     The pool picks the warp exit internally (its active/healthy instance);
-    per-(bucket, slot) stickiness is approximated by pinning the pool's
-    active exit through warp_exit_for() for observability, while the actual
-    HTTP path always goes through the pool relay.
+    num_slots mirrors the pool's ready-exit count (refreshed by the registry
+    health poll) so bucket slot math spreads across real exits.
     """
 
     def __init__(
@@ -45,12 +44,15 @@ class WarpPoolEgress:
     ) -> None:
         self.pool_base_url = pool_base_url.rstrip("/")
         self.token = token
-        self._num_slots = num_slots
+        self._num_slots = max(1, num_slots)
         self._client = client
         self._owned = client is None
 
     def num_slots(self) -> int:
         return self._num_slots
+
+    def set_num_slots(self, n: int) -> None:
+        self._num_slots = max(1, int(n))
 
     def client_for(self, bucket: int, slot: int) -> httpx.AsyncClient:
         # The httpx client targets the pool; relay wrapping happens in
@@ -108,6 +110,7 @@ class ProviderEgress:
         if egress is None:
             egress = WarpPoolEgress(provider.base_url, provider.token)
             self._warp[provider.id] = egress
+        registry._egresses = self._warp
         return provider.id, "warp", egress
 
     def client_for(self, bucket: int, slot: int) -> httpx.AsyncClient:
