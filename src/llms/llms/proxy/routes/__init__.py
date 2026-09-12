@@ -12,3 +12,8 @@ async def healthz(request: Request) -> dict[str, str]:
     if store_error:
         body = {"status": "degraded", "store_error": store_error}
     return body
+
+
+@router.api_route("/api/hello", methods=["GET", "HEAD"])
+async def api_hello() -> dict[str, str]:
+    return {"status": "ok"}

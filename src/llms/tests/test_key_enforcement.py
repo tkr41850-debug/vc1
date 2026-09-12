@@ -9,6 +9,12 @@ def test_healthz_open_without_secret(app_client):
     assert tc.get("/healthz").status_code == 200
 
 
+def test_api_hello_open_without_secret(app_client):
+    tc, _ = app_client
+    assert tc.get("/api/hello").status_code == 200
+    assert tc.head("/api/hello").status_code == 200
+
+
 def test_sk_ant_prefix_falls_back_to_allowlisted_key(app_client):
     tc, _ = app_client
     r = tc.post(

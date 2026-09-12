@@ -11,7 +11,7 @@ from llms.proxy.auth import require_admin, session_login
 from llms.proxy.keys import resolve_secret_key
 from llms.proxy.store import StoreError
 
-OPEN_PATHS = {"/healthz"}
+OPEN_PATHS = {"/healthz", "/api/hello"}
 OPEN_ADMIN_PREFIXES = (
     "/api/admin/login",
     "/api/admin/callback",
