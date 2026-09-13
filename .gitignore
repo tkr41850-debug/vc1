@@ -1,5 +1,5 @@
 .claude/
 .env
-data/usage.json
+data/
 web/llms/node_modules/
 src/llms/llms/proxy/static/
