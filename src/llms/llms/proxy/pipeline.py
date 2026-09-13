@@ -177,6 +177,31 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             client = egress_provider.client_for(bucket, slot)
     else:
         client = egress_provider.client_for(bucket, slot)
+    tracker = getattr(request.app.state, "usage", None)
+    usage_secret = getattr(request.state, "secret_key", None)
+    stream_usage_cb = None
+    if (
+        outbound.get("stream") is True
+        and tracker is not None
+        and usage_secret is not None
+    ):
+
+        def stream_usage_cb(
+            done, _tracker=tracker, _key=usage_secret, _model=req.model
+        ):
+            from llms.proxy.ir import StreamDone as _StreamDone
+
+            if isinstance(done, _StreamDone):
+                _tracker.record(
+                    _key,
+                    _model,
+                    done.input_tokens,
+                    done.output_tokens,
+                    done.cached_tokens,
+                    done.reasoning_tokens,
+                    count_request=False,
+                )
+
     response = await forward(
         client,
         url,
@@ -186,6 +211,8 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         convert=_convert_for(ingress, egress, req.model),
         translate_stream=_stream_for(ingress, egress, req.model),
         via_warp=via_warp,
+        stream_ingress=ingress if outbound.get("stream") is True else None,
+        stream_usage_sink=stream_usage_cb,
     )
     elapsed_ms = (time.monotonic() - started) * 1000.0
     outcome, retry_after = _outcome_of(response)
@@ -240,6 +267,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
 def _record_usage(
     request: Request, ingress: str, model: str, response: Response
 ) -> None:
+    from llms.proxy.ir import StreamDone
     from llms.proxy.usage import extract_usage
 
     tracker = getattr(request.app.state, "usage", None)
@@ -247,6 +275,22 @@ def _record_usage(
     if tracker is None or secret_key is None:
         return
     if isinstance(response, StreamingResponse):
+        # Translate path: lines buffered, IR usage sniffed up-front.
+        done = getattr(response, "stream_usage", None)
+        if isinstance(done, StreamDone):
+            tracker.record(
+                secret_key,
+                model,
+                done.input_tokens,
+                done.output_tokens,
+                done.cached_tokens,
+                done.reasoning_tokens,
+            )
+            return
+        # Passthrough: the tap in forward.py records tokens synchronously
+        # when the stream exhausts (request counted here, tokens merged on
+        # completion without double-counting). Nothing more to do at
+        # response-build time; fall through to the request-only record.
         tracker.record(secret_key, model, None, None, None, None)
         return
     if not isinstance(response, JSONResponse) or response.status_code >= 400:

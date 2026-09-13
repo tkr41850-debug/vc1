@@ -109,5 +109,7 @@ class ReasoningDelta:
 class StreamDone:
     status: str
     has_tool_calls: bool = False
-    input_tokens: int = 0
-    output_tokens: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cached_tokens: int | None = None
+    reasoning_tokens: int | None = None
