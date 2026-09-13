@@ -220,10 +220,8 @@ async def forward(
                     )
             if warped:
                 response.headers["x-egress-provider"] = via_warp.get("provider_id", "")
-                if via_warp.get("pool_active_warp") is not None:
-                    response.headers["x-pool-active-warp"] = str(
-                        via_warp["pool_active_warp"]
-                    )
+                if via_warp.get("warp_idx") is not None:
+                    response.headers["x-pool-active-warp"] = str(via_warp["warp_idx"])
             return response
         media = upstream.headers.get("content-type", "text/event-stream")
         if stream_ingress is not None:
@@ -233,10 +231,8 @@ async def forward(
             response = StreamingResponse(tapped, media_type=media)
             if warped:
                 response.headers["x-egress-provider"] = via_warp.get("provider_id", "")
-                if via_warp.get("pool_active_warp") is not None:
-                    response.headers["x-pool-active-warp"] = str(
-                        via_warp["pool_active_warp"]
-                    )
+                if via_warp.get("warp_idx") is not None:
+                    response.headers["x-pool-active-warp"] = str(via_warp["warp_idx"])
             return response
         return StreamingResponse(stream_upstream(upstream, trace_id), media_type=media)
     try:
@@ -269,9 +265,9 @@ async def forward(
     )
     if warped:
         # Observability only: the warp provider at send time, and the
-        # pool's currently-active exit snapshot (not a pin — SOCKS
-        # selection is slot-spread inside the egress layer).
+        # request slot's position in the ready-exit spread (slot % ready —
+        # not a pool pin; each slot dials its own exit).
         response.headers["x-egress-provider"] = via_warp.get("provider_id", "")
-        if via_warp.get("pool_active_warp") is not None:
-            response.headers["x-pool-active-warp"] = str(via_warp["pool_active_warp"])
+        if via_warp.get("warp_idx") is not None:
+            response.headers["x-pool-active-warp"] = str(via_warp["warp_idx"])
     return response

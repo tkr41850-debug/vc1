@@ -34,9 +34,9 @@ models, and warp providers; stored in `data/keys.yaml` / `data/models.yaml` /
 `data/providers.yaml` at the repo root.
 
 Warp providers are supervised in-process: llms owns its warp-cli datadirs
-under `data/warps/<provider_id>/warp<N>/`, spawns `warp-svc` per slot, and
+under `data/warps/<provider_id>/warp<N>/`, spawns `warp-svc` per exit, and
 drives registration/proxy-mode/connect itself (no sidecar). A provider's
-`slots` count sizes its local exit pool; requests dial the ready exits'
+`exits` count sizes its local exit pool; requests dial the ready exits'
 SOCKS ports directly, and traffic fails open to direct when no exit is
 ready. `just docker-up` installs `warp-cli` in the image — the container
 needs `/dev/net/tun` + `NET_ADMIN` (wired in `docker-compose.yml`) for
@@ -107,7 +107,7 @@ and tool/streaming support; `just catalog` checks the seed against live Zen.
 | `SLOT_COOLDOWN_S` | `60` | Minimum bucket cooldown after a rate limit |
 | `EGRESS_MODE` | `direct` | Reserved; warp providers route via SOCKS when healthy, else fail open to direct |
 | `MODEL_ALIASES` | — | Opt-in remap, e.g. `gpt-*=muse-spark-1.3-contributor-free,claude-*=muse-spark-1.3-contributor-free`. Stabilizes clients pinned to billed models, but the client sees the requested id while another model answers |
-| `WARP_SLOTS` | `8` | Default warp exits per provider (per-provider `slots` overrides) |
+| `WARP_EXITS` (`WARP_SLOTS` legacy) | `8` | Default warp exits per provider (per-provider `exits` overrides) |
 | `WARP_HOLD_TIMEOUT` | `10` | Seconds to wait for a ready warp exit |
 | `WARP_REG_INTERVAL_SEC` | `28800` | Stagger between slot registrations (Cloudflare rate limit) |
 | `WARP_BOOT_RETRY_SEC` | `300` | Retry delay for unready exits |

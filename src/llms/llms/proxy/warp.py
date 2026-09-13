@@ -36,7 +36,7 @@ from pathlib import Path
 
 log = logging.getLogger("llms.warp")
 
-DEFAULT_SLOTS = 8
+DEFAULT_EXITS = 8
 DEFAULT_HOLD_TIMEOUT_S = 10.0
 DEFAULT_REG_INTERVAL_SEC = 28800
 DEFAULT_BOOT_RETRY_SEC = 300
@@ -165,15 +165,25 @@ class WarpSlot:
     idx: int
     socks_port: int
     ready: bool = False
+    # Last polled daemon state (lives on the slot, not a side cache, so
+    # egress eligibility and health snapshots read one source of truth).
+    status: str = "unknown"
+    reason: str = ""
+    checked_at: float = 0.0
     last_error: str = ""
     registration_id: str = ""
     fail_count: int = 0
     last_heal: float = 0.0
 
+    @property
+    def may_recover(self) -> bool:
+        """True unless the slot's last known state is definitively down."""
+        return not self.status.lower().startswith("disconnected")
+
 
 @dataclass
 class WarpPoolConfig:
-    slots: int = DEFAULT_SLOTS
+    exits: int = DEFAULT_EXITS
     hold_timeout_s: float = DEFAULT_HOLD_TIMEOUT_S
     reg_interval_sec: int = DEFAULT_REG_INTERVAL_SEC
     boot_retry_sec: int = DEFAULT_BOOT_RETRY_SEC
@@ -195,10 +205,8 @@ class WarpPool:
         self.data_dir = Path(data_dir)
         self.config = config or WarpPoolConfig()
         self.instances: list[WarpSlot] = []
-        self.active: int = 0
         self.ready_event = asyncio.Event()
         self.lock = asyncio.Lock()
-        self.status_cache: dict[int, dict[str, str]] = {}
         self.last_reg_ts: float = -self.config.reg_interval_sec
         self.binary_error: str = ""
         self._daemons: dict[int, asyncio.subprocess.Process] = {}
@@ -220,7 +228,7 @@ class WarpPool:
             )
             log.warning("[%s] %s", self.provider_id, self.binary_error)
             return
-        for idx in range(max(0, self.config.slots)):
+        for idx in range(max(0, self.config.exits)):
             port = await allocate_socks_port(
                 self.provider_id, idx, self.config.base_socks_port
             )
@@ -271,56 +279,56 @@ class WarpPool:
         healthy = self.healthy()
         if not healthy:
             return None
-        for w in healthy:
-            if w.idx == self.active:
-                return w
         return healthy[0]
 
-    async def rotate(self) -> dict:
-        """Advance the active exit to the next healthy slot (local)."""
+    def ready_count(self) -> int | None:
+        """Ready exits, or None when never polled (unknown health)."""
+        if not self.instances or all(w.checked_at <= 0 for w in self.instances):
+            return None
+        return sum(1 for w in self.instances if w.ready)
+
+    async def reconnect(self) -> dict:
+        """Bounce the exits (disconnect + full boot), re-poll — local restart."""
+        before = sum(1 for w in self.instances if w.ready)
+        total = len(self.instances)
         async with self.lock:
-            order = sorted(self.healthy(), key=lambda w: w.idx)
-            nxt = next((w for w in order if w.idx > self.active), None)
-            if nxt is None and order:
-                nxt = order[0]
-            if nxt is None:
-                return {"ok": False, "error": "no healthy warps"}
-            old = self.active
-            self.active = nxt.idx
+            for w in self.instances:
+                w.ready = False
+            if not self.healthy():
+                self.ready_event.clear()
             loop = asyncio.get_running_loop()
 
-            def _reopen() -> None:
-                pid, idx, data_dir = self.provider_id, nxt.idx, self.data_dir
+            def _bounce(inst: WarpSlot) -> None:
+                pid, idx, data_dir = self.provider_id, inst.idx, self.data_dir
                 run_cli(pid, idx, data_dir, "disconnect")
-                run_cli(pid, idx, data_dir, "mode", "proxy")
-                run_cli(pid, idx, data_dir, "proxy", "port", str(nxt.socks_port))
-                run_cli(pid, idx, data_dir, "--accept-tos", "connect")
 
-            await loop.run_in_executor(None, _reopen)
-            asyncio.create_task(self._reverify(nxt))
-            return {"ok": True, "old": old, "active": self.active}
+            async def _rebring(inst: WarpSlot) -> None:
+                # Disconnect first (bounce semantics), then the standard
+                # bring-up: daemon ensured, proxy mode + explicit connect,
+                # then wait — with the slow-connect watcher as fallback.
+                await loop.run_in_executor(None, _bounce, inst)
+                if not await self._bring_up(inst, timeout=45):
+                    asyncio.create_task(self._watch_slot(inst))
 
-    async def _reverify(self, inst: WarpSlot) -> None:
-        inst.ready = False
-        if not self.healthy():
-            self.ready_event.clear()
-        # A rotate re-runs the full boot (mode + port + connect) and can hit
-        # the same slow-connect lag as the initial burst — keep watching past
-        # the short window so the exit still flips ready on its own.
-        if not await self._bring_up(inst, timeout=45):
-            asyncio.create_task(self._watch_slot(inst))
+            await asyncio.gather(*(_rebring(w) for w in list(self.instances)))
+        await self.refresh_statuses()
+        after = sum(1 for w in self.instances if w.ready)
+        return {
+            "ok": after > 0,
+            "before": {"ready": before, "exits": total},
+            "after": {"ready": after, "exits": len(self.instances)},
+        }
 
     def snapshot(self) -> dict:
-        """Local health snapshot: {active, exits[{idx,ready,status,...}]}."""
+        """Local health snapshot: {exits[{idx,ready,status,...}]}."""
         return {
-            "active": self.active,
             "error": self.binary_error,
             "exits": [
                 {
                     "idx": w.idx,
                     "ready": w.ready,
-                    "status": self.status_cache.get(w.idx, {}).get("status", "unknown"),
-                    "reason": self.status_cache.get(w.idx, {}).get("reason", ""),
+                    "status": w.status,
+                    "reason": w.reason,
                     "socks": w.socks_port,
                     "registered": self.has_registration(w),
                     "error": w.last_error[-200:],
@@ -770,7 +778,8 @@ class WarpPool:
     async def _refresh_one_status(self, slot: WarpSlot) -> None:
         _rc, out = await self._cli(slot, "status", timeout=5)
         status, reason = parse_status_output(out)
-        self.status_cache[slot.idx] = {"status": status, "reason": reason}
+        slot.status, slot.reason = status, reason
+        slot.checked_at = time.monotonic()
         # Promotion path: a registered slot whose tunnel connected outside
         # any single wait window (slow networks beat the burst poll; a watcher
         # may be absent after restarts). Flip ready here so wait_ready callers

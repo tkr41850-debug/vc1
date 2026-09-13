@@ -11,7 +11,7 @@ from llms.proxy.config import Settings
 from llms.proxy.forward import forward, parse_body
 from llms.proxy.ir import RequestIR
 from llms.proxy.logging import log_ingress, log_upstream, new_trace_id, setup_logging
-from llms.proxy.providers import RecentRequest, pool_active_warp
+from llms.proxy.providers import RecentRequest
 from llms.proxy.rate_limit import classify
 from llms.proxy.router import ENDPOINT_PATH, pick, resolve_alias
 from llms.proxy.stream_translate import (
@@ -128,7 +128,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     started = time.monotonic()
     provider_id: str | None = None
     via_warp: dict | None = None
-    pool_active: int | None = None
+    warp_idx: int | None = None
     registry = getattr(request.app.state, "providers", None)
     resolve = getattr(egress_provider, "resolve", None)
     if callable(resolve):
@@ -141,8 +141,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                         provider = p
                         break
             if registry is not None and provider is not None:
-                health = await registry.refresh_health(provider)
-                pool_active = pool_active_warp(health)
+                await registry.refresh_health(provider)
                 # Re-resolve after the refresh: a slot that flipped ready
                 # during this very poll must seed the egress's SOCKS ports
                 # before client_for runs, or the request fails open despite
@@ -169,9 +168,16 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                     provider_id, via_warp = None, None
                     client = egress_provider.client_for(bucket, slot)
                 else:
+                    # Slot-spread egress: the request's slot pins to one
+                    # ready exit (slot % ready), so warp_idx is the slot's
+                    # position in the ready spread — not a pool pin.
+                    ports = warp_egress.ready_ports()
+                    warp_idx = (
+                        ports.index(warp_egress.pick_port(slot)) if ports else None
+                    )
                     via_warp = {
                         "provider_id": provider_id or "",
-                        "pool_active_warp": pool_active,
+                        "warp_idx": warp_idx,
                     }
         else:
             client = egress_provider.client_for(bucket, slot)
@@ -257,7 +263,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 model=req.model,
                 status=status,
                 ms=elapsed_ms,
-                warp_idx=pool_active,
+                warp_idx=warp_idx,
                 error=str(error)[:200],
             )
         )

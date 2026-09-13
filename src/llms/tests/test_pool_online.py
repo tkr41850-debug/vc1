@@ -68,7 +68,7 @@ def pool_world(tmp_path, monkeypatch):
 
 
 def _save_pool(registry: ProviderRegistry) -> Provider:
-    registry.save([Provider(id="pool1", kind="warp", slots=2, models=["mimo-*"])])
+    registry.save([Provider(id="pool1", kind="warp", exits=2, models=["mimo-*"])])
     return registry.load()[1]
 
 
@@ -80,7 +80,6 @@ def _fake_health(monkeypatch, registry, exits: list[dict]):
     async def _health(provider, force=False):
         rt = registry.runtime(provider.id)
         rt.health = ProviderHealth(
-            active=1,
             exits=[WarpExit(**w) for w in exits],
             fetched_at=time.monotonic(),
         )
@@ -141,7 +140,9 @@ def test_pool_online_takes_traffic_and_resizes(pool_world, monkeypatch):
     assert r.json()["choices"][0]["message"]["content"] == "via-warp"
     assert seen.get("warp_hits") == 1
     assert r.headers.get("x-egress-provider") == "pool1"
-    assert r.headers.get("x-pool-active-warp") == "1"
+    # Slot-spread position (slot % ready), not a pool pin: bucket lands on
+    # slot 0 of the [40001, 40002] ready spread.
+    assert r.headers.get("x-pool-active-warp") == "0"
     assert tc.app.state.bucket_table.num_slots == 2
     assert seen.get("direct_hits", 0) == 0
 
@@ -178,14 +179,13 @@ def test_add_then_remove_provider_lifecycle(pool_world):
         tmp_path,
     ) = pool_world
     assert registry.ready_exits("pool9") is None
-    registry.save([Provider(id="pool9", kind="warp", slots=2, models=["mimo-*"])])
+    registry.save([Provider(id="pool9", kind="warp", exits=2, models=["mimo-*"])])
     registry.ensure_warp_dir("pool9")
     assert (tmp_path / "warps" / "pool9").is_dir()
     assert egress.sync_bucket_slots(tc.app.state.bucket_table) is False
     registry.save_warp_status(
         "pool9",
         ProviderHealth(
-            active=1,
             exits=[WarpExit(idx=1, ready=True), WarpExit(idx=2, ready=True)],
             fetched_at=1.0,
         ),

@@ -235,7 +235,7 @@ export default function ProvidersTab({
   reload: () => void;
   onAuthError: () => void;
 }) {
-  const [form, setForm] = useState({ id: "", label: "", slots: "2", models: "" });
+  const [form, setForm] = useState({ id: "", label: "", models: "", exits: "1" });
   const [debugId, setDebugId] = useState<string | null>(null);
   const { error, setError, run } = useCrudTab(onAuthError);
 
@@ -244,16 +244,17 @@ export default function ProvidersTab({
       setError("id is required");
       return;
     }
+    const exits = Math.max(1, parseInt(form.exits, 10) || 1);
     await run(async () => {
       await api.createProvider({
         id: form.id.trim(),
         label: form.label,
         kind: "warp",
-        slots: Math.max(0, parseInt(form.slots, 10) || 0),
         models: form.models.split(",").map((m) => m.trim()).filter(Boolean),
         enabled: true,
+        exits,
       });
-      setForm({ id: "", label: "", slots: "2", models: "" });
+      setForm({ id: "", label: "", models: "", exits: "1" });
     }, reload);
   };
 
@@ -289,12 +290,12 @@ export default function ProvidersTab({
           />
         </label>
         <label className="flex flex-col text-sm">
-          Slots
+          Exits
           <input
             className="rounded border px-2 py-1 font-mono"
-            placeholder="2"
-            value={form.slots}
-            onChange={(e) => setForm({ ...form, slots: e.target.value })}
+            placeholder="1"
+            value={form.exits}
+            onChange={(e) => setForm({ ...form, exits: e.target.value })}
           />
         </label>
         <label className="flex flex-col text-sm">
@@ -320,7 +321,7 @@ export default function ProvidersTab({
             <th className="py-2 pr-4"></th>
             <th className="py-2 pr-4">Provider</th>
             <th className="py-2 pr-4">Kind</th>
-            <th className="py-2 pr-4">Slots</th>
+            <th className="py-2 pr-4">Exits</th>
             <th className="py-2 pr-4">Models</th>
             <th className="py-2 pr-4">Enabled</th>
             <th className="py-2 pr-4 text-right">RetryIn</th>
@@ -343,7 +344,7 @@ export default function ProvidersTab({
                 </span>
               </td>
               <td className="py-2 pr-4 font-mono text-xs">
-                {p.kind === "warp" ? p.slots : "—"}
+                {p.kind === "warp" ? p.exits : "—"}
               </td>
               <td className="max-w-xs truncate py-2 pr-4 font-mono text-xs" title={p.models.join(", ")}>
                 {p.models.join(", ") || "—"}

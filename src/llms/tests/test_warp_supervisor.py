@@ -23,8 +23,8 @@ from llms.proxy.warp import (
 )
 
 
-def _pool(provider_id: str = "pool1", slots: int = 3, **overrides) -> WarpPool:
-    cfg = WarpPoolConfig(slots=slots, **overrides)
+def _pool(provider_id: str = "pool1", exits: int = 3, **overrides) -> WarpPool:
+    cfg = WarpPoolConfig(exits=exits, **overrides)
     return WarpPool(provider_id, "/tmp/nope-data", cfg)
 
 
@@ -48,7 +48,7 @@ def test_connected_ready_rejects_interim_states():
     "Unable ... Registration Missing") whose text contains "connect"; a
     substring check flips ready minutes before the tunnel is up.
     """
-    pool = WarpPool("pool1", "/tmp/nope-data", WarpPoolConfig(slots=1))
+    pool = WarpPool("pool1", "/tmp/nope-data", WarpPoolConfig(exits=1))
     assert pool._connected_ready("Status update: Connected\nNetwork: healthy\n")
     assert not pool._connected_ready(
         "Status update: Connecting\nReason: Establishing connection\n"
@@ -115,45 +115,55 @@ def test_unlink_stale_socket_removes(tmp_path):
 
 def test_no_binary_stays_unhealthy_no_crash(monkeypatch, tmp_path):
     monkeypatch.setattr(warp_mod, "warp_cli_available", lambda: False)
-    pool = WarpPool("pool1", tmp_path, WarpPoolConfig(slots=2))
+    pool = WarpPool("pool1", tmp_path, WarpPoolConfig(exits=2))
     asyncio.run(pool.start())
     try:
         assert pool.binary_error.startswith("warp-cli not installed")
         assert pool.snapshot()["exits"] == []
         asyncio.run(pool.aclose())
-        assert asyncio.run(pool.rotate())["ok"] is False
+        assert asyncio.run(pool.reconnect())["ok"] is False
     finally:
         asyncio.run(pool.aclose())
 
 
-def test_rotate_advances_to_next_healthy():
+def test_reconnect_bounces_exits_and_repols(monkeypatch):
     pool = _pool()
     pool.instances = [
         WarpSlot(idx=0, socks_port=40001, ready=True),
         WarpSlot(idx=1, socks_port=40002, ready=True),
         WarpSlot(idx=2, socks_port=40003, ready=False),
     ]
-    pool.active = 0
     calls: list = []
-
-    async def fake_reopen(*a, **k):
-        calls.append(True)
-        return None, ""
 
     async def fake_cli(slot, *args, timeout=20):
         calls.append((slot.idx, args))
+        if args[:1] == ("status",):
+            return 0, "Status update: Connected\nNetwork: healthy"
+        if args[:2] == ("registration", "show"):
+            return 0, "Id: abc"
         return 0, "ok"
 
     pool._cli = fake_cli  # type: ignore[method-assign]
-    pool._reverify_calls = []  # type: ignore[attr-defined]
-
-    async def fake_reverify(inst):
-        pool._reverify_calls.append(inst.idx)  # type: ignore[attr-defined]
-
-    pool._reverify = fake_reverify  # type: ignore[method-assign]
-    result = asyncio.run(pool.rotate())
-    assert result == {"ok": True, "old": 0, "active": 1}
-    assert pool._reverify_calls == [1]  # type: ignore[attr-defined]
+    for inst in pool.instances:
+        (warp_mod.state_dir_for("/tmp/nope-data", "pool1", inst.idx)).mkdir(
+            parents=True, exist_ok=True
+        )
+    ran: list = []
+    monkeypatch.setattr(
+        warp_mod, "run_cli", lambda *a, **k: ran.append(a[3:]) or (0, "ok")
+    )
+    result = asyncio.run(pool.reconnect())
+    assert result == {
+        "ok": True,
+        "before": {"ready": 2, "exits": 3},
+        "after": {"ready": 3, "exits": 3},
+    }
+    # Every exit got a bounce disconnect (module-level run_cli) plus the
+    # full bring-up (mode + port + connect via pool._cli).
+    assert ("disconnect",) in ran
+    kinds = [a for _, a in calls]
+    assert ("connect",) in kinds
+    asyncio.run(pool.aclose())
 
 
 def test_slow_connect_watcher_marks_ready_late(monkeypatch, tmp_path):
@@ -165,7 +175,7 @@ def test_slow_connect_watcher_marks_ready_late(monkeypatch, tmp_path):
     """
 
     async def go():
-        pool = WarpPool("pool1", tmp_path, WarpPoolConfig(slots=1))
+        pool = WarpPool("pool1", tmp_path, WarpPoolConfig(exits=1))
         slot = WarpSlot(idx=0, socks_port=40001)
         pool.instances.append(slot)
         state = {"phase": "burst"}
@@ -212,7 +222,7 @@ def test_refresh_promotes_connected_registered_slot(tmp_path):
     """A registered slot that connected late flips ready on status refresh."""
 
     async def go():
-        pool = WarpPool("pool1", tmp_path, WarpPoolConfig(slots=1))
+        pool = WarpPool("pool1", tmp_path, WarpPoolConfig(exits=1))
         slot = WarpSlot(idx=0, socks_port=40001)
         pool.instances.append(slot)
         reg = tmp_path / "warps" / "pool1" / "warp0"
@@ -237,7 +247,7 @@ def test_refresh_does_not_promote_unregistered_slot(tmp_path):
     """An unregistered slot reporting connected stays unready."""
 
     async def go():
-        pool = WarpPool("pool1", tmp_path, WarpPoolConfig(slots=1))
+        pool = WarpPool("pool1", tmp_path, WarpPoolConfig(exits=1))
         slot = WarpSlot(idx=0, socks_port=40001)
         pool.instances.append(slot)
 
@@ -252,9 +262,11 @@ def test_refresh_does_not_promote_unregistered_slot(tmp_path):
     asyncio.run(go())
 
 
-def test_rotate_wraps_and_fails_empty():
+def test_reconnect_empty_pool_not_ok():
     pool = _pool()
-    assert asyncio.run(pool.rotate()) == {"ok": False, "error": "no healthy warps"}
+    result = asyncio.run(pool.reconnect())
+    assert result["ok"] is False
+    assert result["before"] == {"ready": 0, "exits": 0}
     asyncio.run(pool.aclose())
 
 
@@ -265,21 +277,20 @@ def test_wait_ready_timeout_returns_none():
     asyncio.run(pool.aclose())
 
 
-def test_wait_ready_returns_active_first():
+def test_wait_ready_returns_first_healthy():
     async def go() -> WarpSlot | None:
         pool = _pool()
         pool.instances = [
             WarpSlot(idx=0, socks_port=40001, ready=True),
             WarpSlot(idx=1, socks_port=40002, ready=True),
         ]
-        pool.active = 1
         pool.ready_event.set()
         got = await pool.wait_ready(timeout=1.0)
         await pool.aclose()
         return got
 
     got = asyncio.run(go())
-    assert got is not None and got.idx == 1
+    assert got is not None and got.idx == 0
 
 
 def test_heal_guarded_by_cooldown_and_budget():
@@ -297,7 +308,7 @@ def test_heal_guarded_by_cooldown_and_budget():
 
 
 def test_heal_stale_deletes_and_registers(monkeypatch, tmp_path):
-    pool = WarpPool("pool1", tmp_path, WarpPoolConfig(slots=2))
+    pool = WarpPool("pool1", tmp_path, WarpPoolConfig(exits=2))
     slot = WarpSlot(idx=0, socks_port=40001, ready=False)
     pool.last_reg_ts = 0.0  # budget spent long ago → budget_wait() == 0
     ran: list = []

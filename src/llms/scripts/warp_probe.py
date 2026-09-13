@@ -1,17 +1,18 @@
 """Live probe for llms-managed warp pools (needs warp-cli + network).
 
-Spins up the gateway with a slots-based warp provider and verifies the
+Spins up the gateway with an exits-based warp provider and verifies the
 local supervisor wiring end to end:
 
-  1. providers.yaml with ``slots`` loads (no migration error, boot survives)
+  1. providers.yaml with ``exits`` loads (no migration error, boot survives)
   2. the supervisor persists ``data/warps/<id>/status.json`` after traffic
   3. requests either ride a ready exit (``x-egress-provider`` header) or
      fail open to direct when no exit is up yet — both are correct gateway
      behavior; only gateway errors fail the probe
 
 Knobs: PROBE_PORT (8793), PROBE_DATA_DIR (required), PROBE_SECRET,
-PROBE_MODEL (muse-spark-1.3-contributor-free), PROBE_SLOTS (1),
-PROBE_WARP_WAIT (90s max wait for a ready exit via status.json).
+PROBE_MODEL (muse-spark-1.3-contributor-free), PROBE_EXITS (1,
+PROBE_SLOTS legacy alias), PROBE_WARP_WAIT (90s max wait for a ready exit
+via status.json).
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ DATA_DIR = os.getenv("PROBE_DATA_DIR", "")
 PROBE_SECRET = os.getenv("PROBE_SECRET", "sk-probe")
 PROBE_HEADERS = {"Authorization": f"Bearer {PROBE_SECRET}"}
 PROVIDER_ID = os.getenv("PROBE_PROVIDER", "warp-probe")
-SLOTS = int(os.getenv("PROBE_SLOTS", "1"))
+EXITS = int(os.getenv("PROBE_EXITS", os.getenv("PROBE_SLOTS", "1")))
 WARP_WAIT = float(os.getenv("PROBE_WARP_WAIT", "90"))
 MODEL = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
 
@@ -78,7 +79,7 @@ def main() -> int:
                     "id": PROVIDER_ID,
                     "label": "probe pool",
                     "kind": "warp",
-                    "slots": SLOTS,
+                    "exits": EXITS,
                     "models": ["*"],
                     "enabled": True,
                 }

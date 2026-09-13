@@ -47,7 +47,11 @@ class Settings:
         default_factory=lambda: float(os.getenv("SLOT_COOLDOWN_S", "60"))
     )
     egress_mode: str = field(default_factory=lambda: os.getenv("EGRESS_MODE", "direct"))
-    warp_slots: int = field(default_factory=lambda: int(os.getenv("WARP_SLOTS", "8")))
+    warp_exits: int = field(
+        default_factory=lambda: int(
+            os.getenv("WARP_EXITS", os.getenv("WARP_SLOTS", "8"))
+        )
+    )
     warp_hold_timeout_s: float = field(
         default_factory=lambda: float(os.getenv("WARP_HOLD_TIMEOUT", "10"))
     )

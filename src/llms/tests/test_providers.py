@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-from llms.proxy.providers import (
-    Provider,
-    ProviderRegistry,
-    pool_active_warp,
-)
+from llms.proxy.providers import Provider, ProviderRegistry
 
 
 def test_seed_has_noproxy_serving_free_models(tmp_path):
@@ -36,17 +32,17 @@ def test_registry_roundtrip_and_route(tmp_path):
         + [
             Provider(
                 id="warp-1",
-                label="Pool",
+                label="Local warps",
                 kind="warp",
-                slots=4,
                 models=["gpt-*"],
                 enabled=True,
+                exits=4,
             )
         ]
     )
     routed = registry.route("gpt-5")
     assert routed is not None and routed.id == "warp-1"
-    assert routed.slots == 4
+    assert routed.exits == 4
     routed = registry.route("muse-spark-1.3-contributor-free")
     assert routed is not None and routed.id == "noproxy"
 
@@ -55,36 +51,10 @@ def test_route_skips_disabled_warp(tmp_path):
     registry = ProviderRegistry(data_dir=tmp_path)
     registry.save(
         registry.load()
-        + [
-            Provider(
-                id="warp-1",
-                kind="warp",
-                slots=8,
-                models=["*"],
-                enabled=False,
-            )
-        ]
+        + [Provider(id="warp-1", kind="warp", models=["*"], enabled=False)]
     )
     routed = registry.route("gpt-5")
     assert routed is None
-
-
-def test_pool_active_warp_snapshot():
-    from llms.proxy.providers import ProviderHealth, WarpExit
-
-    health = ProviderHealth(
-        active=1,
-        exits=[
-            WarpExit(idx=1, ready=True),
-            WarpExit(idx=2, ready=False),
-            WarpExit(idx=3, ready=True),
-        ],
-    )
-    assert pool_active_warp(health) == 1
-    inactive = ProviderHealth(active=2, exits=health.exits)
-    assert pool_active_warp(inactive) is None
-    empty = ProviderHealth()
-    assert pool_active_warp(empty) is None
 
 
 def test_base_url_rejected_with_migration_error(tmp_path):
@@ -157,7 +127,7 @@ def test_provider_admin_crud(admin_client, tmp_path):
             "id": "warp-1",
             "label": "Pool",
             "kind": "warp",
-            "slots": 4,
+            "exits": 4,
             "models": ["gpt-*"],
             "enabled": True,
         },
@@ -166,13 +136,13 @@ def test_provider_admin_crud(admin_client, tmp_path):
     assert (
         tc.post(
             "/api/admin/providers",
-            json={"id": "warp-1", "kind": "warp", "slots": 2},
+            json={"id": "warp-1", "kind": "warp", "exits": 2},
         ).status_code
         == 409
     )
     assert (
         tc.post(
-            "/api/admin/providers", json={"id": "w2", "kind": "warp", "slots": -1}
+            "/api/admin/providers", json={"id": "w2", "kind": "warp", "exits": 0}
         ).status_code
         == 400
     )
@@ -227,7 +197,7 @@ def test_warp_egress_socks_and_retry_tracking(monkeypatch):
             Provider(
                 id="warp-1",
                 kind="warp",
-                slots=2,
+                exits=2,
                 models=["muse-spark*"],
             )
         ]
@@ -261,7 +231,6 @@ def test_warp_egress_socks_and_retry_tracking(monkeypatch):
 
         rt = registry.runtime("warp-1")
         rt.health = ProviderHealth(
-            active=1,
             exits=[
                 WarpExit(idx=1, ready=True, socks=40001, registered=True),
                 WarpExit(idx=2, ready=True, socks=40002, registered=True),

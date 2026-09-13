@@ -71,6 +71,10 @@ class WarpSocksEgress:
             return None
         return self._socks_ports[slot % len(self._socks_ports)]
 
+    def ready_ports(self) -> list[int]:
+        """Ready SOCKS ports in spread order (slot % ready)."""
+        return list(self._socks_ports)
+
     def client_for(self, bucket: int, slot: int) -> httpx.AsyncClient:
         port = self.pick_port(slot)
         if port is None:
@@ -110,13 +114,9 @@ def _pool_may_recover(registry, provider) -> bool:
     instances = getattr(pool, "instances", None) if pool is not None else None
     if not instances:
         return False
-    cache = getattr(pool, "status_cache", None) or {}
-    for w in instances:
-        entry = cache.get(getattr(w, "idx", None), {})
-        status = str(entry.get("status", "")).lower() if isinstance(entry, dict) else ""
-        if not status.startswith("disconnected"):
-            return True
-    return False
+    # Slot health lives on the slot itself (status polled by refresh);
+    # any non-disconnected state keeps the pool eligible.
+    return any(getattr(w, "may_recover", False) for w in instances)
 
 
 class ProviderEgress:

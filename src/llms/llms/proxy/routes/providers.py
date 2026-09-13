@@ -43,16 +43,16 @@ class ProviderBody(BaseModel):
     id: str = ""
     label: str = ""
     kind: str = "warp"
-    slots: int = 8
     models: list[str] = []
     enabled: bool = True
+    exits: int = 8
 
 
 class ProviderPatch(BaseModel):
     label: str | None = None
-    slots: int | None = None
     models: list[str] | None = None
     enabled: bool | None = None
+    exits: int | None = None
 
 
 @router.get("/api/admin/providers")
@@ -74,8 +74,8 @@ async def create_provider(
         raise HTTPException(status_code=400, detail="id is required")
     if body.kind not in ("noproxy", "warp"):
         raise HTTPException(status_code=400, detail="kind must be noproxy or warp")
-    if body.kind == "warp" and body.slots < 0:
-        raise HTTPException(status_code=400, detail="slots must be >= 0")
+    if body.kind == "warp" and body.exits < 1:
+        raise HTTPException(status_code=400, detail="exits must be >= 1")
     registry = _registry(request)
     _ = settings
     try:
@@ -88,9 +88,9 @@ async def create_provider(
         id=body.id,
         label=body.label,
         kind=body.kind,
-        slots=max(0, body.slots),
         models=list(body.models),
         enabled=body.enabled,
+        exits=max(1, body.exits),
     )
     providers.append(provider)
     registry.save(providers)
@@ -116,8 +116,8 @@ async def update_provider(
         if p.id == provider_id:
             if body.label is not None:
                 p.label = body.label
-            if body.slots is not None:
-                p.slots = max(0, body.slots)
+            if body.exits is not None:
+                p.exits = max(1, body.exits)
             if body.models is not None:
                 p.models = list(body.models)
             if body.enabled is not None:
@@ -142,7 +142,12 @@ async def delete_provider(
     except StoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     registry.save(providers)
-    registry.drop_warp_dir(provider_id)
+    # Datadirs stay on disk: Cloudflare rate-limits re-registration, so a
+    # same-id re-create reuses them instead of burning registration budget.
+    # Only the live pool (daemons + clients) is dropped.
+    supervisor = getattr(registry, "_supervisor", None)
+    if supervisor is not None:
+        await supervisor.drop(provider_id)
     _sync_slots(request)
     return {"status": "ok"}
 

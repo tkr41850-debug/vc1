@@ -25,7 +25,7 @@ def make_settings(**overrides) -> Settings:
         "slot_cooldown_s": 60.0,
         "egress_mode": "direct",
         "model_aliases": (),
-        "warp_slots": 8,
+        "warp_exits": 8,
         "warp_hold_timeout_s": 10.0,
         "warp_reg_interval_sec": 28800,
         "warp_boot_retry_sec": 300,

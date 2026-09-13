@@ -6,18 +6,21 @@ class FakePool:
 
     def __init__(self, ready: tuple[int, ...] = (1, 2)) -> None:
         self.ready = ready
-        self.rotates = 0
+        self.reconnects = 0
 
-    async def rotate(self) -> dict:
-        self.rotates += 1
-        return {"ok": True, "old": 1, "active": 2}
+    async def reconnect(self) -> dict:
+        self.reconnects += 1
+        return {
+            "ok": True,
+            "before": {"ready": 0, "exits": 2},
+            "after": {"ready": 2, "exits": 2},
+        }
 
     async def refresh_statuses(self) -> None:
         return None
 
     def snapshot(self) -> dict:
         return {
-            "active": 1 if self.ready else 0,
             "error": "",
             "exits": [
                 {
@@ -49,7 +52,7 @@ def test_reconnect_bounces_pool_and_resyncs(admin_client, tmp_path, monkeypatch)
     table = tc.app.state.bucket_table
     registry = ProviderRegistry(data_dir=tmp_path)
     monkeypatch.setattr(registry, "ensure_pool", _ensure_pool)
-    registry.save([Provider(id="pool1", kind="warp", slots=2, models=["muse-*"])])
+    registry.save([Provider(id="pool1", kind="warp", exits=2, models=["muse-*"])])
     egress = ProviderEgress(tc.app.state.egress, registry=registry)
     assert egress.resolve("muse-spark")[0] == "pool1"
     tc.app.state.egress = egress
@@ -64,8 +67,7 @@ def test_reconnect_bounces_pool_and_resyncs(admin_client, tmp_path, monkeypatch)
     assert body["ok"] is True
     assert body["before"]["ready"] == 0
     assert body["after"]["ready"] == 2
-    assert pool.rotates == 1
-    assert "pool1" not in egress._warp
+    assert pool.reconnects == 1
     assert table.num_slots == 2
     assert json.loads((tmp_path / "warps" / "pool1" / "status.json").read_text())[
         "exits"

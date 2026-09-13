@@ -22,9 +22,9 @@ class Provider:
     id: str
     label: str = ""
     kind: str = "warp"  # "noproxy" or "warp"
-    slots: int = 8
     models: list[str] = field(default_factory=list)  # prefix patterns ("*" = all)
     enabled: bool = True
+    exits: int = 8  # local warp exits owned by llms (per-provider pool size)
 
     def serves(self, model: str) -> bool:
         name = model.strip().lower()
@@ -50,7 +50,6 @@ class WarpExit:
 
 @dataclass
 class ProviderHealth:
-    active: int = 0
     exits: list[WarpExit] = field(default_factory=list)
     fetched_at: float = 0.0
     error: str = ""
@@ -139,9 +138,9 @@ class ProviderRegistry:
         from llms.proxy import warp as _warp
 
         return _warp.WarpPoolConfig(
-            slots=provider.slots
-            if provider.slots
-            else int(getattr(self._settings, "warp_slots", 8) or 8),
+            exits=provider.exits
+            if provider.exits
+            else int(getattr(self._settings, "warp_exits", 8) or 8),
             hold_timeout_s=float(
                 getattr(self._settings, "warp_hold_timeout_s", 10.0) or 10.0
             ),
@@ -175,9 +174,9 @@ class ProviderRegistry:
         if self._supervisor is None:
             self._supervisor = _warp.WarpSupervisor(self.data_dir)
         config = _warp.WarpPoolConfig(
-            slots=provider.slots
-            if provider.slots
-            else int(getattr(self._settings, "warp_slots", 8) or 8),
+            exits=provider.exits
+            if provider.exits
+            else int(getattr(self._settings, "warp_exits", 8) or 8),
             hold_timeout_s=float(
                 getattr(self._settings, "warp_hold_timeout_s", 10.0) or 10.0
             ),
@@ -220,7 +219,6 @@ class ProviderRegistry:
             json.dumps(
                 {
                     "fetched_at": health.fetched_at,
-                    "active": health.active,
                     "exits": [{"idx": w.idx, "ready": w.ready} for w in health.exits],
                 }
             )
@@ -275,22 +273,23 @@ class ProviderRegistry:
             if str(item.get("kind", "warp")) == "warp" and item.get("base_url"):
                 raise StoreError(
                     f"provider {item.get('id')}: remote pool base_url is no longer "
-                    "supported — remove it and set slots (llms manages warp-cli "
+                    "supported — remove it and set exits (llms manages warp-cli "
                     "datadirs in-process)"
                 )
-            slots = item.get("slots", 8)
+            # `exits` sizes the local exit pool; `slots` is accepted as a
+            # legacy alias from the slots-named era.
             try:
-                slots = int(slots)
+                exits = max(1, int(item.get("exits", item.get("slots", 8))))
             except (TypeError, ValueError):
-                raise StoreError(f"provider {item.get('id')}: slots must be an integer")
+                raise StoreError(f"provider {item.get('id')}: exits must be an integer")
             out.append(
                 Provider(
                     id=str(item["id"]),
                     label=str(item.get("label", "")),
                     kind=str(item.get("kind", "warp")),
-                    slots=max(0, slots),
                     models=[str(m) for m in item.get("models", []) or []],
                     enabled=bool(item.get("enabled", True)),
+                    exits=exits,
                 )
             )
         if not any(p.id == "noproxy" for p in out):
@@ -308,9 +307,9 @@ class ProviderRegistry:
                         "id": p.id,
                         "label": p.label,
                         "kind": p.kind,
-                        "slots": p.slots,
                         "models": p.models,
                         "enabled": p.enabled,
+                        "exits": p.exits,
                     }
                     for p in providers
                 ],
@@ -339,49 +338,26 @@ class ProviderRegistry:
             pass
         return True
 
-    async def rotate_pool(self, provider: Provider) -> dict:
-        """Advance the local pool's active exit to the next healthy slot.
-
-        Returns {"ok": bool, ...} — never raises, so reconnect can still
-        reset local state and re-poll.
-        """
-        if provider.kind != "warp":
-            return {"ok": False, "error": "not a warp provider"}
-        try:
-            pool = await self.ensure_pool(provider)
-            result = await pool.rotate()
-            return {
-                "ok": result.get("ok", False),
-                "response": result,
-                **({"error": result["error"]} if "error" in result else {}),
-            }
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)[:300]}
-
     def _health_summary(self, health: ProviderHealth) -> dict:
         return {
-            "active": health.active,
             "ready": sum(1 for w in health.exits if w.ready),
             "exits": len(health.exits),
             "error": health.error,
         }
 
     async def reconnect(self, provider: Provider) -> dict:
-        """Manual reconnect: rotate the local pool, drop cached egress, re-poll.
-
-        Advances the pool's active exit, closes and forgets the llms-side
-        egress client so the next request rebuilds it, then force-refreshes
-        health (re-seeding slots + persisted status).
-        """
+        """Manual reconnect: bounce local exits, clear backoff, re-poll."""
         before = self._health_summary(self.runtime(provider.id).health)
-        pool = await self.rotate_pool(provider)
-        await self.drop_egress(provider.id)
+        try:
+            pool = await self.ensure_pool(provider)
+            result = await pool.reconnect()
+        except Exception as exc:
+            result = {"ok": False, "error": str(exc)[:300]}
         self.runtime(provider.id).retry_until = 0.0
         self.runtime(provider.id).retry_reason = ""
         health = await self.refresh_health(provider, force=True)
         return {
-            "ok": pool.get("ok", False),
-            "pool": pool,
+            "ok": result.get("ok", False),
             "before": before,
             "after": self._health_summary(health),
         }
@@ -413,7 +389,6 @@ class ProviderRegistry:
             pool = await self.ensure_pool(provider)
             await pool.refresh_statuses()
             snap = pool.snapshot()
-            health.active = int(snap.get("active", 0))
             health.error = str(snap.get("error", "") or "")
             for w in snap.get("exits", []) or []:
                 health.exits.append(
@@ -465,32 +440,18 @@ class ProviderRegistry:
             self._supervisor = None
 
 
-def pool_active_warp(provider_health: ProviderHealth) -> int | None:
-    """The pool's currently-active warp exit, if it reports one healthy.
-
-    The pool sends every request through its own active exit internally, so
-    this is an observability snapshot — not a pin. Returns None when the
-    pool reports no ready exits or the active exit isn't ready.
-    """
-    ready = {w.idx for w in provider_health.exits if w.ready}
-    if provider_health.active in ready:
-        return provider_health.active
-    return None
-
-
 def provider_snapshot(provider: Provider, rt: ProviderRuntime) -> dict:
     return {
         "id": provider.id,
         "label": provider.label,
         "kind": provider.kind,
-        "slots": provider.slots,
         "models": provider.models,
         "enabled": provider.enabled,
+        "exits": provider.exits,
         "deletable": provider.id != "noproxy",
         "retry_in": round(rt.retry_in(), 1),
         "retry_reason": rt.retry_reason,
         "health": {
-            "active": rt.health.active,
             "fetched_at": rt.health.fetched_at,
             "error": rt.health.error,
             "exits": [

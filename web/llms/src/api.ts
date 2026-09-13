@@ -37,14 +37,13 @@ export interface ProviderEntry {
   id: string;
   label: string;
   kind: string;
-  slots: number;
   models: string[];
   enabled: boolean;
+  exits: number;
   deletable: boolean;
   retry_in: number;
   retry_reason: string;
   health: {
-    active: number;
     fetched_at: number;
     error: string;
     exits: WarpExitEntry[];
@@ -54,9 +53,8 @@ export interface ProviderEntry {
 export interface ReconnectResult {
   id: string;
   ok: boolean;
-  pool: Record<string, unknown>;
-  before: { active: number; ready: number; exits: number; error: string };
-  after: { active: number; ready: number; exits: number; error: string };
+  before: { ready: number; exits: number; error: string };
+  after: { ready: number; exits: number; error: string };
 }
 
 export interface RecentEntry {
@@ -122,11 +120,11 @@ const providersRes = resource<{ providers: ProviderEntry[] }, { id: string },
     id: string;
     label: string;
     kind: string;
-    slots: number;
     models: string[];
     enabled: boolean;
+    exits: number;
   },
-  { label?: string; slots?: number; models?: string[]; enabled?: boolean }
+  { label?: string; models?: string[]; enabled?: boolean; exits?: number }
 >("/api/admin/providers");
 
 export const api = {

@@ -67,17 +67,17 @@ POST   /api/admin/models          {id, label?, enabled?} -> 201
 PUT    /api/admin/models/{id}     {label?, enabled?}
 DELETE /api/admin/models/{id}
 GET    /api/admin/usage           {keys: {<key>: {requests, input_tokens, output_tokens, models}}}
-GET    /api/admin/providers       [{id, label, kind, slots, models, enabled, retry_in, health{active, exits[]}}]
-POST   /api/admin/providers       {id, label?, kind?, slots?, models?, enabled?} -> 201 (409 duplicate, 400 bad kind/slots)
-PUT    /api/admin/providers/{id}  {label?, slots?, models?, enabled?}
-DELETE /api/admin/providers/{id}  (noproxy: 403)
+GET    /api/admin/providers       [{id, label, kind, models, enabled, exits, retry_in, health{exits[]}}]
+POST   /api/admin/providers       {id, label?, kind?, models?, enabled?, exits?} -> 201 (409 duplicate, 400 bad kind/exits)
+PUT    /api/admin/providers/{id}  {label?, models?, enabled?, exits?}
+DELETE /api/admin/providers/{id}  (noproxy: 403; datadirs kept for same-id re-create)
 GET    /api/admin/providers/{id}/health   force-refresh + warp-cli debug
-POST   /api/admin/providers/{id}/reconnect  rotate active exit, drop egress, re-poll
+POST   /api/admin/providers/{id}/reconnect  bounce exits, clear backoff, re-poll
 GET    /api/admin/providers/{id}/recent     last 10 requests
 GET    /api/admin/providers/{id}/stream     SSE: recent snapshot + live requests
 
-Warp providers are local pools: `slots` sizes the supervised exit count
-(`data/warps/<id>/warp<N>/` datadirs, per-slot `warp-svc`, SOCKS on
+Warp providers own local exits: `exits` sizes the supervised exit count
+(`data/warps/<id>/warp<N>/` datadirs, per-exit `warp-svc`, SOCKS on
 `WARP_BASE_SOCKS_PORT`-up). Remote-pool `base_url` is rejected with a
 migration error — llms manages warp-cli datadirs in-process, no sidecar.
 ```
@@ -175,9 +175,11 @@ opencode identity set; omitting it yields `MissingSessionID`.
 (`slot % ready exits`); zero ready exits raises, and the pipeline fails open
 to direct. `ProviderEgress.resolve(model)` picks the warp provider serving
 the model (warp takes precedence over the `noproxy` seed), skipping pools
-with known-zero ready exits; `sync_bucket_slots(table)` resizes the bucket
-table to the largest live ready-exit count. Responses carry
-`x-egress-provider` (+ `x-pool-active-warp` when the pool reports one).
+with known-zero ready exits unless the pool may still recover (any slot not
+last-seen disconnected — a mid-boot snapshot must not pin traffic to direct
+forever); `sync_bucket_slots(table)` resizes the bucket table to the largest
+live ready-exit count. Responses carry `x-egress-provider` (+
+`x-pool-active-warp` with the request slot's position in the ready spread).
 
 ## Configuration
 
