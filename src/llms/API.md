@@ -52,7 +52,7 @@ reasoning models, `tools` / `streaming` support (`null` = unverified),
 may train future models). `data/models.yaml` — managed via the admin UI —
 supersedes the seed set: the served list is exactly the enabled ids in the
 file (missing file falls back to the seed). Unknown ids get a minimal entry.
-`just catalog` diffs the seed against the live Zen free set. Served locally,
+`just llms catalog` diffs the seed against the live Zen free set. Served locally,
 no upstream call.
 
 ## Admin API (GitHub OAuth session required)

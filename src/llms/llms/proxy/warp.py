@@ -16,7 +16,7 @@ Runtime sockets and logs are ephemeral (not in DATA_DIR)::
 
 The ``llms-warp-`` namespace keeps supervised daemons off the host
 warp-svc's ``/run/cloudflare-warp`` socket. The gateway normally runs as
-root (container entrypoint, ``just up`` via sudo-adjacent dirs), so
+root (container entrypoint, ``just llms up`` via sudo-adjacent dirs), so
 ``warp-svc`` launches directly with the full ``warp_env``; as a non-root
 fallback the spawn goes through ``sudo -n env VAR=...`` to preserve the
 STATE/RUNTIME/LOGS isolation sudo would otherwise scrub.

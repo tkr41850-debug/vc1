@@ -8,16 +8,16 @@ See [API.md](API.md) for the wire contracts.
 
 ```sh
 cp ../../.env.example ../../.env  # once; fill in GitHub OAuth + admin users
-just sync       # install deps with uv
-just up         # build web UI + start gateway in background
-just keygen     # bootstrap an sk- key without the admin UI (prints export lines)
-just down       # stop it
-just test       # mocked unit suite
-just lint       # ruff check + format
+just llms sync       # install deps with uv
+just llms up         # build web UI + start gateway in background
+just llms keygen     # bootstrap an sk- key without the admin UI (prints export lines)
+just llms down       # stop it
+just llms test       # mocked unit suite
+just llms lint       # ruff check + format
 just docker-up  # or: containerized (same port, ./data mounted)
 ```
 
-First key without OAuth: `just keygen [label]` appends a random `sk-` secret
+First key without OAuth: `just llms keygen [label]` appends a random `sk-` secret
 to `data/keys.yaml` and prints `export`/`curl` lines. (The admin UI can manage
 keys afterwards, but needs a configured GitHub OAuth app — keygen breaks the
 chicken-and-egg.)
@@ -27,7 +27,7 @@ Port via `ZEN_GATEWAY_PORT` (default `8789`).
 
 ## Admin UI
 
-`just up`, then open `http://localhost:8789/` and sign in with GitHub
+`just llms up`, then open `http://localhost:8789/` and sign in with GitHub
 (register an OAuth app; callback `http://localhost:8789/api/admin/callback`;
 put your login in `ADMIN_GITHUB_USERS`). Manage keys (with aggregate usage),
 models, and warp providers; stored in `data/keys.yaml` / `data/models.yaml` /
@@ -46,7 +46,7 @@ everything still serves direct.
 ## Claude Code (free, via Muse Spark)
 
 Client side (`~/.bashrc`, then `source ~/.bashrc`; create the `sk-` key in
-the admin UI first — needs `just up` running):
+the admin UI first — needs `just llms up` running):
 
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8789"
@@ -67,8 +67,8 @@ to the gateway (usage is attributed to it); the gateway itself authenticates
 upstream with its own `ZEN_API_KEY` or the anonymous free tier. Prefixing the
 path with `ak-<affinity>` is optional and only picks the egress pool.
 
-Server side (same file is fine on the same machine — `just up` inherits it;
-re-run `just up` afterwards so the server picks it up):
+Server side (same file is fine on the same machine — `just llms up` inherits it;
+re-run `just llms up` afterwards so the server picks it up):
 
 ```bash
 export MODEL_ALIASES="gpt-*=muse-spark-1.3-contributor-free,claude-*=muse-spark-1.3-contributor-free"
@@ -77,15 +77,15 @@ export MODEL_ALIASES="gpt-*=muse-spark-1.3-contributor-free,claude-*=muse-spark-
 This is belt-and-braces behind `ANTHROPIC_MODEL`: even if Claude falls back
 to its own default (e.g. `gpt-5.4-xhigh-fast`), llms still serves Muse Spark
 instead of failing with a billing 401. One-shot alternative without touching
-`.bashrc`: `MODEL_ALIASES="..." just up`.
+`.bashrc`: `MODEL_ALIASES="..." just llms up`.
 
 ## Other consumers
 
 ```sh
-just probe        # OpenAI SDK → Responses → Muse Spark
-just probe-codex  # Codex CLI  → Responses → Muse Spark
-just probe-dsh    # DeepSeek harness (chat) → auto-translated to model endpoint
-just probe-claude # Claude Code headless (needs a messages-capable model)
+just llms probe        # OpenAI SDK → Responses → Muse Spark
+just llms probe-codex  # Codex CLI  → Responses → Muse Spark
+just llms probe-dsh    # DeepSeek harness (chat) → auto-translated to model endpoint
+just llms probe-claude # Claude Code headless (needs a messages-capable model)
 ```
 
 All requests (including `/v1/models`) must carry an `sk-` secret key from
@@ -97,7 +97,28 @@ affinity path prefix (`POST /ak-team1/v1/responses`) picks the egress pool
 but never authenticates.
 
 `GET /v1/models` lists the free catalog with limits, effort tiers, routing,
-and tool/streaming support; `just catalog` checks the seed against live Zen.
+and tool/streaming support; `just llms catalog` checks the seed against live Zen.
+
+## Local CLI (no login)
+
+`just llms local ...` talks to the `just llms up` gateway directly: HTTP
+calls reuse the first enabled key from `data/keys.yaml`, file reads skip
+auth entirely. Same script runs standalone: `uv run python
+scripts/local_call.py ...` from `src/llms`.
+
+```sh
+just llms local chat "hi"      # one chat turn
+just llms local stream "hi"    # streamed chat turn
+just llms local models         # list model ids
+just llms local usage          # per-key token totals from usage.json
+just llms local providers      # providers.yaml + ready warp exits
+just llms local add-provider warp-1 1   # append warp provider (exits=1),
+                                        # then: just llms reconnect-pool warp-1
+```
+
+`exits` is the provider's pool size: how many local warp tunnels llms owns
+for it (each with its own `data/warps/<id>/warp<N>/` dir). Traffic spreads
+across ready exits; with none ready it fails open to direct.
 
 ## Environment
 
