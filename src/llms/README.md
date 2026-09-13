@@ -112,6 +112,8 @@ just llms local stream "hi"    # streamed chat turn
 just llms local models         # list model ids
 just llms local usage          # per-key token totals from usage.json
 just llms local providers      # providers.yaml + ready warp exits
+just llms local reconnect-pool warp-1  # bounce pool without admin login
+just llms local logs [lines]           # tail -F /tmp/llms.log
 just llms local add-provider warp-1 1   # append warp provider (exits=1),
                                         # then: just llms reconnect-pool warp-1
 ```

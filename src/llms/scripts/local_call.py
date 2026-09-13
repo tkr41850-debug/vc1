@@ -176,8 +176,40 @@ def cmd_add_provider(args: list[str]) -> int:
     path.write_text(yaml.safe_dump(providers, sort_keys=False))
     (DATA_DIR / "warps" / pid).mkdir(parents=True, exist_ok=True)
     print(f"provider {pid} saved (exits={exits} models={models})")
-    print(f"activate: just llms reconnect-pool {pid}  (or restart: just llms up)")
+    print(f"activate: just llms local reconnect-pool {pid}  (or restart: just llms up)")
     return 0
+
+
+def cmd_reconnect_pool(args: list[str]) -> int:
+    import httpx
+
+    if not args:
+        return fail("usage: reconnect-pool <id>")
+    pid = args[0]
+    r = httpx.post(
+        f"{BASE_URL}/api/providers/{pid}/reconnect",
+        headers={"Authorization": f"Bearer {load_key()}"},
+        timeout=90.0,
+    )
+    if r.status_code != 200:
+        return fail(f"reconnect-pool failed: {r.status_code} {r.text[:300]}")
+    print(json.dumps(r.json(), indent=2))
+    return 0
+
+
+def cmd_logs(args: list[str]) -> int:
+    import os
+
+    logfile = os.getenv("LLMS_LOG", "/tmp/llms.log")
+    lines = "100"
+    if args:
+        if args[0].isdigit():
+            lines = args[0]
+        else:
+            return fail("usage: logs [lines]")
+    if not Path(logfile).exists():
+        return fail(f"no {logfile} — run: just llms up")
+    os.execvp("tail", ["tail", "-n", lines, "-F", logfile])
 
 
 COMMANDS = {
@@ -187,6 +219,8 @@ COMMANDS = {
     "usage": cmd_usage,
     "providers": cmd_providers,
     "add-provider": cmd_add_provider,
+    "reconnect-pool": cmd_reconnect_pool,
+    "logs": cmd_logs,
 }
 
 

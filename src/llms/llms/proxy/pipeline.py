@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 
 from fastapi import Request
@@ -178,11 +179,31 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                     via_warp = {
                         "provider_id": provider_id or "",
                         "warp_idx": warp_idx,
+                        "socks_port": warp_egress.pick_port(slot),
                     }
         else:
             client = egress_provider.client_for(bucket, slot)
     else:
         client = egress_provider.client_for(bucket, slot)
+    if registry is not None:
+        # Pool-dry shed: direct also ratelimited and a warp bounce in
+        # flight. Otherwise fall through to normal routing — resolve()
+        # already skipped cycling warps, so the next request fails over
+        # (fail open to direct as usual).
+        shed, shed_provider = _shed_if_pool_dry(registry, req.model, trace_id)
+        if shed is not None:
+            _record_usage(request, ingress, req.model, shed)
+            await registry.runtime(shed_provider or "").record(
+                RecentRequest(
+                    ts=time.time(),
+                    model=req.model,
+                    status=429,
+                    ms=(time.monotonic() - started) * 1000.0,
+                    warp_idx=None,
+                    error="pool dry: warp cycling, direct limited",
+                )
+            )
+            return shed
     tracker = getattr(request.app.state, "usage", None)
     usage_secret = getattr(request.state, "secret_key", None)
     stream_usage_cb = None
@@ -232,7 +253,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             new_slot,
         )
         registry = getattr(request.app.state, "providers", None)
-        if registry is not None and provider_id:
+        if registry is not None:
             reason = ""
             if isinstance(response, JSONResponse):
                 try:
@@ -243,7 +264,36 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                     )
                 except Exception:
                     reason = ""
-            registry.runtime(provider_id).note_ratelimited(retry_after, reason)
+            if provider_id:
+                registry.runtime(provider_id).note_ratelimited(retry_after, reason)
+                _maybe_auto_cycle(request, provider_id, via_warp, trace_id)
+            else:
+                # Direct path (fail-open or noproxy-routed): record on the
+                # noproxy runtime so the pool-dry gate can see direct's
+                # ratelimit. Without this the gate would never fire.
+                direct_id = next(
+                    (
+                        p.id
+                        for p in _providers_serving(registry, req.model)
+                        if p.kind == "noproxy"
+                    ),
+                    "noproxy",
+                )
+                registry.runtime(direct_id).note_ratelimited(retry_after, reason)
+            # Fast-failover hint: pool min-retry over providers serving this
+            # model ("when the next request is ok" per the 429 memo). ~1s
+            # floor so the client retries fast onto the failover provider.
+            if isinstance(response, JSONResponse):
+                providers = _providers_serving(registry, req.model)
+                wait = math.ceil(_min_retry_in(registry, providers))
+                hint = max(1, min(60, int(wait)))
+                response.headers["retry-after"] = str(hint)
+                logger.info(
+                    "[%s] provider %s ratelimited, retry-after hint %s",
+                    trace_id,
+                    provider_id or "direct",
+                    hint,
+                )
     _record_usage(request, ingress, req.model, response)
     if registry is not None and provider_id:
         status = response.status_code if hasattr(response, "status_code") else 0
@@ -268,6 +318,190 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             )
         )
     return response
+
+
+def _providers_serving(registry, model: str) -> list:
+    """Enabled providers serving a model (best-effort; [] when unknown)."""
+    try:
+        return [p for p in registry.load() if p.enabled and p.serves(model)]
+    except Exception:
+        return []
+
+
+def _shed_if_pool_dry(
+    registry, model: str, trace_id: str
+) -> tuple[JSONResponse | None, str | None]:
+    """Escalating 429 only when the provider pool is dry — else (None, None).
+
+    Dry = direct (noproxy) also ratelimited AND ≥1 warp provider serving
+    the model is mid-restart, with no serving provider currently usable
+    (nothing available, but a bounce in flight means capacity is coming
+    back soon). Anything else falls through to normal routing: resolve()
+    already skipped cycling warps, so the next request fails over (fail
+    open to direct as usual).
+
+    Returns the shed response plus the cycling provider id (for the
+    recent-request ring) when shedding.
+    """
+    providers = _providers_serving(registry, model)
+    warps = [p for p in providers if p.kind == "warp"]
+    cycling = [p for p in warps if registry.runtime(p.id).cycling]
+    if not cycling:
+        return None, None
+    for p in providers:
+        rt = registry.runtime(p.id)
+        if p.kind == "noproxy":
+            if rt.retry_in() <= 0:
+                return None, None
+        elif not rt.cycling and any(w.ready for w in rt.health.exits):
+            return None, None
+    rt = registry.runtime(cycling[0].id)
+    rt.cycle_hits += 1
+    retry_after = min(60, 5 + (rt.cycle_hits - 1))
+    logger.info(
+        "[%s] pool dry (warp %s cycling, direct limited), shedding 429 "
+        "(hit %s, retry-after %s)",
+        trace_id,
+        cycling[0].id,
+        rt.cycle_hits,
+        retry_after,
+    )
+    return (
+        JSONResponse(
+            status_code=429,
+            content={"error": {"message": f"warp provider {cycling[0].id} cycling"}},
+            headers={"retry-after": str(retry_after)},
+        ),
+        cycling[0].id,
+    )
+
+
+def _min_retry_in(registry, providers: list) -> float:
+    """Seconds until the next serving provider is expected usable (≥0)."""
+    waits: list[float] = []
+    for p in providers:
+        rt = registry.runtime(p.id)
+        if p.kind == "noproxy":
+            waits.append(rt.retry_in())
+            continue
+        ready = any(w.ready for w in rt.health.exits)
+        if ready or not rt.cycling:
+            waits.append(0.0)
+        else:
+            # Cycling with no ready exit: the bounce (or its 45s bring-up)
+            # is the soonest this provider recovers; cap the estimate so a
+            # wedged bounce doesn't pin the hint.
+            waits.append(45.0)
+    return min(waits) if waits else 0.0
+
+
+def _auto_cycle_cooldown_s(request: Request) -> float:
+    settings = getattr(request.app.state, "settings", None)
+    return float(getattr(settings, "warp_auto_cycle_cooldown_s", 300) or 300)
+
+
+def _maybe_auto_cycle(
+    request: Request, provider_id: str, via_warp: dict | None, trace_id: str
+) -> None:
+    """Bounce a ratelimited warp exit in the background (best-effort).
+
+    Only fires for requests that actually rode warp (via_warp carries the
+    exit's SOCKS port); guarded by per-provider cooldown + in-flight dedup.
+    Never raises — the request path must not fail because the bounce did.
+    """
+    import asyncio
+    import time
+
+    try:
+        if not via_warp or via_warp.get("socks_port") is None:
+            return
+        registry = getattr(request.app.state, "providers", None)
+        if registry is None:
+            return
+        provider = next((p for p in registry.load() if p.id == provider_id), None)
+        if provider is None or provider.kind != "warp":
+            return
+        rt = registry.runtime(provider_id)
+        now = time.monotonic()
+        if rt.cycling:
+            logger.info(
+                "[%s] warp provider %s already cycling, skipping auto-cycle",
+                trace_id,
+                provider_id,
+            )
+            return
+        cooldown = _auto_cycle_cooldown_s(request)
+        if now - rt.last_auto_cycle < cooldown:
+            logger.info(
+                "[%s] warp provider %s auto-cycle on cooldown (%.0fs left)",
+                trace_id,
+                provider_id,
+                cooldown - (now - rt.last_auto_cycle),
+            )
+            return
+        pool = registry.pool_for(provider)
+        if pool is None:
+            return
+        port = via_warp["socks_port"]
+        inst = next((w for w in pool.instances if w.socks_port == port), None)
+        if inst is None:
+            logger.warning(
+                "[%s] warp provider %s auto-cycle: no slot on port %s",
+                trace_id,
+                provider_id,
+                port,
+            )
+            return
+        rt.last_auto_cycle = now
+        rt.cycling = True
+        rt.cycle_hits = 0
+        logger.info(
+            "[%s] warp provider %s exit %s (port %s) ratelimited, cycling",
+            trace_id,
+            provider_id,
+            inst.idx,
+            port,
+        )
+
+        async def _bounce_and_clear() -> None:
+            try:
+                result = await pool.bounce_exit(inst.idx)
+                logger.info(
+                    "[%s] warp provider %s exit %s bounce done: %s",
+                    trace_id,
+                    provider_id,
+                    inst.idx,
+                    result,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[%s] warp provider %s exit %s bounce failed: %r",
+                    trace_id,
+                    provider_id,
+                    inst.idx,
+                    exc,
+                )
+            finally:
+                rt.cycling = False
+                rt.cycle_hits = 0
+                try:
+                    await registry.refresh_health(provider, force=True)
+                except Exception as exc:
+                    logger.warning(
+                        "[%s] warp provider %s post-cycle refresh failed: %r",
+                        trace_id,
+                        provider_id,
+                        exc,
+                    )
+
+        rt.cycle_task = asyncio.create_task(_bounce_and_clear())
+    except Exception as exc:
+        logger.warning(
+            "[%s] warp provider %s auto-cycle trigger failed: %r",
+            trace_id,
+            provider_id,
+            exc,
+        )
 
 
 def _record_usage(

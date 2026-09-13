@@ -33,6 +33,7 @@ def make_settings(**overrides) -> Settings:
         "warp_protocol": "MASQUE",
         "warp_masque": "",
         "warp_net_mtu": "",
+        "warp_auto_cycle_cooldown_s": 300.0,
         "port": 8789,
         "request_timeout_s": 30.0,
         "data_dir": "",

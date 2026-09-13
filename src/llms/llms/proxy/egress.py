@@ -144,6 +144,11 @@ class ProviderEgress:
         fails open to direct — unless the pool may still come up (see
         _pool_may_recover); unknown health is treated as eligible so the
         first request triggers a poll.
+        A provider with an auto-cycle bounce in flight is skipped outright:
+        the bounced exit is marked not-ready on the live pool but the
+        cached health snapshot may still list it, so routing here would
+        dial a half-torn-down SOCKS exit (502). The provider rejoins the
+        pool when the bounce clears `cycling`.
         """
         registry = self._registry
         if registry is None:
@@ -151,6 +156,8 @@ class ProviderEgress:
         providers = registry.load()
         for p in providers:
             if not p.enabled or p.kind != "warp" or not p.serves(model):
+                continue
+            if registry.runtime(p.id).cycling:
                 continue
             egress = self._warp.get(p.id)
             if egress is None:

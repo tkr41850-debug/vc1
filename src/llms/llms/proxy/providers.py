@@ -75,6 +75,11 @@ class ProviderRuntime:
         self.recent: deque[RecentRequest] = deque(maxlen=RECENT_CAP)
         self._subscribers: set[asyncio.Queue] = set()
         self._lock = asyncio.Lock()
+        # Auto-cycle state: background bounce of a ratelimited warp exit.
+        self.last_auto_cycle: float = 0.0
+        self.cycling: bool = False
+        self.cycle_hits: int = 0
+        self.cycle_task: asyncio.Task | None = None
 
     def retry_in(self) -> float:
         return max(0.0, self.retry_until - time.monotonic())
@@ -360,6 +365,15 @@ class ProviderRegistry:
             "ok": result.get("ok", False),
             "before": before,
             "after": self._health_summary(health),
+            "exits": [
+                {
+                    "idx": w.idx,
+                    "ready": w.ready,
+                    "status": w.status,
+                    "reason": w.reason,
+                }
+                for w in health.exits
+            ],
         }
 
     def route(self, model: str) -> Provider | None:
@@ -440,7 +454,11 @@ class ProviderRegistry:
             self._supervisor = None
 
 
-def provider_snapshot(provider: Provider, rt: ProviderRuntime) -> dict:
+def provider_snapshot(
+    provider: Provider,
+    rt: ProviderRuntime,
+    auto_cycle_cooldown_s: float = 300.0,
+) -> dict:
     return {
         "id": provider.id,
         "label": provider.label,
@@ -451,6 +469,11 @@ def provider_snapshot(provider: Provider, rt: ProviderRuntime) -> dict:
         "deletable": provider.id != "noproxy",
         "retry_in": round(rt.retry_in(), 1),
         "retry_reason": rt.retry_reason,
+        "cycling": rt.cycling,
+        "cycle_cooldown_remaining": round(
+            max(0.0, auto_cycle_cooldown_s - (time.monotonic() - rt.last_auto_cycle)),
+            1,
+        ),
         "health": {
             "fetched_at": rt.health.fetched_at,
             "error": rt.health.error,
@@ -471,7 +494,13 @@ def provider_snapshot(provider: Provider, rt: ProviderRuntime) -> dict:
 
 
 def snapshot_all(registry: ProviderRegistry) -> list[dict]:
-    return [provider_snapshot(p, registry.runtime(p.id)) for p in registry.load()]
+    cooldown = float(
+        getattr(getattr(registry, "_settings", None), "warp_auto_cycle_cooldown_s", 300)
+        or 300
+    )
+    return [
+        provider_snapshot(p, registry.runtime(p.id), cooldown) for p in registry.load()
+    ]
 
 
 def snapshot_copy(data: dict) -> dict:

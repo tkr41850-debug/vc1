@@ -14,6 +14,8 @@ from llms.proxy.store import StoreError
 
 router = APIRouter()
 
+operator_router = APIRouter()
+
 
 def _registry(request: Request) -> ProviderRegistry:
     registry = getattr(request.app.state, "providers", None)
@@ -164,16 +166,18 @@ async def provider_health(
     rt = registry.runtime(provider_id)
     from llms.proxy.providers import provider_snapshot
 
-    snap = provider_snapshot(provider, rt)
+    settings = getattr(request.app.state, "settings", None)
+    snap = provider_snapshot(
+        provider,
+        rt,
+        float(getattr(settings, "warp_auto_cycle_cooldown_s", 300) or 300),
+    )
     snap["debug"] = debug
     snap["health"]["fetched_at"] = health.fetched_at
     return snap
 
 
-@router.post("/api/admin/providers/{provider_id:path}/reconnect")
-async def provider_reconnect(
-    request: Request, provider_id: str, _admin: str = Depends(require_admin)
-):
+async def _do_reconnect(request: Request, provider_id: str) -> dict:
     registry = _registry(request)
     provider = _find(registry, provider_id)
     if provider.kind != "warp":
@@ -181,6 +185,20 @@ async def provider_reconnect(
     result = await registry.reconnect(provider)
     _sync_slots(request)
     return {"id": provider_id, **result}
+
+
+@router.post("/api/admin/providers/{provider_id:path}/reconnect")
+async def provider_reconnect(
+    request: Request, provider_id: str, _admin: str = Depends(require_admin)
+):
+    return await _do_reconnect(request, provider_id)
+
+
+@operator_router.post("/api/providers/{provider_id:path}/reconnect")
+async def provider_reconnect_local(request: Request, provider_id: str):
+    if getattr(request.state, "secret_key", None) is None:
+        raise HTTPException(status_code=401, detail="missing or invalid secret key")
+    return await _do_reconnect(request, provider_id)
 
 
 @router.get("/api/admin/providers/{provider_id:path}/recent")

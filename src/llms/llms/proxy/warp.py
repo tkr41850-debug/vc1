@@ -213,6 +213,10 @@ class WarpPool:
         self._tasks: list[asyncio.Task] = []
         self._started = False
         self._closed = False
+        # Slot idxs with an auto-cycle bounce currently in flight (see
+        # bounce_exit). Guards against double-driving warp-cli/warp-svc for
+        # the same slot when 429s arrive in a burst.
+        self._bouncing: set[int] = set()
 
     # -- lifecycle ----------------------------------------------------
 
@@ -318,6 +322,39 @@ class WarpPool:
             "before": {"ready": before, "exits": total},
             "after": {"ready": after, "exits": len(self.instances)},
         }
+
+    async def bounce_exit(self, idx: int) -> dict:
+        """Bounce one exit (disconnect + bring-up), leaving siblings serving.
+
+        Auto-cycle path for a ratelimited exit — unlike reconnect() this does
+        not clear other slots or take the pool lock. Concurrent bounces of the
+        same slot dedupe via _bouncing.
+        """
+        if idx in self._bouncing:
+            return {"ok": False, "idx": idx, "deduped": True}
+        inst = next((w for w in self.instances if w.idx == idx), None)
+        if inst is None:
+            return {"ok": False, "idx": idx, "error": "unknown slot"}
+        before = inst.ready
+        self._bouncing.add(idx)
+        try:
+            inst.ready = False
+            if not self.healthy():
+                self.ready_event.clear()
+            loop = asyncio.get_running_loop()
+
+            def _bounce(slot: WarpSlot) -> None:
+                pid, sidx, data_dir = self.provider_id, slot.idx, self.data_dir
+                run_cli(pid, sidx, data_dir, "disconnect")
+
+            await loop.run_in_executor(None, _bounce, inst)
+            if not await self._bring_up(inst, timeout=45):
+                asyncio.create_task(self._watch_slot(inst))
+            await self._refresh_one_status(inst)
+            after = inst.ready
+            return {"ok": after, "idx": idx, "before": before, "after": after}
+        finally:
+            self._bouncing.discard(idx)
 
     def snapshot(self) -> dict:
         """Local health snapshot: {exits[{idx,ready,status,...}]}."""

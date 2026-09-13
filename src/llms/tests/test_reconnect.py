@@ -90,3 +90,54 @@ def test_reconnect_unknown_provider_404(admin_client):
         headers={"Authorization": "Bearer sk-test"},
     )
     assert r.status_code == 404
+
+
+def test_local_reconnect_pool_uses_secret_key(app_client, tmp_path, monkeypatch):
+    from llms.proxy.egress import ProviderEgress
+    from llms.proxy.providers import Provider, ProviderRegistry
+
+    pool = FakePool()
+
+    async def _ensure_pool(provider):
+        return pool
+
+    tc, _ = app_client
+    registry = ProviderRegistry(data_dir=tmp_path)
+    monkeypatch.setattr(registry, "ensure_pool", _ensure_pool)
+    registry.save([Provider(id="pool1", kind="warp", exits=2, models=["muse-*"])])
+    tc.app.state.egress = ProviderEgress(tc.app.state.egress, registry=registry)
+    tc.app.state.providers = registry
+    r = tc.post(
+        "/api/providers/pool1/reconnect",
+        headers={"Authorization": "Bearer sk-test"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["id"] == "pool1"
+    assert body["ok"] is True
+    assert pool.reconnects == 1
+    assert body["exits"][0]["status"] == "Connected"
+    assert "reason" in body["exits"][0]
+
+
+def test_local_reconnect_pool_requires_key(app_client):
+    tc, _ = app_client
+    assert tc.post("/api/providers/pool1/reconnect").status_code == 401
+
+
+def test_local_reconnect_pool_rejects_noproxy(app_client):
+    tc, _ = app_client
+    r = tc.post(
+        "/api/providers/noproxy/reconnect",
+        headers={"Authorization": "Bearer sk-test"},
+    )
+    assert r.status_code == 400
+
+
+def test_local_reconnect_pool_unknown_404(app_client):
+    tc, _ = app_client
+    r = tc.post(
+        "/api/providers/nope/reconnect",
+        headers={"Authorization": "Bearer sk-test"},
+    )
+    assert r.status_code == 404

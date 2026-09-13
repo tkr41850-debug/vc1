@@ -69,6 +69,9 @@ class Settings:
     )
     warp_masque: str = field(default_factory=lambda: os.getenv("WARP_MASQUE", ""))
     warp_net_mtu: str = field(default_factory=lambda: os.getenv("WARP_NET_MTU", ""))
+    warp_auto_cycle_cooldown_s: float = field(
+        default_factory=lambda: float(os.getenv("WARP_AUTO_CYCLE_COOLDOWN_S", "300"))
+    )
     port: int = field(
         default_factory=lambda: int(os.getenv("ZEN_GATEWAY_PORT", "8789"))
     )

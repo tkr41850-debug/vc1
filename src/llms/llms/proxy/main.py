@@ -21,6 +21,7 @@ from llms.proxy.routes.auth import router as auth_router
 from llms.proxy.routes.chat import router as chat_router
 from llms.proxy.routes.messages import router as messages_router
 from llms.proxy.routes.models import router as models_router
+from llms.proxy.routes.providers import operator_router as providers_operator_router
 from llms.proxy.routes.providers import router as providers_router
 from llms.proxy.routes.responses import router as responses_router
 from llms.proxy.usage import UsageTracker
@@ -132,6 +133,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth_router)
     app.include_router(admin_router)
     app.include_router(providers_router)
+    app.include_router(providers_operator_router)
     app.include_router(models_router)
     app.include_router(responses_router)
     app.include_router(chat_router)
