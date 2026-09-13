@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import copy
 import json
 import time
@@ -9,7 +8,6 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import httpx
 import yaml
 
 PROVIDERS_FILE = "providers.yaml"
@@ -24,8 +22,7 @@ class Provider:
     id: str
     label: str = ""
     kind: str = "warp"  # "noproxy" or "warp"
-    base_url: str = ""
-    token: str = ""
+    slots: int = 8
     models: list[str] = field(default_factory=list)  # prefix patterns ("*" = all)
     enabled: bool = True
 
@@ -128,14 +125,77 @@ class ProviderRuntime:
 
 
 class ProviderRegistry:
-    def __init__(self, data_dir: str | Path) -> None:
+    def __init__(self, data_dir: str | Path, settings=None, supervisor=None) -> None:
         self.data_dir = Path(data_dir)
+        self._settings = settings
+        self._supervisor = supervisor
         self._runtimes: dict[str, ProviderRuntime] = {}
         self._health_checked: dict[str, float] = {}
-        self._client: httpx.AsyncClient | None = None
         # Populated by ProviderEgress.resolve() so refresh_health() can keep
         # each warp egress's slot spread in sync with ready exits.
         self._egresses: dict | None = None
+
+    def _pool_config(self, provider: Provider):
+        from llms.proxy import warp as _warp
+
+        return _warp.WarpPoolConfig(
+            slots=provider.slots
+            if provider.slots
+            else int(getattr(self._settings, "warp_slots", 8) or 8),
+            hold_timeout_s=float(
+                getattr(self._settings, "warp_hold_timeout_s", 10.0) or 10.0
+            ),
+            reg_interval_sec=int(
+                getattr(self._settings, "warp_reg_interval_sec", 28800) or 28800
+            ),
+            boot_retry_sec=int(
+                getattr(self._settings, "warp_boot_retry_sec", 300) or 300
+            ),
+            base_socks_port=int(
+                getattr(self._settings, "warp_base_socks_port", 40001) or 40001
+            ),
+            protocol=str(
+                getattr(self._settings, "warp_protocol", "MASQUE") or "MASQUE"
+            ),
+            masque=str(getattr(self._settings, "warp_masque", "") or ""),
+        )
+
+    def pool_for(self, provider: Provider):
+        """The local WarpPool for a warp provider, or None without one."""
+        if provider.kind != "warp" or self._supervisor is None:
+            return None
+        return self._supervisor.get(provider.id)
+
+    async def ensure_pool(self, provider: Provider):
+        """Get the started local WarpPool (starts it on first use)."""
+        from llms.proxy import warp as _warp
+
+        if provider.kind != "warp":
+            return None
+        if self._supervisor is None:
+            self._supervisor = _warp.WarpSupervisor(self.data_dir)
+        config = _warp.WarpPoolConfig(
+            slots=provider.slots
+            if provider.slots
+            else int(getattr(self._settings, "warp_slots", 8) or 8),
+            hold_timeout_s=float(
+                getattr(self._settings, "warp_hold_timeout_s", 10.0) or 10.0
+            ),
+            reg_interval_sec=int(
+                getattr(self._settings, "warp_reg_interval_sec", 28800) or 28800
+            ),
+            boot_retry_sec=int(
+                getattr(self._settings, "warp_boot_retry_sec", 300) or 300
+            ),
+            base_socks_port=int(
+                getattr(self._settings, "warp_base_socks_port", 40001) or 40001
+            ),
+            protocol=str(
+                getattr(self._settings, "warp_protocol", "MASQUE") or "MASQUE"
+            ),
+            masque=str(getattr(self._settings, "warp_masque", "") or ""),
+        )
+        return await self._supervisor.ensure(provider.id, config)
 
     def path(self) -> Path:
         return self.data_dir / PROVIDERS_FILE
@@ -212,13 +272,23 @@ class ProviderRegistry:
         for item in raw:
             if not isinstance(item, dict) or not item.get("id"):
                 continue
+            if str(item.get("kind", "warp")) == "warp" and item.get("base_url"):
+                raise StoreError(
+                    f"provider {item.get('id')}: remote pool base_url is no longer "
+                    "supported — remove it and set slots (llms manages warp-cli "
+                    "datadirs in-process)"
+                )
+            slots = item.get("slots", 8)
+            try:
+                slots = int(slots)
+            except (TypeError, ValueError):
+                raise StoreError(f"provider {item.get('id')}: slots must be an integer")
             out.append(
                 Provider(
                     id=str(item["id"]),
                     label=str(item.get("label", "")),
                     kind=str(item.get("kind", "warp")),
-                    base_url=str(item.get("base_url", "")),
-                    token=str(item.get("token", "")),
+                    slots=max(0, slots),
                     models=[str(m) for m in item.get("models", []) or []],
                     enabled=bool(item.get("enabled", True)),
                 )
@@ -238,8 +308,7 @@ class ProviderRegistry:
                         "id": p.id,
                         "label": p.label,
                         "kind": p.kind,
-                        "base_url": p.base_url,
-                        "token": p.token,
+                        "slots": p.slots,
                         "models": p.models,
                         "enabled": p.enabled,
                     }
@@ -271,26 +340,20 @@ class ProviderRegistry:
         return True
 
     async def rotate_pool(self, provider: Provider) -> dict:
-        """Bounce the pool itself via its /rotate endpoint (best-effort).
+        """Advance the local pool's active exit to the next healthy slot.
 
-        Returns {"ok": bool, ...}; transport failures report ok False rather
-        than raising, so reconnect can still reset local state and re-poll.
+        Returns {"ok": bool, ...} — never raises, so reconnect can still
+        reset local state and re-poll.
         """
-        if provider.kind != "warp" or not provider.base_url:
-            return {"ok": False, "error": "not a warp pool provider"}
+        if provider.kind != "warp":
+            return {"ok": False, "error": "not a warp provider"}
         try:
-            client = await self._http()
-            headers = {}
-            if provider.token:
-                headers["Authorization"] = f"Bearer {provider.token}"
-            resp = await client.post(
-                provider.base_url.rstrip("/") + "/rotate", headers=headers
-            )
-            resp.raise_for_status()
-            payload = resp.json()
+            pool = await self.ensure_pool(provider)
+            result = await pool.rotate()
             return {
-                "ok": True,
-                "response": payload if isinstance(payload, dict) else {},
+                "ok": result.get("ok", False),
+                "response": result,
+                **({"error": result["error"]} if "error" in result else {}),
             }
         except Exception as exc:
             return {"ok": False, "error": str(exc)[:300]}
@@ -304,11 +367,11 @@ class ProviderRegistry:
         }
 
     async def reconnect(self, provider: Provider) -> dict:
-        """Manual reconnect: bounce the pool, drop cached egress, re-poll.
+        """Manual reconnect: rotate the local pool, drop cached egress, re-poll.
 
-        Disconnects the pool itself (/rotate), closes and forgets the
-        llms-side egress client so the next request rebuilds it, then
-        force-refreshes health (re-seeding slots + persisted status).
+        Advances the pool's active exit, closes and forgets the llms-side
+        egress client so the next request rebuilds it, then force-refreshes
+        health (re-seeding slots + persisted status).
         """
         before = self._health_summary(self.runtime(provider.id).health)
         pool = await self.rotate_pool(provider)
@@ -330,34 +393,29 @@ class ProviderRegistry:
                 return p
         return None
 
-    async def _http(self) -> httpx.AsyncClient:
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=30.0)
-        return self._client
-
     async def refresh_health(
         self, provider: Provider, force: bool = False
     ) -> ProviderHealth:
         rt = self.runtime(provider.id)
         now = time.monotonic()
-        if not force and now - rt.health.fetched_at < HEALTH_TTL_S and rt.health.exits:
+        if (
+            not force
+            and now - rt.health.fetched_at < HEALTH_TTL_S
+            and rt.health.exits
+            and any(w.ready for w in rt.health.exits)
+        ):
             return rt.health
         health = ProviderHealth(fetched_at=now)
-        if provider.kind != "warp" or not provider.base_url:
+        if provider.kind != "warp":
             rt.health = health
             return health
         try:
-            client = await self._http()
-            headers = {}
-            if provider.token:
-                headers["Authorization"] = f"Bearer {provider.token}"
-            resp = await client.get(
-                provider.base_url.rstrip("/") + "/health", headers=headers
-            )
-            resp.raise_for_status()
-            payload = resp.json()
-            health.active = int(payload.get("active", 0))
-            for w in payload.get("warps", []) or []:
+            pool = await self.ensure_pool(provider)
+            await pool.refresh_statuses()
+            snap = pool.snapshot()
+            health.active = int(snap.get("active", 0))
+            health.error = str(snap.get("error", "") or "")
+            for w in snap.get("exits", []) or []:
                 health.exits.append(
                     WarpExit(
                         idx=int(w.get("idx", 0)),
@@ -373,10 +431,18 @@ class ProviderRegistry:
             health.error = str(exc)[:300]
         rt.health = health
         # Keep the egress slot spread in sync with ready exits (0 until any).
+        # The egress object is created by ProviderEgress.resolve() from the
+        # pool snapshot, so after a late promotion (slot flips ready during
+        # this very refresh) push the ready SOCKS ports here — otherwise the
+        # egress keeps zero ports and traffic fails open to direct even with
+        # a connected tunnel (live finding: probe9/10 final status.json
+        # showed ready=true while the request went direct).
         egress = self._egresses.get(provider.id) if self._egresses is not None else None
         if egress is not None:
-            ready = sum(1 for w in health.exits if w.ready)
-            egress.set_num_slots(ready)
+            ready_ports = sorted(w.socks for w in health.exits if w.ready)
+            egress.set_num_slots(len(ready_ports))
+            if ready_ports:
+                egress.set_socks_ports(ready_ports)
         try:
             self.save_warp_status(provider.id, health)
         except OSError:
@@ -384,35 +450,25 @@ class ProviderRegistry:
         return health
 
     async def fetch_debug_config(self, provider: Provider) -> dict:
-        """Warp-cli metadata via the pool's debug/config surface (best-effort)."""
-        if provider.kind != "warp" or not provider.base_url:
+        """Warp-cli metadata from the local supervisor (best-effort)."""
+        if provider.kind != "warp":
             return {}
         try:
-            client = await self._http()
-            headers = {}
-            if provider.token:
-                headers["Authorization"] = f"Bearer {provider.token}"
-            resp = await client.get(
-                provider.base_url.rstrip("/") + "/debug/config", headers=headers
-            )
-            if resp.status_code == 404:
-                return {}
-            resp.raise_for_status()
-            payload = resp.json()
-            return payload if isinstance(payload, dict) else {}
+            pool = await self.ensure_pool(provider)
+            return await pool.debug_config()
         except Exception as exc:
             return {"error": str(exc)[:300]}
 
     async def aclose(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        if self._supervisor is not None:
+            await self._supervisor.aclose()
+            self._supervisor = None
 
 
 def pool_active_warp(provider_health: ProviderHealth) -> int | None:
     """The pool's currently-active warp exit, if it reports one healthy.
 
-    The pool routes every /fetch through its own active exit internally, so
+    The pool sends every request through its own active exit internally, so
     this is an observability snapshot — not a pin. Returns None when the
     pool reports no ready exits or the active exit isn't ready.
     """
@@ -422,47 +478,12 @@ def pool_active_warp(provider_health: ProviderHealth) -> int | None:
     return None
 
 
-def warp_exit_for(
-    provider_health: ProviderHealth, bucket: int = 0, slot: int = 0
-) -> int | None:
-    """Deprecated alias of pool_active_warp (kept for tests)."""
-    _ = (bucket, slot)
-    return pool_active_warp(provider_health)
-
-
-def fetch_spec(
-    url: str, headers: dict, body: bytes, token: str = ""
-) -> tuple[str, dict, bytes]:
-    """Build a pool /fetch POST: returns (path, headers, json_body)."""
-    out_headers = {
-        k: v for k, v in headers.items() if k.lower() not in {"host", "content-length"}
-    }
-    if token:
-        out_headers["Authorization"] = f"Bearer {token}"
-    spec = {
-        "url": url,
-        "headers": out_headers,
-        "body_b64": base64.b64encode(body).decode() if body else "",
-    }
-    return "/fetch", out_headers, json.dumps(spec).encode()
-
-
-def parse_fetch_result(payload: dict) -> tuple[int, dict, bytes]:
-    """Unwrap a pool /fetch response into (status, headers, body)."""
-    if not payload.get("ok"):
-        raise ValueError(str(payload.get("error", "pool fetch failed"))[:300])
-    body = base64.b64decode(payload.get("body_b64", "") or "")
-    headers = payload.get("headers", {}) or {}
-    return int(payload.get("status", 502)), headers, body
-
-
 def provider_snapshot(provider: Provider, rt: ProviderRuntime) -> dict:
     return {
         "id": provider.id,
         "label": provider.label,
         "kind": provider.kind,
-        "base_url": provider.base_url,
-        "has_token": bool(provider.token),
+        "slots": provider.slots,
         "models": provider.models,
         "enabled": provider.enabled,
         "deletable": provider.id != "noproxy",

@@ -127,45 +127,52 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     egress_provider = request.app.state.egress
     started = time.monotonic()
     provider_id: str | None = None
-    via_pool: dict | None = None
+    via_warp: dict | None = None
     pool_active: int | None = None
     registry = getattr(request.app.state, "providers", None)
     resolve = getattr(egress_provider, "resolve", None)
     if callable(resolve):
         provider_id, kind, warp_egress = resolve(req.model)
         if kind == "warp" and warp_egress is not None:
-            if outbound.get("stream") is True:
-                # Pools buffer /fetch: no true streaming through a relay.
-                # Fall back to direct egress so dsh-style streaming clients
-                # keep working on warp-routed models.
-                logger.info(
-                    "[%s] warp-routed stream falls back to direct egress",
-                    trace_id,
-                )
-                provider_id, via_pool = None, None
+            provider = None
+            if registry is not None:
+                for p in registry.load():
+                    if p.id == provider_id:
+                        provider = p
+                        break
+            if registry is not None and provider is not None:
+                health = await registry.refresh_health(provider)
+                pool_active = pool_active_warp(health)
+                # Re-resolve after the refresh: a slot that flipped ready
+                # during this very poll must seed the egress's SOCKS ports
+                # before client_for runs, or the request fails open despite
+                # a connected tunnel (live finding: final status.json showed
+                # ready=true while the request went direct).
+                provider_id, kind, warp_egress = resolve(req.model)
+                if kind != "warp" or warp_egress is None:
+                    provider_id, via_warp = None, None
+                sync = getattr(egress_provider, "sync_bucket_slots", None)
+                if callable(sync):
+                    sync(table)
+            if kind != "warp" or warp_egress is None:
                 client = egress_provider.client_for(bucket, slot)
             else:
-                provider = None
-                if registry is not None:
-                    for p in registry.load():
-                        if p.id == provider_id:
-                            provider = p
-                            break
-                pool_base = provider.base_url if provider else warp_egress.pool_base_url
-                pool_token = provider.token if provider else warp_egress.token
-                if registry is not None and provider is not None:
-                    health = await registry.refresh_health(provider)
-                    pool_active = pool_active_warp(health)
-                    sync = getattr(egress_provider, "sync_bucket_slots", None)
-                    if callable(sync):
-                        sync(table)
-                via_pool = {
-                    "base_url": pool_base,
-                    "token": pool_token,
-                    "provider_id": provider_id or "",
-                    "pool_active_warp": pool_active,
-                }
-                client = warp_egress.client_for(bucket, slot)
+                try:
+                    client = warp_egress.client_for(bucket, slot)
+                except RuntimeError:
+                    # No ready SOCKS exits: fail open to direct.
+                    logger.info(
+                        "[%s] warp provider %s has no ready exits; failing open",
+                        trace_id,
+                        provider_id,
+                    )
+                    provider_id, via_warp = None, None
+                    client = egress_provider.client_for(bucket, slot)
+                else:
+                    via_warp = {
+                        "provider_id": provider_id or "",
+                        "pool_active_warp": pool_active,
+                    }
         else:
             client = egress_provider.client_for(bucket, slot)
     else:
@@ -178,7 +185,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         trace_id,
         convert=_convert_for(ingress, egress, req.model),
         translate_stream=_stream_for(ingress, egress, req.model),
-        via_pool=via_pool,
+        via_warp=via_warp,
     )
     elapsed_ms = (time.monotonic() - started) * 1000.0
     outcome, retry_after = _outcome_of(response)

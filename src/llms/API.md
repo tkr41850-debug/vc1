@@ -67,6 +67,19 @@ POST   /api/admin/models          {id, label?, enabled?} -> 201
 PUT    /api/admin/models/{id}     {label?, enabled?}
 DELETE /api/admin/models/{id}
 GET    /api/admin/usage           {keys: {<key>: {requests, input_tokens, output_tokens, models}}}
+GET    /api/admin/providers       [{id, label, kind, slots, models, enabled, retry_in, health{active, exits[]}}]
+POST   /api/admin/providers       {id, label?, kind?, slots?, models?, enabled?} -> 201 (409 duplicate, 400 bad kind/slots)
+PUT    /api/admin/providers/{id}  {label?, slots?, models?, enabled?}
+DELETE /api/admin/providers/{id}  (noproxy: 403)
+GET    /api/admin/providers/{id}/health   force-refresh + warp-cli debug
+POST   /api/admin/providers/{id}/reconnect  rotate active exit, drop egress, re-poll
+GET    /api/admin/providers/{id}/recent     last 10 requests
+GET    /api/admin/providers/{id}/stream     SSE: recent snapshot + live requests
+
+Warp providers are local pools: `slots` sizes the supervised exit count
+(`data/warps/<id>/warp<N>/` datadirs, per-slot `warp-svc`, SOCKS on
+`WARP_BASE_SOCKS_PORT`-up). Remote-pool `base_url` is rejected with a
+migration error — llms manages warp-cli datadirs in-process, no sidecar.
 ```
 
 Unauthenticated: `401 {error.message: "admin login required"}`. OAuth:
@@ -154,13 +167,17 @@ opencode identity set; omitting it yields `MissingSessionID`.
   the requested id before routing; both ids are logged. Bucketing and rate
   limits apply to the resolved model.
 
-## Egress contract (for vsp)
+## Egress contract
 
 `EgressProvider`: `num_slots()`, `client_for(bucket, slot) -> httpx client`,
-`aclose()`. Default `EGRESS_MODE=direct` (single client, one slot).
-Warp-pool egress is `NotImplementedError` until vsp exposes per-bucket warp
-selection; the required server side is: lease/select a warp exit for
-`(bucket, slot)` and report health, honoring the same rate-limit signals.
+`aclose()`. `DirectEgress` is the single-client fallback (one slot).
+`WarpSocksEgress` dials a warp provider's ready SOCKS ports in-process
+(`slot % ready exits`); zero ready exits raises, and the pipeline fails open
+to direct. `ProviderEgress.resolve(model)` picks the warp provider serving
+the model (warp takes precedence over the `noproxy` seed), skipping pools
+with known-zero ready exits; `sync_bucket_slots(table)` resizes the bucket
+table to the largest live ready-exit count. Responses carry
+`x-egress-provider` (+ `x-pool-active-warp` when the pool reports one).
 
 ## Configuration
 

@@ -37,8 +37,7 @@ export interface ProviderEntry {
   id: string;
   label: string;
   kind: string;
-  base_url: string;
-  has_token: boolean;
+  slots: number;
   models: string[];
   enabled: boolean;
   deletable: boolean;
@@ -123,12 +122,11 @@ const providersRes = resource<{ providers: ProviderEntry[] }, { id: string },
     id: string;
     label: string;
     kind: string;
-    base_url: string;
-    token: string;
+    slots: number;
     models: string[];
     enabled: boolean;
   },
-  { label?: string; base_url?: string; token?: string; models?: string[]; enabled?: boolean }
+  { label?: string; slots?: number; models?: string[]; enabled?: boolean }
 >("/api/admin/providers");
 
 export const api = {

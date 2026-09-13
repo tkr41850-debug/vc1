@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-import httpx
-
 from llms.proxy.providers import (
     Provider,
     ProviderRegistry,
-    fetch_spec,
-    parse_fetch_result,
-    warp_exit_for,
+    pool_active_warp,
 )
 
 
@@ -42,8 +38,7 @@ def test_registry_roundtrip_and_route(tmp_path):
                 id="warp-1",
                 label="Pool",
                 kind="warp",
-                base_url="http://pool:8080",
-                token="t",
+                slots=4,
                 models=["gpt-*"],
                 enabled=True,
             )
@@ -51,6 +46,7 @@ def test_registry_roundtrip_and_route(tmp_path):
     )
     routed = registry.route("gpt-5")
     assert routed is not None and routed.id == "warp-1"
+    assert routed.slots == 4
     routed = registry.route("muse-spark-1.3-contributor-free")
     assert routed is not None and routed.id == "noproxy"
 
@@ -63,7 +59,7 @@ def test_route_skips_disabled_warp(tmp_path):
             Provider(
                 id="warp-1",
                 kind="warp",
-                base_url="http://pool:8080",
+                slots=8,
                 models=["*"],
                 enabled=False,
             )
@@ -73,7 +69,7 @@ def test_route_skips_disabled_warp(tmp_path):
     assert routed is None
 
 
-def test_warp_exit_for_pins_ready_exits():
+def test_pool_active_warp_snapshot():
     from llms.proxy.providers import ProviderHealth, WarpExit
 
     health = ProviderHealth(
@@ -84,33 +80,37 @@ def test_warp_exit_for_pins_ready_exits():
             WarpExit(idx=3, ready=True),
         ],
     )
-    assert warp_exit_for(health, 0, 0) in (1, 3)
-    assert warp_exit_for(health, 0, 0) == warp_exit_for(health, 0, 0)
+    assert pool_active_warp(health) == 1
+    inactive = ProviderHealth(active=2, exits=health.exits)
+    assert pool_active_warp(inactive) is None
     empty = ProviderHealth()
-    assert warp_exit_for(empty, 0, 0) is None
+    assert pool_active_warp(empty) is None
 
 
-def test_fetch_spec_and_parse_roundtrip():
-    path, headers, body = fetch_spec(
-        "https://opencode.ai/zen/v1/responses",
-        {"Content-Type": "application/json", "Host": "x", "X-Keep": "y"},
-        b'{"a":1}',
-        token="tok",
+def test_base_url_rejected_with_migration_error(tmp_path):
+    import yaml
+
+    from llms.proxy.store import StoreError
+
+    registry = ProviderRegistry(data_dir=tmp_path)
+    registry.save(registry.load())
+    path = registry.path()
+    raw = yaml.safe_load(path.read_text()) or []
+    raw.append(
+        {
+            "id": "warp-1",
+            "kind": "warp",
+            "base_url": "http://pool:8080",
+            "models": ["*"],
+        }
     )
-    assert path == "/fetch"
-    assert headers["Authorization"] == "Bearer tok"
-    assert "host" not in {k.lower() for k in headers}
-    import base64
-    import json as _json
-
-    spec = _json.loads(body.decode())
-    assert spec["url"] == "https://opencode.ai/zen/v1/responses"
-    assert base64.b64decode(spec["body_b64"]) == b'{"a":1}'
-    status, out_headers, out_body = parse_fetch_result(
-        {"ok": True, "status": 200, "headers": {"a": "b"}, "body_b64": spec["body_b64"]}
-    )
-    assert (status, out_body) == (200, b'{"a":1}')
-    assert out_headers == {"a": "b"}
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    try:
+        registry.load()
+    except StoreError as exc:
+        assert "no longer supported" in str(exc)
+    else:
+        raise AssertionError("expected StoreError for base_url")
 
 
 def test_retry_in_decays_and_records():
@@ -143,53 +143,6 @@ def test_recent_ring_caps_at_ten():
     assert snap[-1]["ts"] == 14.0
 
 
-def _pool_handler(request: httpx.Request) -> httpx.Response:
-    import base64
-    import json as _json
-
-    if request.url.path == "/health":
-        return httpx.Response(
-            200,
-            json={
-                "active": 2,
-                "warps": [
-                    {
-                        "idx": 2,
-                        "ready": True,
-                        "status": "Connected",
-                        "reason": "",
-                        "socks": 40002,
-                        "registered": True,
-                        "error": "",
-                    }
-                ],
-            },
-        )
-    if request.url.path == "/fetch":
-        spec = _json.loads(request.content.decode())
-        assert spec["url"].endswith("/responses")
-        inner = _json.dumps(
-            {
-                "id": "resp_1",
-                "object": "response",
-                "status": "completed",
-                "model": "muse-spark-1.3-contributor-free",
-                "output": [],
-                "usage": {"input_tokens": 1, "output_tokens": 1},
-            }
-        ).encode()
-        return httpx.Response(
-            200,
-            json={
-                "ok": True,
-                "status": 200,
-                "headers": {},
-                "body_b64": base64.b64encode(inner).decode(),
-            },
-        )
-    return httpx.Response(404, json={"ok": False})
-
-
 def test_provider_admin_crud(admin_client, tmp_path):
     from llms.proxy.store import Store
 
@@ -204,8 +157,7 @@ def test_provider_admin_crud(admin_client, tmp_path):
             "id": "warp-1",
             "label": "Pool",
             "kind": "warp",
-            "base_url": "http://pool:8080",
-            "token": "t",
+            "slots": 4,
             "models": ["gpt-*"],
             "enabled": True,
         },
@@ -214,12 +166,14 @@ def test_provider_admin_crud(admin_client, tmp_path):
     assert (
         tc.post(
             "/api/admin/providers",
-            json={"id": "warp-1", "kind": "warp", "base_url": "http://x"},
+            json={"id": "warp-1", "kind": "warp", "slots": 2},
         ).status_code
         == 409
     )
     assert (
-        tc.post("/api/admin/providers", json={"id": "w2", "kind": "warp"}).status_code
+        tc.post(
+            "/api/admin/providers", json={"id": "w2", "kind": "warp", "slots": -1}
+        ).status_code
         == 400
     )
     assert (
@@ -235,18 +189,31 @@ def test_provider_admin_crud(admin_client, tmp_path):
     assert Store(data_dir=tmp_path).load_keys() is not None
 
 
-def test_warp_egress_relay_and_retry_tracking(monkeypatch):
+def test_warp_egress_socks_and_retry_tracking(monkeypatch):
     import asyncio
 
     import httpx as _httpx
 
-    from llms.proxy.egress import ProviderEgress, WarpPoolEgress
+    from llms.proxy.egress import ProviderEgress, WarpSocksEgress
     from llms.proxy.main import create_app
     from llms.proxy.store import ApiKey, Store
     from tests.conftest import TEST_HEADERS, TEST_SECRET, make_settings
 
-    transport = _httpx.MockTransport(_pool_handler)
-    pool_client = _httpx.AsyncClient(transport=transport, base_url="http://pool:8080")
+    def _zen_handler(request: _httpx.Request) -> _httpx.Response:
+        assert str(request.url).endswith("/responses")
+        return _httpx.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "object": "response",
+                "status": "completed",
+                "model": "muse-spark-1.3-contributor-free",
+                "output": [],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    zen_client = _httpx.AsyncClient(transport=_httpx.MockTransport(_zen_handler))
 
     import pathlib
     import tempfile
@@ -260,7 +227,7 @@ def test_warp_egress_relay_and_retry_tracking(monkeypatch):
             Provider(
                 id="warp-1",
                 kind="warp",
-                base_url="http://pool:8080",
+                slots=2,
                 models=["muse-spark*"],
             )
         ]
@@ -288,8 +255,24 @@ def test_warp_egress_relay_and_retry_tracking(monkeypatch):
         yield
 
     app.router.lifespan_context = _noop_lifespan
+
+    async def _fake_health(provider, force=False):
+        from llms.proxy.providers import ProviderHealth, WarpExit
+
+        rt = registry.runtime("warp-1")
+        rt.health = ProviderHealth(
+            active=1,
+            exits=[
+                WarpExit(idx=1, ready=True, socks=40001, registered=True),
+                WarpExit(idx=2, ready=True, socks=40002, registered=True),
+            ],
+            fetched_at=1.0,
+        )
+        return rt.health
+
+    monkeypatch.setattr(registry, "refresh_health", _fake_health)
     monkeypatch.setattr(
-        WarpPoolEgress, "client_for", lambda self, bucket, slot: pool_client
+        WarpSocksEgress, "client_for", lambda self, bucket, slot: zen_client
     )
     with TestClient(app) as tc:
         r = tc.post(
@@ -299,6 +282,7 @@ def test_warp_egress_relay_and_retry_tracking(monkeypatch):
         )
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "completed"
+        assert r.headers.get("x-egress-provider") == "warp-1"
         # admin routes need the require_admin override; direct registry check:
         rt = registry.runtime("warp-1")
         snap = rt.recent_snapshot()
@@ -306,5 +290,5 @@ def test_warp_egress_relay_and_retry_tracking(monkeypatch):
         assert snap[0]["model"] == "muse-spark-1.3-contributor-free"
         assert snap[0]["status"] == 200
     asyncio.run(registry.aclose())
-    asyncio.run(pool_client.aclose())
+    asyncio.run(zen_client.aclose())
     asyncio.run(upstream.aclose())

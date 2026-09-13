@@ -61,80 +61,12 @@ async def forward(
     trace_id: str,
     convert=None,
     translate_stream=None,
-    via_pool: dict | None = None,
+    via_warp: dict | None = None,
 ) -> Response:
-    # via_pool relays the Zen request through a vsp warp pool /fetch endpoint:
-    # {"base_url", "token"}. The pool returns {ok, status, headers, body_b64}.
-    # Pools buffer /fetch so true streaming is impossible; streamed bodies go
-    # direct (noproxy) instead — see pipeline's warp_stream_fallback.
-    if via_pool is not None:
-        from llms.proxy.providers import fetch_spec, parse_fetch_result
-
-        raw = json.dumps(body).encode()
-        _path, _relay_headers, spec_body = fetch_spec(
-            url, headers, raw, via_pool.get("token", "")
-        )
-        pool_url = via_pool["base_url"].rstrip("/") + "/fetch"
-        try:
-            upstream = await client.post(
-                pool_url,
-                headers={"Content-Type": "application/json"},
-                content=spec_body,
-            )
-        except httpx.HTTPError as exc:
-            logger.error("[%s] pool connect failed: %s", trace_id, exc)
-            return JSONResponse(
-                status_code=502, content={"error": {"message": "pool unreachable"}}
-            )
-        try:
-            wrapped = upstream.json()
-        except Exception:
-            wrapped = {"ok": False, "error": upstream.text[:500]}
-        if not wrapped.get("ok"):
-            status = 502
-            try:
-                status = int(wrapped.get("status", 502))
-            except (TypeError, ValueError):
-                pass
-            content = {
-                "error": {
-                    "message": str(wrapped.get("error", "pool fetch failed"))[:2000]
-                }
-            }
-            if status == 429 or "ratelimit" in str(wrapped.get("error", "")).lower():
-                return JSONResponse(
-                    status_code=429,
-                    content=content,
-                    headers={"retry-after": str(wrapped.get("retry_after", "60"))},
-                )
-            return JSONResponse(status_code=status, content=content)
-        status, resp_headers, resp_body = parse_fetch_result(wrapped)
-        try:
-            payload = json.loads(resp_body.decode())
-        except Exception:
-            payload = {"error": {"message": resp_body.decode(errors="replace")[:2000]}}
-        if convert is not None and status < 400:
-            try:
-                payload = convert(payload)
-            except Exception as exc:
-                logger.error("[%s] response conversion failed: %s", trace_id, exc)
-                return JSONResponse(
-                    status_code=502,
-                    content={"error": {"message": "response conversion failed"}},
-                )
-        response = JSONResponse(
-            status_code=status,
-            content=payload,
-            headers=passthrough_headers(resp_headers) if status >= 400 else None,
-        )
-        # Observability only: the provider that relayed this request, and the
-        # pool's currently-active warp exit at send time. The pool chooses the
-        # actual egress warp internally per request — warp_idx is a snapshot
-        # of pool state, not a pin.
-        response.headers["x-egress-provider"] = via_pool.get("provider_id", "")
-        if via_pool.get("pool_active_warp") is not None:
-            response.headers["x-pool-active-warp"] = str(via_pool["pool_active_warp"])
-        return response
+    # via_warp sends the Zen request through a client already bound to the
+    # local warp SOCKS exit (httpx proxy=...): direct in-process egress, no
+    # loopback relay. Streams flow through SOCKS like any other request.
+    warped = via_warp is not None
     if body.get("stream") is True:
         req = client.build_request("POST", url, headers=headers, json=body)
         try:
@@ -193,10 +125,18 @@ async def forward(
                 status_code=502,
                 content={"error": {"message": "response conversion failed"}},
             )
-    return JSONResponse(
+    response = JSONResponse(
         status_code=upstream.status_code,
         content=payload,
         headers=passthrough_headers(upstream.headers)
         if upstream.status_code >= 400
         else None,
     )
+    if warped:
+        # Observability only: the warp provider at send time, and the
+        # pool's currently-active exit snapshot (not a pin — SOCKS
+        # selection is slot-spread inside the egress layer).
+        response.headers["x-egress-provider"] = via_warp.get("provider_id", "")
+        if via_warp.get("pool_active_warp") is not None:
+            response.headers["x-pool-active-warp"] = str(via_warp["pool_active_warp"])
+    return response
