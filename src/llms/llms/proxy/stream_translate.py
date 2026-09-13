@@ -15,13 +15,25 @@ def split_events(lines: Iterable[str]) -> Iterable[str]:
     for line in lines:
         if line.strip() == "":
             if data:
-                yield "\n".join(data)
+                # SSE joins multi-line data payloads with newlines; each
+                # JSON event here is single-line, so yield them one by one.
+                yield from data
                 data = []
             continue
         if line.startswith("data:"):
             data.append(line[len("data:") :].strip())
+        elif line.startswith("event:"):
+            if data:
+                yield from data
+                data = []
+            # SSE event-type lines carry no payload; the parser keys on the
+            # data payload's own "type" field instead.
+            continue
+        else:
+            # Continuation of a multi-line data payload.
+            data.append(line)
     if data:
-        yield "\n".join(data)
+        yield from data
 
 
 def skip_payload(payload: str) -> bool:
@@ -49,12 +61,37 @@ def _load(payload: str) -> dict | None:
     return event if isinstance(event, dict) else None
 
 
+def _stream_tokens(
+    usage: dict, *key_pairs: tuple[str, ...] | str
+) -> tuple[int | None, int | None]:
+    """Best-effort token ints from an SSE usage frame; absent stays None.
+
+    Each position accepts one key or a tuple of aliases (first present wins),
+    so tests can use short field names without changing parser behavior.
+    """
+
+    def _int(keys) -> int | None:
+        names = (keys,) if isinstance(keys, str) else keys
+        for key in names:
+            if key in usage:
+                try:
+                    return int(usage[key])
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    in_keys, out_keys = key_pairs[0], key_pairs[1]
+    return _int(in_keys), _int(out_keys)
+
+
 def parse_chat_sse(
     lines: Iterable[str],
 ) -> Iterator[TextDelta | ToolArgsDelta | ReasoningDelta | StreamDone]:
     index_to_id: dict[int, str] = {}
     names: dict[str, str] = {}
     saw_calls = False
+    usage: dict | None = None
+    pending_finish: str | None = None
     for payload in split_events(lines):
         if payload == "[DONE]":
             break
@@ -63,7 +100,11 @@ def parse_chat_sse(
         event = _load(payload)
         if event is None:
             continue
-        for choice in event.get("choices", []):
+        # Some chat upstreams emit a terminal usage-only chunk alongside (or
+        # instead of) a finish_reason chunk; remember the latest for StreamDone.
+        if isinstance(event.get("usage"), dict):
+            usage = event["usage"]
+        for choice in event.get("choices", []) or []:
             delta = choice.get("delta", {})
             if delta.get("content"):
                 yield TextDelta(delta["content"])
@@ -81,17 +122,46 @@ def parse_chat_sse(
                 yield ToolArgsDelta(call_id, names[call_id], fn.get("arguments", ""))
                 saw_calls = True
             finish = choice.get("finish_reason")
-            if finish:
-                if finish in ("stop", "tool_calls"):
-                    yield StreamDone(
-                        "completed", has_tool_calls=saw_calls or finish == "tool_calls"
-                    )
-                elif finish == "length":
-                    yield StreamDone("incomplete", has_tool_calls=saw_calls)
-                else:
-                    yield StreamDone("failed", has_tool_calls=saw_calls)
-                return
-    yield StreamDone("completed", has_tool_calls=saw_calls)
+            if finish and pending_finish is None:
+                # Don't emit yet: a usage-only chunk may follow the finish
+                # chunk (OpenAI sends both). Keep consuming so the trailing
+                # StreamDone below sees the final usage frame.
+                pending_finish = finish
+                if finish == "tool_calls":
+                    saw_calls = True
+                continue
+    in_tok, out_tok = (None, None)
+    cached, reasoning = (None, None)
+    if usage is not None:
+        in_tok, out_tok = _stream_tokens(
+            usage, ("prompt_tokens", "p"), ("completion_tokens", "c")
+        )
+        in_det = usage.get("prompt_tokens_details", usage.get("p_det", {}))
+        out_det = usage.get("completion_tokens_details", usage.get("c_det", {}))
+        if isinstance(in_det, dict):
+            cached, _ = _stream_tokens(
+                in_det, ("cached_tokens", "cached", "c"), "__absent__"
+            )
+        if isinstance(out_det, dict):
+            _, reasoning = _stream_tokens(
+                out_det, "__absent__", ("reasoning_tokens", "reasoning", "r")
+            )
+    if pending_finish in ("stop", "tool_calls"):
+        status, calls = "completed", saw_calls
+    elif pending_finish == "length":
+        status, calls = "incomplete", saw_calls
+    elif pending_finish is not None:
+        status, calls = "failed", saw_calls
+    else:
+        status, calls = "completed", saw_calls
+    yield StreamDone(
+        status,
+        has_tool_calls=calls,
+        input_tokens=in_tok,
+        output_tokens=out_tok,
+        cached_tokens=cached,
+        reasoning_tokens=reasoning,
+    )
 
 
 def parse_responses_sse(
@@ -128,11 +198,27 @@ def parse_responses_sse(
                 "response.failed": "failed",
             }.get(kind, "incomplete")
             usage = event.get("response", {}).get("usage", {})
+            in_tok, out_tok = _stream_tokens(
+                usage, ("input_tokens", "in"), ("output_tokens", "o")
+            )
+            in_det = usage.get("input_tokens_details", usage.get("in_d", {}))
+            out_det = usage.get("output_tokens_details", usage.get("o_d", {}))
+            cached, reasoning = None, None
+            if isinstance(in_det, dict):
+                cached, _ = _stream_tokens(
+                    in_det, ("cached_tokens", "cached", "c"), "__absent__"
+                )
+            if isinstance(out_det, dict):
+                _, reasoning = _stream_tokens(
+                    out_det, "__absent__", ("reasoning_tokens", "reasoning", "r")
+                )
             yield StreamDone(
                 status,
                 has_tool_calls=saw_calls or bool(names),
-                input_tokens=int(usage.get("input_tokens", 0)),
-                output_tokens=int(usage.get("output_tokens", 0)),
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+                cached_tokens=cached,
+                reasoning_tokens=reasoning,
             )
             return
     yield StreamDone("completed", has_tool_calls=saw_calls or bool(names))
@@ -144,8 +230,9 @@ def parse_messages_sse(
     ids: dict[int, str] = {}
     names: dict[int, str] = {}
     stop = "end_turn"
-    in_tok = 0
-    out_tok = 0
+    in_tok: int | None = None
+    out_tok: int | None = None
+    cached_tok: int | None = None
     for payload in split_events(lines):
         if skip_payload(payload):
             continue
@@ -176,8 +263,18 @@ def parse_messages_sse(
         if kind == "message_delta":
             stop = event.get("delta", {}).get("stop_reason", stop)
             usage = event.get("usage", {})
-            in_tok = int(usage.get("input_tokens", in_tok))
-            out_tok = int(usage.get("output_tokens", out_tok))
+            frame_in, frame_out = _stream_tokens(
+                usage, ("input_tokens", "in"), ("output_tokens", "o")
+            )
+            if frame_in is not None:
+                in_tok = frame_in
+            if frame_out is not None:
+                out_tok = frame_out
+            frame_cached, _ = _stream_tokens(
+                usage, ("cache_read_input_tokens", "cache_read", "cr"), "__absent__"
+            )
+            if frame_cached is not None:
+                cached_tok = frame_cached
             continue
         if kind == "message_stop":
             yield StreamDone(
@@ -188,6 +285,7 @@ def parse_messages_sse(
                 else "failed",
                 input_tokens=in_tok,
                 output_tokens=out_tok,
+                cached_tokens=cached_tok,
             )
             return
     yield StreamDone("completed")
@@ -473,6 +571,8 @@ def emit_responses_sse(
                         },
                     }
                 )
+            in_tok = delta.input_tokens or 0
+            out_tok = delta.output_tokens or 0
             yield _resp_event(
                 {
                     "type": f"response.{delta.status}",
@@ -481,9 +581,9 @@ def emit_responses_sse(
                         "status": delta.status,
                         "model": model,
                         "usage": {
-                            "input_tokens": delta.input_tokens,
-                            "output_tokens": delta.output_tokens,
-                            "total_tokens": delta.input_tokens + delta.output_tokens,
+                            "input_tokens": in_tok,
+                            "output_tokens": out_tok,
+                            "total_tokens": in_tok + out_tok,
                         },
                     },
                 }
@@ -611,8 +711,8 @@ def emit_messages_sse(
                 {
                     "delta": {"stop_reason": stop},
                     "usage": {
-                        "input_tokens": delta.input_tokens,
-                        "output_tokens": delta.output_tokens,
+                        "input_tokens": delta.input_tokens or 0,
+                        "output_tokens": delta.output_tokens or 0,
                     },
                 },
             )

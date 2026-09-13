@@ -235,26 +235,26 @@ export default function ProvidersTab({
   reload: () => void;
   onAuthError: () => void;
 }) {
-  const [form, setForm] = useState({ id: "", label: "", base_url: "", token: "", models: "" });
+  const [form, setForm] = useState({ id: "", label: "", models: "", exits: "1" });
   const [debugId, setDebugId] = useState<string | null>(null);
   const { error, setError, run } = useCrudTab(onAuthError);
 
   const add = async () => {
-    if (!form.id.trim() || !form.base_url.trim()) {
-      setError("id and pool base URL are required");
+    if (!form.id.trim()) {
+      setError("id is required");
       return;
     }
+    const exits = Math.max(1, parseInt(form.exits, 10) || 1);
     await run(async () => {
       await api.createProvider({
         id: form.id.trim(),
         label: form.label,
         kind: "warp",
-        base_url: form.base_url.trim(),
-        token: form.token,
         models: form.models.split(",").map((m) => m.trim()).filter(Boolean),
         enabled: true,
+        exits,
       });
-      setForm({ id: "", label: "", base_url: "", token: "", models: "" });
+      setForm({ id: "", label: "", models: "", exits: "1" });
     }, reload);
   };
 
@@ -290,21 +290,12 @@ export default function ProvidersTab({
           />
         </label>
         <label className="flex flex-col text-sm">
-          Pool base URL
+          Exits
           <input
             className="rounded border px-2 py-1 font-mono"
-            placeholder="https://pool-host"
-            value={form.base_url}
-            onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-          />
-        </label>
-        <label className="flex flex-col text-sm">
-          Token
-          <input
-            className="rounded border px-2 py-1 font-mono"
-            placeholder="(optional)"
-            value={form.token}
-            onChange={(e) => setForm({ ...form, token: e.target.value })}
+            placeholder="1"
+            value={form.exits}
+            onChange={(e) => setForm({ ...form, exits: e.target.value })}
           />
         </label>
         <label className="flex flex-col text-sm">
@@ -330,6 +321,7 @@ export default function ProvidersTab({
             <th className="py-2 pr-4"></th>
             <th className="py-2 pr-4">Provider</th>
             <th className="py-2 pr-4">Kind</th>
+            <th className="py-2 pr-4">Exits</th>
             <th className="py-2 pr-4">Models</th>
             <th className="py-2 pr-4">Enabled</th>
             <th className="py-2 pr-4 text-right">RetryIn</th>
@@ -350,6 +342,9 @@ export default function ProvidersTab({
                 <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-xs">
                   {p.kind}
                 </span>
+              </td>
+              <td className="py-2 pr-4 font-mono text-xs">
+                {p.kind === "warp" ? p.exits : "—"}
               </td>
               <td className="max-w-xs truncate py-2 pr-4 font-mono text-xs" title={p.models.join(", ")}>
                 {p.models.join(", ") || "—"}

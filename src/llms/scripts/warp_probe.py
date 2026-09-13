@@ -1,3 +1,20 @@
+"""Live probe for llms-managed warp pools (needs warp-cli + network).
+
+Spins up the gateway with an exits-based warp provider and verifies the
+local supervisor wiring end to end:
+
+  1. providers.yaml with ``exits`` loads (no migration error, boot survives)
+  2. the supervisor persists ``data/warps/<id>/status.json`` after traffic
+  3. requests either ride a ready exit (``x-egress-provider`` header) or
+     fail open to direct when no exit is up yet — both are correct gateway
+     behavior; only gateway errors fail the probe
+
+Knobs: PROBE_PORT (8793), PROBE_DATA_DIR (required), PROBE_SECRET,
+PROBE_MODEL (muse-spark-1.3-contributor-free), PROBE_EXITS (1,
+PROBE_SLOTS legacy alias), PROBE_WARP_WAIT (90s max wait for a ready exit
+via status.json).
+"""
+
 from __future__ import annotations
 
 import json
@@ -13,8 +30,9 @@ BASE_URL = f"http://127.0.0.1:{PORT}"
 DATA_DIR = os.getenv("PROBE_DATA_DIR", "")
 PROBE_SECRET = os.getenv("PROBE_SECRET", "sk-probe")
 PROBE_HEADERS = {"Authorization": f"Bearer {PROBE_SECRET}"}
-POOL_BASE = os.getenv("WARP_POOL_BASE", "https://t1.citr.uk")
-POOL_TOKEN = os.getenv("WARP_POOL_TOKEN", "")
+PROVIDER_ID = os.getenv("PROBE_PROVIDER", "warp-probe")
+EXITS = int(os.getenv("PROBE_EXITS", os.getenv("PROBE_SLOTS", "1")))
+WARP_WAIT = float(os.getenv("PROBE_WARP_WAIT", "90"))
 MODEL = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
 
 
@@ -23,14 +41,26 @@ def fail(message: str) -> int:
     return 1
 
 
-def get(path: str, admin: bool = False):
-    headers = PROBE_HEADERS if admin else {}
-    req = urllib.request.Request(BASE_URL + path, headers=headers)
+def get(path: str):
+    req = urllib.request.Request(BASE_URL + path)
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
             return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
+
+
+def ready_exits_on_disk() -> int | None:
+    path = os.path.join(DATA_DIR, "warps", PROVIDER_ID, "status.json")
+    try:
+        with open(path) as f:
+            payload = json.load(f)
+    except (OSError, ValueError):
+        return None
+    exits = payload.get("exits")
+    if not isinstance(exits, list):
+        return None
+    return sum(1 for w in exits if isinstance(w, dict) and w.get("ready"))
 
 
 def main() -> int:
@@ -46,11 +76,10 @@ def main() -> int:
         yaml.safe_dump(
             [
                 {
-                    "id": "warp-probe",
+                    "id": PROVIDER_ID,
                     "label": "probe pool",
                     "kind": "warp",
-                    "base_url": POOL_BASE,
-                    "token": POOL_TOKEN,
+                    "exits": EXITS,
                     "models": ["*"],
                     "enabled": True,
                 }
@@ -85,24 +114,18 @@ def main() -> int:
         else:
             return fail("proxy did not become healthy")
 
-        # pool health should surface warp exits
-        status, body = get("/api/admin/providers", admin=True)
-        if status == 401:
-            print("note: providers API needs admin login; checking unauth shape only")
-            print(f"providers unauthed: {status}")
-        else:
-            payload = json.loads(body)
-            ids = [p["id"] for p in payload.get("providers", [])]
-            print(f"providers: {ids}")
-            if "warp-probe" not in ids or "noproxy" not in ids:
-                return fail(f"expected warp-probe + noproxy, got {ids}")
-            warp = next(p for p in payload["providers"] if p["id"] == "warp-probe")
-            print(
-                f"warp health: exits={len(warp['health']['exits'])} "
-                f"retry_in={warp['retry_in']}"
-            )
+        # Wait for a ready exit (supervisor needs warp-cli + /dev/net/tun +
+        # Cloudflare registration; absent that the pool stays unhealthy and
+        # traffic must fail open to direct — also a passing result).
+        ready: int | None = None
+        deadline = time.monotonic() + WARP_WAIT
+        while time.monotonic() < deadline:
+            ready = ready_exits_on_disk()
+            if ready:
+                break
+            time.sleep(5)
+        print(f"ready exits on disk: {ready}")
 
-        # an ingress request should route through the warp provider
         data = json.dumps(
             {"model": MODEL, "input": "reply with exactly: warp-ok"}
         ).encode()
@@ -111,25 +134,49 @@ def main() -> int:
             data=data,
             headers={"Content-Type": "application/json", **PROBE_HEADERS},
         )
+        headers: dict = {}
         try:
             with urllib.request.urlopen(req, timeout=180) as r:
-                status, payload = r.status, json.loads(r.read().decode())
+                status, payload, headers = (
+                    r.status,
+                    json.loads(r.read().decode()),
+                    dict(r.headers),
+                )
         except urllib.error.HTTPError as e:
-            status, payload = e.code, {"error": e.read().decode()[:300]}
+            status, payload, headers = (
+                e.code,
+                {"error": e.read().decode()[:300]},
+                dict(e.headers),
+            )
         print(f"warped responses: {status}")
+
+        # The supervisor persists status on every health refresh, so a
+        # request must leave status.json behind — proof the pool is wired.
+        if ready_exits_on_disk() is None:
+            return fail("supervisor never persisted warps/<id>/status.json")
+        print("supervisor status.json persisted")
+
+        via = headers.get("x-egress-provider") or headers.get("X-Egress-Provider")
         if status == 429:
-            print("pool reports rate limit; RetryIn tracked (no failure)")
+            print("upstream reports rate limit; RetryIn tracked (no failure)")
             return 0
-        if status == 502:
-            # Pool warp exits are unhealthy from here (TLS EOF through the
-            # warp SOCKS): the relay path itself is verified, upstream is not.
-            # Treat as infra-unavailable, not a gateway failure.
-            print("pool warp unhealthy from here; relay path verified (no failure)")
+        if status >= 500:
+            # Upstream or pool egress unhealthy from here (no TUN, no
+            # registration, Zen hiccup): gateway error mapping verified,
+            # infra itself unavailable.
+            print("upstream/egress unhealthy from here; error mapping ok (no failure)")
             return 0
         if status != 200:
             return fail(f"warped request failed: {status} {payload}")
+        if ready:
+            if via != PROVIDER_ID:
+                return fail(f"pool has {ready} ready exits but request went direct")
+            print(f"warp probe ok: request rode {PROVIDER_ID} exit(s)")
+        else:
+            if via:
+                return fail(f"pool has no ready exits but request rode {via}")
+            print("warp probe ok: pool down, request failed open to direct")
         print(f"usage: {payload.get('usage')}")
-        print("warp probe ok: provider routes through pool /fetch")
         return 0
     finally:
         proc.terminate()

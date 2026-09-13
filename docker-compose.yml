@@ -9,4 +9,9 @@ services:
       - .env
     environment:
       DATA_DIR: /data
+    # warp-svc needs a TUN device; NET_ADMIN lets it bring the interface up.
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
     restart: unless-stopped

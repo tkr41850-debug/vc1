@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from llms.proxy.buckets import BucketTable
-from llms.proxy.egress import DirectEgress, ProviderEgress, WarpPoolEgress
+from llms.proxy.egress import DirectEgress, ProviderEgress, WarpSocksEgress
 from llms.proxy.providers import Provider, ProviderRegistry
 
 
@@ -21,7 +21,7 @@ def _registry_with_warp(tmp_path, **overrides) -> ProviderRegistry:
         "id": "pool1",
         "label": "pool",
         "kind": "warp",
-        "base_url": "http://pool:8080",
+        "exits": 2,
         "models": ["muse-*"],
         "enabled": True,
     }
@@ -65,6 +65,38 @@ def test_resolve_skips_known_empty_pool(tmp_path):
     assert egress.resolve("muse-spark")[1] == "warp"
     rt = registry.runtime("pool1")
     rt.health = ProviderHealth(fetched_at=time.monotonic(), exits=[])
+    # No pool attached (or empty instances) => pool cannot recover => skip.
+    assert egress.resolve("muse-spark")[1] == "noproxy"
+
+
+def test_resolve_stays_eligible_while_pool_booting(tmp_path):
+    """A zero-ready pool that is still handshaking stays in the path.
+
+    Regression for the live rides where req0's refresh snapshotted the pool
+    mid-boot (daemon handshaking, no ready exits) and every later request
+    resolved straight to noproxy — so no request ever re-polled and the
+    late-connecting slot never promoted.
+    """
+    import time
+
+    import httpx
+
+    from llms.proxy.providers import ProviderHealth
+
+    registry = _registry_with_warp(tmp_path)
+
+    from llms.proxy.warp import WarpSlot
+
+    pool = type("FakePool", (), {})()
+    pool.instances = [WarpSlot(idx=0, socks_port=40001, status="Connecting")]
+
+    registry._supervisor = type("Sup", (), {"get": lambda self, pid: pool})()
+    egress = ProviderEgress(DirectEgress(httpx.AsyncClient()), registry=registry)
+    rt = registry.runtime("pool1")
+    rt.health = ProviderHealth(fetched_at=time.monotonic(), exits=[])
+    assert egress.resolve("muse-spark")[1] == "warp"
+
+    pool.instances[0].status = "Disconnected"
     assert egress.resolve("muse-spark")[1] == "noproxy"
 
 
@@ -74,12 +106,10 @@ def test_sync_tracks_ready_exits_and_disable(tmp_path):
     table = BucketTable(num_buckets=16, num_slots=1)
     registry = _registry_with_warp(tmp_path)
     egress = ProviderEgress(DirectEgress(httpx.AsyncClient()), registry=registry)
-    egress._warp["pool1"] = WarpPoolEgress("http://pool:8080", num_slots=3)
+    egress._warp["pool1"] = WarpSocksEgress("pool1", num_slots=3)
     assert egress.sync_bucket_slots(table) is True
     assert table.num_slots == 3
-    registry.save(
-        [Provider(id="pool1", kind="warp", base_url="http://pool:8080", enabled=False)]
-    )
+    registry.save([Provider(id="pool1", kind="warp", exits=2, enabled=False)])
     assert egress.sync_bucket_slots(table) is True
     assert table.num_slots == 1
 
@@ -110,7 +140,7 @@ def test_create_provider_resizes_table(admin_client, tmp_path):
         json={
             "id": "pool1",
             "kind": "warp",
-            "base_url": "http://pool:8080",
+            "exits": 2,
             "models": ["muse-*"],
         },
         headers={"Authorization": "Bearer sk-test"},
@@ -125,7 +155,9 @@ def test_create_provider_resizes_table(admin_client, tmp_path):
     assert table.num_slots == 4
     r = tc.delete("/api/admin/providers/pool1")
     assert r.status_code == 200
-    assert not (tmp_path / "warps" / "pool1").exists()
+    # Datadirs are precious (Cloudflare rate-limits re-registration): delete
+    # drops the live pool but keeps the dir for same-id re-create.
+    assert (tmp_path / "warps" / "pool1").is_dir()
     assert table.num_slots == 1
 
 
@@ -137,7 +169,6 @@ def test_warp_status_persists_ready_exits(tmp_path):
     registry.save_warp_status(
         "pool1",
         ProviderHealth(
-            active=1,
             exits=[WarpExit(idx=1, ready=True), WarpExit(idx=2, ready=False)],
             fetched_at=1.0,
         ),

@@ -11,7 +11,7 @@ from llms.proxy.config import Settings
 from llms.proxy.forward import forward, parse_body
 from llms.proxy.ir import RequestIR
 from llms.proxy.logging import log_ingress, log_upstream, new_trace_id, setup_logging
-from llms.proxy.providers import RecentRequest, pool_active_warp
+from llms.proxy.providers import RecentRequest
 from llms.proxy.rate_limit import classify
 from llms.proxy.router import ENDPOINT_PATH, pick, resolve_alias
 from llms.proxy.stream_translate import (
@@ -127,49 +127,87 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     egress_provider = request.app.state.egress
     started = time.monotonic()
     provider_id: str | None = None
-    via_pool: dict | None = None
-    pool_active: int | None = None
+    via_warp: dict | None = None
+    warp_idx: int | None = None
     registry = getattr(request.app.state, "providers", None)
     resolve = getattr(egress_provider, "resolve", None)
     if callable(resolve):
         provider_id, kind, warp_egress = resolve(req.model)
         if kind == "warp" and warp_egress is not None:
-            if outbound.get("stream") is True:
-                # Pools buffer /fetch: no true streaming through a relay.
-                # Fall back to direct egress so dsh-style streaming clients
-                # keep working on warp-routed models.
-                logger.info(
-                    "[%s] warp-routed stream falls back to direct egress",
-                    trace_id,
-                )
-                provider_id, via_pool = None, None
+            provider = None
+            if registry is not None:
+                for p in registry.load():
+                    if p.id == provider_id:
+                        provider = p
+                        break
+            if registry is not None and provider is not None:
+                await registry.refresh_health(provider)
+                # Re-resolve after the refresh: a slot that flipped ready
+                # during this very poll must seed the egress's SOCKS ports
+                # before client_for runs, or the request fails open despite
+                # a connected tunnel (live finding: final status.json showed
+                # ready=true while the request went direct).
+                provider_id, kind, warp_egress = resolve(req.model)
+                if kind != "warp" or warp_egress is None:
+                    provider_id, via_warp = None, None
+                sync = getattr(egress_provider, "sync_bucket_slots", None)
+                if callable(sync):
+                    sync(table)
+            if kind != "warp" or warp_egress is None:
                 client = egress_provider.client_for(bucket, slot)
             else:
-                provider = None
-                if registry is not None:
-                    for p in registry.load():
-                        if p.id == provider_id:
-                            provider = p
-                            break
-                pool_base = provider.base_url if provider else warp_egress.pool_base_url
-                pool_token = provider.token if provider else warp_egress.token
-                if registry is not None and provider is not None:
-                    health = await registry.refresh_health(provider)
-                    pool_active = pool_active_warp(health)
-                    sync = getattr(egress_provider, "sync_bucket_slots", None)
-                    if callable(sync):
-                        sync(table)
-                via_pool = {
-                    "base_url": pool_base,
-                    "token": pool_token,
-                    "provider_id": provider_id or "",
-                    "pool_active_warp": pool_active,
-                }
-                client = warp_egress.client_for(bucket, slot)
+                try:
+                    client = warp_egress.client_for(bucket, slot)
+                except RuntimeError:
+                    # No ready SOCKS exits: fail open to direct.
+                    logger.info(
+                        "[%s] warp provider %s has no ready exits; failing open",
+                        trace_id,
+                        provider_id,
+                    )
+                    provider_id, via_warp = None, None
+                    client = egress_provider.client_for(bucket, slot)
+                else:
+                    # Slot-spread egress: the request's slot pins to one
+                    # ready exit (slot % ready), so warp_idx is the slot's
+                    # position in the ready spread — not a pool pin.
+                    ports = warp_egress.ready_ports()
+                    warp_idx = (
+                        ports.index(warp_egress.pick_port(slot)) if ports else None
+                    )
+                    via_warp = {
+                        "provider_id": provider_id or "",
+                        "warp_idx": warp_idx,
+                    }
         else:
             client = egress_provider.client_for(bucket, slot)
     else:
         client = egress_provider.client_for(bucket, slot)
+    tracker = getattr(request.app.state, "usage", None)
+    usage_secret = getattr(request.state, "secret_key", None)
+    stream_usage_cb = None
+    if (
+        outbound.get("stream") is True
+        and tracker is not None
+        and usage_secret is not None
+    ):
+
+        def stream_usage_cb(
+            done, _tracker=tracker, _key=usage_secret, _model=req.model
+        ):
+            from llms.proxy.ir import StreamDone as _StreamDone
+
+            if isinstance(done, _StreamDone):
+                _tracker.record(
+                    _key,
+                    _model,
+                    done.input_tokens,
+                    done.output_tokens,
+                    done.cached_tokens,
+                    done.reasoning_tokens,
+                    count_request=False,
+                )
+
     response = await forward(
         client,
         url,
@@ -178,7 +216,9 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         trace_id,
         convert=_convert_for(ingress, egress, req.model),
         translate_stream=_stream_for(ingress, egress, req.model),
-        via_pool=via_pool,
+        via_warp=via_warp,
+        stream_ingress=ingress if outbound.get("stream") is True else None,
+        stream_usage_sink=stream_usage_cb,
     )
     elapsed_ms = (time.monotonic() - started) * 1000.0
     outcome, retry_after = _outcome_of(response)
@@ -223,7 +263,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 model=req.model,
                 status=status,
                 ms=elapsed_ms,
-                warp_idx=pool_active,
+                warp_idx=warp_idx,
                 error=str(error)[:200],
             )
         )
@@ -233,6 +273,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
 def _record_usage(
     request: Request, ingress: str, model: str, response: Response
 ) -> None:
+    from llms.proxy.ir import StreamDone
     from llms.proxy.usage import extract_usage
 
     tracker = getattr(request.app.state, "usage", None)
@@ -240,6 +281,22 @@ def _record_usage(
     if tracker is None or secret_key is None:
         return
     if isinstance(response, StreamingResponse):
+        # Translate path: lines buffered, IR usage sniffed up-front.
+        done = getattr(response, "stream_usage", None)
+        if isinstance(done, StreamDone):
+            tracker.record(
+                secret_key,
+                model,
+                done.input_tokens,
+                done.output_tokens,
+                done.cached_tokens,
+                done.reasoning_tokens,
+            )
+            return
+        # Passthrough: the tap in forward.py records tokens synchronously
+        # when the stream exhausts (request counted here, tokens merged on
+        # completion without double-counting). Nothing more to do at
+        # response-build time; fall through to the request-only record.
         tracker.record(secret_key, model, None, None, None, None)
         return
     if not isinstance(response, JSONResponse) or response.status_code >= 400:

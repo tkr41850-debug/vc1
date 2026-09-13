@@ -47,8 +47,28 @@ class Settings:
         default_factory=lambda: float(os.getenv("SLOT_COOLDOWN_S", "60"))
     )
     egress_mode: str = field(default_factory=lambda: os.getenv("EGRESS_MODE", "direct"))
-    vsp_base_url: str = field(default_factory=lambda: os.getenv("VSP_BASE_URL", ""))
-    vsp_token: str = field(default_factory=lambda: os.getenv("VSP_TOKEN", ""))
+    warp_exits: int = field(
+        default_factory=lambda: int(
+            os.getenv("WARP_EXITS", os.getenv("WARP_SLOTS", "8"))
+        )
+    )
+    warp_hold_timeout_s: float = field(
+        default_factory=lambda: float(os.getenv("WARP_HOLD_TIMEOUT", "10"))
+    )
+    warp_reg_interval_sec: int = field(
+        default_factory=lambda: int(os.getenv("WARP_REG_INTERVAL_SEC", "28800"))
+    )
+    warp_boot_retry_sec: int = field(
+        default_factory=lambda: int(os.getenv("WARP_BOOT_RETRY_SEC", "300"))
+    )
+    warp_base_socks_port: int = field(
+        default_factory=lambda: int(os.getenv("WARP_BASE_SOCKS_PORT", "40001"))
+    )
+    warp_protocol: str = field(
+        default_factory=lambda: os.getenv("WARP_PROTOCOL", "MASQUE")
+    )
+    warp_masque: str = field(default_factory=lambda: os.getenv("WARP_MASQUE", ""))
+    warp_net_mtu: str = field(default_factory=lambda: os.getenv("WARP_NET_MTU", ""))
     port: int = field(
         default_factory=lambda: int(os.getenv("ZEN_GATEWAY_PORT", "8789"))
     )

@@ -88,6 +88,9 @@ probe-admin:
 probe-warp:
     uv run python scripts/warp_probe.py
 
+probe-stream-usage:
+    uv run python scripts/stream_usage_probe.py
+
 providers:
     #!/usr/bin/env bash
     set -u

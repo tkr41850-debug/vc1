@@ -38,6 +38,111 @@ async def stream_upstream(upstream: httpx.Response, trace_id: str):
         pass
 
 
+def sniff_stream_usage(lines: list[str], ingress: str):
+    """Run the IR stream parser over buffered lines; return the StreamDone.
+
+    Returns None when parsing yields no terminal frame (shouldn't happen —
+    parsers always emit a trailing StreamDone — but stay total).
+    """
+    from llms.proxy.ir import StreamDone
+    from llms.proxy.stream_translate import PARSERS
+
+    done = None
+    for delta in PARSERS[ingress](lines):
+        if isinstance(delta, StreamDone):
+            done = delta
+    return done
+
+
+class TappedStream:
+    """Passthrough byte stream with an IR usage tap.
+
+    An async-iterable object (not a bare generator) so per-chunk state and
+    the usage sink live on the instance — immune to generator-frame teardown
+    ordering (e.g. Starlette cancelling the response task while the client
+    is still draining). Yields upstream bytes identically (minus cost
+    frames, like stream_upstream); when exhausted, parses the seen lines
+    through the IR stream parser and hands the StreamDone to usage_sink.
+
+    Line splitting is incremental: each received chunk is appended to a
+    buffer and only newline-terminated lines are emitted/parsed, so a usage
+    frame split across TCP segments still reassembles.
+    """
+
+    def __init__(self, upstream: httpx.Response, ingress: str, usage_sink=None):
+        self._upstream = upstream
+        self._ingress = ingress
+        self._sink = usage_sink
+        self._seen: list[str] = []
+        self._buf = bytearray()
+
+    def __aiter__(self):
+        return self._gen()
+
+    async def _gen(self):
+        try:
+            # Small chunks so a terminal usage frame split across TCP
+            # segments still reassembles before the stream ends. (Default
+            # chunking can deliver >100KB at once; the reassembly below
+            # handles both intact and split deliveries.)
+            async for chunk in self._upstream.aiter_bytes(chunk_size=4096):
+                # aiter_lines() buffers a trailing unterminated line until
+                # stream close (httpx LineDecoder), so terminal usage frames
+                # could miss the tap. Reassemble lines here; emit only
+                # newline-terminated ones (the trailing fragment, if any, is
+                # flushed as a final line at stream end).
+                self._buf.extend(bytes(chunk))
+                while True:
+                    nl = self._buf.find(b"\n")
+                    if nl < 0:
+                        break
+                    raw = bytes(self._buf[:nl])
+                    del self._buf[: nl + 1]
+                    line = raw.decode(errors="replace")
+                    if not line:
+                        yield b": ping\n\n"
+                        continue
+                    if is_cost_frame(raw):
+                        continue
+                    self._seen.append(line)
+                    yield raw + b"\n"
+            if self._buf:
+                tail = bytes(self._buf)
+                self._buf.clear()
+                line = tail.decode(errors="replace")
+                if line and not is_cost_frame(tail):
+                    self._seen.append(line)
+                    yield tail + b"\n"
+        finally:
+            try:
+                await self._upstream.aclose()
+            except Exception:
+                pass
+            if self._sink is not None:
+                self._record()
+
+    def _record(self) -> None:
+        from llms.proxy.ir import StreamDone
+        from llms.proxy.stream_translate import PARSERS
+
+        done = None
+        try:
+            for delta in PARSERS[self._ingress](self._seen):
+                if isinstance(delta, StreamDone):
+                    done = delta
+        except Exception as exc:
+            logger.debug("stream usage sniff failed: %s", exc)
+        try:
+            self._sink(done)
+        except Exception as exc:
+            logger.debug("stream usage sink failed: %s", exc)
+
+
+async def tap_stream_usage(upstream: httpx.Response, ingress: str, usage_sink=None):
+    """Build a TappedStream for passthrough responses (see class docs)."""
+    return TappedStream(upstream, ingress, usage_sink)
+
+
 async def parse_body(request: Request):
     try:
         body = await request.json()
@@ -61,80 +166,14 @@ async def forward(
     trace_id: str,
     convert=None,
     translate_stream=None,
-    via_pool: dict | None = None,
+    via_warp: dict | None = None,
+    stream_ingress: str | None = None,
+    stream_usage_sink=None,
 ) -> Response:
-    # via_pool relays the Zen request through a vsp warp pool /fetch endpoint:
-    # {"base_url", "token"}. The pool returns {ok, status, headers, body_b64}.
-    # Pools buffer /fetch so true streaming is impossible; streamed bodies go
-    # direct (noproxy) instead — see pipeline's warp_stream_fallback.
-    if via_pool is not None:
-        from llms.proxy.providers import fetch_spec, parse_fetch_result
-
-        raw = json.dumps(body).encode()
-        _path, _relay_headers, spec_body = fetch_spec(
-            url, headers, raw, via_pool.get("token", "")
-        )
-        pool_url = via_pool["base_url"].rstrip("/") + "/fetch"
-        try:
-            upstream = await client.post(
-                pool_url,
-                headers={"Content-Type": "application/json"},
-                content=spec_body,
-            )
-        except httpx.HTTPError as exc:
-            logger.error("[%s] pool connect failed: %s", trace_id, exc)
-            return JSONResponse(
-                status_code=502, content={"error": {"message": "pool unreachable"}}
-            )
-        try:
-            wrapped = upstream.json()
-        except Exception:
-            wrapped = {"ok": False, "error": upstream.text[:500]}
-        if not wrapped.get("ok"):
-            status = 502
-            try:
-                status = int(wrapped.get("status", 502))
-            except (TypeError, ValueError):
-                pass
-            content = {
-                "error": {
-                    "message": str(wrapped.get("error", "pool fetch failed"))[:2000]
-                }
-            }
-            if status == 429 or "ratelimit" in str(wrapped.get("error", "")).lower():
-                return JSONResponse(
-                    status_code=429,
-                    content=content,
-                    headers={"retry-after": str(wrapped.get("retry_after", "60"))},
-                )
-            return JSONResponse(status_code=status, content=content)
-        status, resp_headers, resp_body = parse_fetch_result(wrapped)
-        try:
-            payload = json.loads(resp_body.decode())
-        except Exception:
-            payload = {"error": {"message": resp_body.decode(errors="replace")[:2000]}}
-        if convert is not None and status < 400:
-            try:
-                payload = convert(payload)
-            except Exception as exc:
-                logger.error("[%s] response conversion failed: %s", trace_id, exc)
-                return JSONResponse(
-                    status_code=502,
-                    content={"error": {"message": "response conversion failed"}},
-                )
-        response = JSONResponse(
-            status_code=status,
-            content=payload,
-            headers=passthrough_headers(resp_headers) if status >= 400 else None,
-        )
-        # Observability only: the provider that relayed this request, and the
-        # pool's currently-active warp exit at send time. The pool chooses the
-        # actual egress warp internally per request — warp_idx is a snapshot
-        # of pool state, not a pin.
-        response.headers["x-egress-provider"] = via_pool.get("provider_id", "")
-        if via_pool.get("pool_active_warp") is not None:
-            response.headers["x-pool-active-warp"] = str(via_pool["pool_active_warp"])
-        return response
+    # via_warp sends the Zen request through a client already bound to the
+    # local warp SOCKS exit (httpx proxy=...): direct in-process egress, no
+    # loopback relay. Streams flow through SOCKS like any other request.
+    warped = via_warp is not None
     if body.get("stream") is True:
         req = client.build_request("POST", url, headers=headers, json=body)
         try:
@@ -167,10 +206,34 @@ async def forward(
                 await upstream.aclose()
             except Exception:
                 pass
-            return StreamingResponse(
+            response = StreamingResponse(
                 translate_stream(lines, trace_id), media_type="text/event-stream"
             )
+            # Lines are already buffered: sniff IR usage now so _record_usage
+            # can attribute streamed tokens without waiting on the client.
+            if stream_ingress is not None:
+                try:
+                    response.stream_usage = sniff_stream_usage(lines, stream_ingress)
+                except Exception as exc:
+                    logger.debug(
+                        "[%s] translate-path usage sniff failed: %s", trace_id, exc
+                    )
+            if warped:
+                response.headers["x-egress-provider"] = via_warp.get("provider_id", "")
+                if via_warp.get("warp_idx") is not None:
+                    response.headers["x-pool-active-warp"] = str(via_warp["warp_idx"])
+            return response
         media = upstream.headers.get("content-type", "text/event-stream")
+        if stream_ingress is not None:
+            tapped = await tap_stream_usage(
+                upstream, stream_ingress, usage_sink=stream_usage_sink
+            )
+            response = StreamingResponse(tapped, media_type=media)
+            if warped:
+                response.headers["x-egress-provider"] = via_warp.get("provider_id", "")
+                if via_warp.get("warp_idx") is not None:
+                    response.headers["x-pool-active-warp"] = str(via_warp["warp_idx"])
+            return response
         return StreamingResponse(stream_upstream(upstream, trace_id), media_type=media)
     try:
         upstream = await client.post(url, headers=headers, json=body)
@@ -193,10 +256,18 @@ async def forward(
                 status_code=502,
                 content={"error": {"message": "response conversion failed"}},
             )
-    return JSONResponse(
+    response = JSONResponse(
         status_code=upstream.status_code,
         content=payload,
         headers=passthrough_headers(upstream.headers)
         if upstream.status_code >= 400
         else None,
     )
+    if warped:
+        # Observability only: the warp provider at send time, and the
+        # request slot's position in the ready-exit spread (slot % ready —
+        # not a pool pin; each slot dials its own exit).
+        response.headers["x-egress-provider"] = via_warp.get("provider_id", "")
+        if via_warp.get("warp_idx") is not None:
+            response.headers["x-pool-active-warp"] = str(via_warp["warp_idx"])
+    return response

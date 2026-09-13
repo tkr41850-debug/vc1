@@ -43,18 +43,16 @@ class ProviderBody(BaseModel):
     id: str = ""
     label: str = ""
     kind: str = "warp"
-    base_url: str = ""
-    token: str = ""
     models: list[str] = []
     enabled: bool = True
+    exits: int = 8
 
 
 class ProviderPatch(BaseModel):
     label: str | None = None
-    base_url: str | None = None
-    token: str | None = None
     models: list[str] | None = None
     enabled: bool | None = None
+    exits: int | None = None
 
 
 @router.get("/api/admin/providers")
@@ -76,8 +74,8 @@ async def create_provider(
         raise HTTPException(status_code=400, detail="id is required")
     if body.kind not in ("noproxy", "warp"):
         raise HTTPException(status_code=400, detail="kind must be noproxy or warp")
-    if body.kind == "warp" and not body.base_url.strip():
-        raise HTTPException(status_code=400, detail="base_url is required for warp")
+    if body.kind == "warp" and body.exits < 1:
+        raise HTTPException(status_code=400, detail="exits must be >= 1")
     registry = _registry(request)
     _ = settings
     try:
@@ -86,17 +84,15 @@ async def create_provider(
         raise HTTPException(status_code=503, detail=str(exc))
     if any(p.id == body.id for p in providers):
         raise HTTPException(status_code=409, detail="provider already exists")
-    providers.append(
-        Provider(
-            id=body.id,
-            label=body.label,
-            kind=body.kind,
-            base_url=body.base_url.strip(),
-            token=body.token,
-            models=list(body.models),
-            enabled=body.enabled,
-        )
+    provider = Provider(
+        id=body.id,
+        label=body.label,
+        kind=body.kind,
+        models=list(body.models),
+        enabled=body.enabled,
+        exits=max(1, body.exits),
     )
+    providers.append(provider)
     registry.save(providers)
     if body.kind == "warp":
         registry.ensure_warp_dir(body.id)
@@ -120,10 +116,8 @@ async def update_provider(
         if p.id == provider_id:
             if body.label is not None:
                 p.label = body.label
-            if body.base_url is not None:
-                p.base_url = body.base_url.strip()
-            if body.token is not None:
-                p.token = body.token
+            if body.exits is not None:
+                p.exits = max(1, body.exits)
             if body.models is not None:
                 p.models = list(body.models)
             if body.enabled is not None:
@@ -148,7 +142,12 @@ async def delete_provider(
     except StoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     registry.save(providers)
-    registry.drop_warp_dir(provider_id)
+    # Datadirs stay on disk: Cloudflare rate-limits re-registration, so a
+    # same-id re-create reuses them instead of burning registration budget.
+    # Only the live pool (daemons + clients) is dropped.
+    supervisor = getattr(registry, "_supervisor", None)
+    if supervisor is not None:
+        await supervisor.drop(provider_id)
     _sync_slots(request)
     return {"status": "ok"}
 
@@ -178,9 +177,7 @@ async def provider_reconnect(
     registry = _registry(request)
     provider = _find(registry, provider_id)
     if provider.kind != "warp":
-        raise HTTPException(
-            status_code=400, detail="only warp pool providers reconnect"
-        )
+        raise HTTPException(status_code=400, detail="only warp providers reconnect")
     result = await registry.reconnect(provider)
     _sync_slots(request)
     return {"id": provider_id, **result}

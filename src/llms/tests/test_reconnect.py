@@ -1,45 +1,58 @@
 from __future__ import annotations
 
-import httpx
+
+class FakePool:
+    """Stand-in for the in-process WarpPool behind ProviderRegistry."""
+
+    def __init__(self, ready: tuple[int, ...] = (1, 2)) -> None:
+        self.ready = ready
+        self.reconnects = 0
+
+    async def reconnect(self) -> dict:
+        self.reconnects += 1
+        return {
+            "ok": True,
+            "before": {"ready": 0, "exits": 2},
+            "after": {"ready": 2, "exits": 2},
+        }
+
+    async def refresh_statuses(self) -> None:
+        return None
+
+    def snapshot(self) -> dict:
+        return {
+            "error": "",
+            "exits": [
+                {
+                    "idx": i,
+                    "ready": True,
+                    "status": "Connected",
+                    "reason": "",
+                    "socks": 40000 + i,
+                    "registered": True,
+                    "error": "",
+                }
+                for i in self.ready
+            ],
+        }
 
 
-def _pool_handler(state: dict):
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/rotate":
-            state["rotates"] = state.get("rotates", 0) + 1
-            return httpx.Response(200, json={"ok": True, "old": 1, "active": 2})
-        if request.url.path == "/health":
-            exits = state.get("exits", [])
-            return httpx.Response(200, json={"active": 1, "warps": exits})
-        return httpx.Response(404, json={"error": "nope"})
-
-    return handler
-
-
-def test_reconnect_bounces_pool_and_resyncs(admin_client, tmp_path):
+def test_reconnect_bounces_pool_and_resyncs(admin_client, tmp_path, monkeypatch):
     import json
 
     from llms.proxy.egress import ProviderEgress
     from llms.proxy.providers import Provider, ProviderRegistry
 
-    state: dict = {
-        "exits": [
-            {"idx": 1, "ready": True, "socks": 40001, "registered": True, "error": ""},
-            {"idx": 2, "ready": True, "socks": 40002, "registered": True, "error": ""},
-        ]
-    }
-    pool_client = httpx.AsyncClient(transport=httpx.MockTransport(_pool_handler(state)))
+    pool = FakePool()
+
+    async def _ensure_pool(provider):
+        return pool
+
     tc, _ = admin_client
     table = tc.app.state.bucket_table
     registry = ProviderRegistry(data_dir=tmp_path)
-    registry._client = pool_client
-    registry.save(
-        [
-            Provider(
-                id="pool1", kind="warp", base_url="http://pool:8080", models=["muse-*"]
-            )
-        ]
-    )
+    monkeypatch.setattr(registry, "ensure_pool", _ensure_pool)
+    registry.save([Provider(id="pool1", kind="warp", exits=2, models=["muse-*"])])
     egress = ProviderEgress(tc.app.state.egress, registry=registry)
     assert egress.resolve("muse-spark")[0] == "pool1"
     tc.app.state.egress = egress
@@ -54,8 +67,7 @@ def test_reconnect_bounces_pool_and_resyncs(admin_client, tmp_path):
     assert body["ok"] is True
     assert body["before"]["ready"] == 0
     assert body["after"]["ready"] == 2
-    assert state["rotates"] == 1
-    assert "pool1" not in egress._warp
+    assert pool.reconnects == 1
     assert table.num_slots == 2
     assert json.loads((tmp_path / "warps" / "pool1" / "status.json").read_text())[
         "exits"

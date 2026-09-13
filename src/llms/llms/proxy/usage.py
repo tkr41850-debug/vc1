@@ -54,10 +54,13 @@ class UsageTracker:
         output_tokens: int | None,
         cached_tokens: int | None = None,
         reasoning_tokens: int | None = None,
+        *,
+        count_request: bool = True,
     ) -> None:
         key_entry, model_entry = self._entry(key, model)
-        key_entry["requests"] += 1
-        model_entry["requests"] += 1
+        if count_request:
+            key_entry["requests"] += 1
+            model_entry["requests"] += 1
         if input_tokens is not None:
             key_entry["input_tokens"] += input_tokens
             model_entry["input_tokens"] += input_tokens

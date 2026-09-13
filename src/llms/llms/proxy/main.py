@@ -24,6 +24,7 @@ from llms.proxy.routes.models import router as models_router
 from llms.proxy.routes.providers import router as providers_router
 from llms.proxy.routes.responses import router as responses_router
 from llms.proxy.usage import UsageTracker
+from llms.proxy.warp import WarpSupervisor
 
 USAGE_FLUSH_INTERVAL_S = 60.0
 
@@ -61,8 +62,26 @@ async def lifespan(app: FastAPI):
                 app.state.usage.save_file(settings.data_dir)
 
     task = asyncio.create_task(_flush_loop())
+    if getattr(app.state, "warp", None) is None:
+        app.state.warp = WarpSupervisor(settings.data_dir)
     if getattr(app.state, "providers", None) is None:
-        app.state.providers = ProviderRegistry(data_dir=settings.data_dir)
+        app.state.providers = ProviderRegistry(
+            data_dir=settings.data_dir,
+            settings=settings,
+            supervisor=app.state.warp,
+        )
+    else:
+        app.state.providers._settings = settings
+        if app.state.providers._supervisor is None:
+            app.state.providers._supervisor = app.state.warp
+    # Boot supervised pools for enabled warp providers so registrations
+    # persist and heal across restarts (state dirs live under DATA_DIR).
+    try:
+        for provider in app.state.providers.load():
+            if provider.kind == "warp" and provider.enabled:
+                await app.state.providers.ensure_pool(provider)
+    except Exception as exc:
+        logger.warning("warp supervisor boot failed: %s", exc)
     async with httpx.AsyncClient(
         base_url=settings.zen_base_url, timeout=settings.request_timeout_s
     ) as client:
@@ -81,6 +100,9 @@ async def lifespan(app: FastAPI):
             await task
             app.state.usage.save_file(settings.data_dir)
             await app.state.providers.aclose()
+            supervisor = getattr(app.state, "warp", None)
+            if supervisor is not None:
+                await supervisor.aclose()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -89,7 +111,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings or get_settings()
     app.state.usage = UsageTracker()
     app.state.usage.load_file(app.state.settings.data_dir)
-    app.state.providers = ProviderRegistry(data_dir=app.state.settings.data_dir)
+    app.state.warp = WarpSupervisor(app.state.settings.data_dir)
+    app.state.providers = ProviderRegistry(
+        data_dir=app.state.settings.data_dir,
+        settings=app.state.settings,
+        supervisor=app.state.warp,
+    )
     # Starlette executes middleware in reverse insertion order, so Gate runs
     # last (outermost) and sees the session populated by SessionMiddleware.
     # Without a session secret the admin UI cannot work: sign with a random
