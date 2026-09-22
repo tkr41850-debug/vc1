@@ -22,6 +22,9 @@ STREAM_HEARTBEAT_S = float(os.getenv("STREAM_HEARTBEAT_S", "30"))
 # default request timeout for long generations with slow first tokens.
 STREAM_TIMEOUT_S = float(os.getenv("STREAM_TIMEOUT_S", "600"))
 
+# Sentinel for racing upstream reads against the heartbeat timer.
+_END: object = object()
+
 
 def is_cost_frame(line: bytes) -> bool:
     return b"inference-cost" in line
@@ -79,6 +82,11 @@ class TappedStream:
     Line splitting is incremental: each received chunk is appended to a
     buffer and only newline-terminated lines are emitted/parsed, so a usage
     frame split across TCP segments still reassembles.
+
+    Idle keepalive: upstream reads race a heartbeat timer that is never
+    cancelled on timeout (asyncio.wait leaves the read running), so a
+    silent upstream yields SSE comments instead of holding the downstream
+    connection quiet past the tunnel idle timeout.
     """
 
     def __init__(self, upstream: httpx.Response, ingress: str, usage_sink=None):
@@ -91,41 +99,69 @@ class TappedStream:
     def __aiter__(self):
         return self._gen()
 
+    def _emit_chunk(self, chunk: bytes):
+        """Reassemble lines from one raw chunk; returns complete line bytes."""
+        # aiter_lines() buffers a trailing unterminated line until
+        # stream close (httpx LineDecoder), so terminal usage frames
+        # could miss the tap. Reassemble lines here; emit only
+        # newline-terminated ones (the trailing fragment, if any, is
+        # flushed as a final line at stream end).
+        self._buf.extend(bytes(chunk))
+        out: list[bytes] = []
+        while True:
+            nl = self._buf.find(b"\n")
+            if nl < 0:
+                break
+            raw = bytes(self._buf[:nl])
+            del self._buf[: nl + 1]
+            line = raw.decode(errors="replace")
+            if not line:
+                out.append(b": ping\n\n")
+                continue
+            if is_cost_frame(raw):
+                continue
+            self._seen.append(line)
+            out.append(raw + b"\n")
+        return out
+
+    def _flush_tail(self):
+        if not self._buf:
+            return None
+        tail = bytes(self._buf)
+        self._buf.clear()
+        line = tail.decode(errors="replace")
+        if line and not is_cost_frame(tail):
+            self._seen.append(line)
+            return tail + b"\n"
+        return None
+
     async def _gen(self):
+        read_task: asyncio.Task | None = None
         try:
             # Small chunks so a terminal usage frame split across TCP
             # segments still reassembles before the stream ends. (Default
             # chunking can deliver >100KB at once; the reassembly below
             # handles both intact and split deliveries.)
-            async for chunk in self._upstream.aiter_bytes(chunk_size=4096):
-                # aiter_lines() buffers a trailing unterminated line until
-                # stream close (httpx LineDecoder), so terminal usage frames
-                # could miss the tap. Reassemble lines here; emit only
-                # newline-terminated ones (the trailing fragment, if any, is
-                # flushed as a final line at stream end).
-                self._buf.extend(bytes(chunk))
-                while True:
-                    nl = self._buf.find(b"\n")
-                    if nl < 0:
-                        break
-                    raw = bytes(self._buf[:nl])
-                    del self._buf[: nl + 1]
-                    line = raw.decode(errors="replace")
-                    if not line:
-                        yield b": ping\n\n"
-                        continue
-                    if is_cost_frame(raw):
-                        continue
-                    self._seen.append(line)
-                    yield raw + b"\n"
-            if self._buf:
-                tail = bytes(self._buf)
-                self._buf.clear()
-                line = tail.decode(errors="replace")
-                if line and not is_cost_frame(tail):
-                    self._seen.append(line)
-                    yield tail + b"\n"
+            it = self._upstream.aiter_bytes(chunk_size=4096)
+            while True:
+                if read_task is None:
+                    read_task = asyncio.create_task(anext(it, _END))
+                done, _ = await asyncio.wait({read_task}, timeout=STREAM_HEARTBEAT_S)
+                if not done:
+                    yield b": ping\n\n"
+                    continue
+                chunk = read_task.result()
+                read_task = None
+                if chunk is _END:
+                    break
+                for line in self._emit_chunk(chunk):
+                    yield line
+            tail = self._flush_tail()
+            if tail is not None:
+                yield tail
         finally:
+            if read_task is not None and not read_task.done():
+                read_task.cancel()
             try:
                 await self._upstream.aclose()
             except Exception:

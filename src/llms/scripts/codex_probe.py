@@ -22,6 +22,10 @@ def main() -> int:
                 'name = "zen-proxy"\n'
                 f'base_url = "{BASE_URL}"\n'
                 'wire_api = "responses"\n'
+                # Custom providers only send auth from the env var named
+                # here; OPENAI_API_KEY alone is ignored (verified: no
+                # Authorization header without env_key on codex 0.154).
+                'env_key = "OPENAI_API_KEY"\n'
             )
             with running_proxy(
                 PORT,
