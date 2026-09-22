@@ -5,6 +5,10 @@ port := env_var_or_default("ZEN_GATEWAY_PORT", "8789")
 default:
     @just --list
 
+up:
+    # Local gateway (uvicorn). Delegates to the llms module.
+    @just llms up
+
 docker-up:
     #!/usr/bin/env bash
     set -eu

@@ -2,7 +2,7 @@ services:
   gateway:
     build: .
     ports:
-      - "${ZEN_GATEWAY_PORT:-8789}:8789"
+      - "${ZEN_GATEWAY_PORT:-8789}:${ZEN_GATEWAY_PORT:-8789}"
     volumes:
       - ./data:/data
     env_file:
