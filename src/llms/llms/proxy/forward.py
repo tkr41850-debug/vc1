@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 
 import httpx
 from fastapi import Request
@@ -9,6 +11,16 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from llms.proxy.logging import log_response, setup_logging
 
 logger = setup_logging()
+
+# Idle keepalive for streaming translate responses: the translate path
+# buffers the full upstream body before emitting, so without interim bytes
+# a slow Zen reply holds the downstream connection silent until the tunnel
+# idle timeout (120s) kills it. SSE comments keep the connection alive;
+# the Anthropic SDK ignores them (same pattern as providers.py:231).
+STREAM_HEARTBEAT_S = float(os.getenv("STREAM_HEARTBEAT_S", "30"))
+# Heartbeats only help downstream: give the upstream Zen leg room past the
+# default request timeout for long generations with slow first tokens.
+STREAM_TIMEOUT_S = float(os.getenv("STREAM_TIMEOUT_S", "600"))
 
 
 def is_cost_frame(line: bytes) -> bool:
@@ -143,6 +155,110 @@ async def tap_stream_usage(upstream: httpx.Response, ingress: str, usage_sink=No
     return TappedStream(upstream, ingress, usage_sink)
 
 
+async def translate_with_heartbeat(
+    upstream: httpx.Response,
+    translate_fn,
+    trace_id: str,
+    stream_ingress: str | None,
+    usage_sink=None,
+):
+    """Yield SSE pings while upstream collects, then replay translated bytes.
+
+    The IR stream parsers are synchronous over a full line buffer, so the
+    translate leg can't emit incrementally. Collect in a background task and
+    heartbeat with SSE comments (ignored by clients) until it finishes; then
+    replay the translated events in one burst and hand the sniffed StreamDone
+    to usage_sink (the request itself is counted at response-build time, so
+    the sink must not double-count — same contract as TappedStream).
+    """
+    lines: list[str] = []
+
+    async def _collect() -> None:
+        async for line in upstream.aiter_lines():
+            lines.append(line)
+
+    task = asyncio.create_task(_collect())
+    try:
+        while not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=STREAM_HEARTBEAT_S)
+            except TimeoutError:
+                yield b": ping\n\n"
+        task.result()
+    except BaseException:
+        if not task.done():
+            task.cancel()
+        raise
+    finally:
+        try:
+            await upstream.aclose()
+        except Exception:
+            pass
+    for chunk in translate_fn(lines, trace_id):
+        yield chunk
+    if stream_ingress is not None and usage_sink is not None:
+        try:
+            usage_sink(sniff_stream_usage(lines, stream_ingress))
+        except Exception as exc:
+            logger.debug("translate-path usage sink failed: %s", exc)
+
+
+async def slow_send_stream(
+    send_task: asyncio.Task,
+    translate_fn,
+    trace_id: str,
+    stream_ingress: str | None,
+    usage_sink=None,
+):
+    """Finish a slow upstream send while heartbeating, then stream the body.
+
+    Entered only after the send grace (one heartbeat interval) expires, at
+    which point the response has committed to 200 + SSE — upstream error
+    statuses can no longer become JSONResponses, so they end the stream
+    instead (fast errors never reach here; they keep the JSON path).
+    """
+    try:
+        while not send_task.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(send_task), timeout=STREAM_HEARTBEAT_S
+                )
+            except TimeoutError:
+                yield b": ping\n\n"
+        try:
+            upstream = send_task.result()
+        except httpx.HTTPError as exc:
+            logger.error("[%s] upstream connect failed: %s", trace_id, exc)
+            return
+    except BaseException:
+        if not send_task.done():
+            send_task.cancel()
+        raise
+    log_response(trace_id, upstream.status_code, -1)
+    if upstream.status_code >= 400:
+        try:
+            await upstream.aread()
+        finally:
+            try:
+                await upstream.aclose()
+            except Exception:
+                pass
+        return
+    if translate_fn is not None:
+        async for chunk in translate_with_heartbeat(
+            upstream, translate_fn, trace_id, stream_ingress, usage_sink
+        ):
+            yield chunk
+        return
+    if stream_ingress is not None:
+        tapped = await tap_stream_usage(upstream, stream_ingress, usage_sink=usage_sink)
+        async for chunk in tapped:
+            yield chunk
+        return
+    async for chunk in stream_upstream(upstream, trace_id):
+        yield chunk
+
+
 async def parse_body(request: Request):
     try:
         body = await request.json()
@@ -176,8 +292,51 @@ async def forward(
     warped = via_warp is not None
     if body.get("stream") is True:
         req = client.build_request("POST", url, headers=headers, json=body)
+        # Per-request upstream budget: heartbeats only keep the downstream
+        # leg alive, so long Zen generations need room past the client's
+        # default timeout. httpx takes this via request extensions.
+        req.extensions["timeout"] = {
+            "connect": 10.0,
+            "read": STREAM_TIMEOUT_S,
+            "write": 10.0,
+            "pool": 10.0,
+        }
+        # Send in the background: a slow Zen TTFB must not hold the
+        # downstream connection silent. Fast sends take the normal path
+        # below (errors keep their JSON contract); a send slower than one
+        # heartbeat commits to SSE with pings until Zen answers.
+        send_task = asyncio.create_task(client.send(req, stream=True))
         try:
-            upstream = await client.send(req, stream=True)
+            await asyncio.wait_for(
+                asyncio.shield(send_task), timeout=STREAM_HEARTBEAT_S
+            )
+        except TimeoutError:
+            response = StreamingResponse(
+                slow_send_stream(
+                    send_task,
+                    translate_stream,
+                    trace_id,
+                    stream_ingress,
+                    stream_usage_sink,
+                ),
+                media_type="text/event-stream",
+            )
+            if warped:
+                response.headers["x-egress-provider"] = via_warp.get("provider_id", "")
+                if via_warp.get("warp_idx") is not None:
+                    response.headers["x-pool-active-warp"] = str(via_warp["warp_idx"])
+            return response
+        except httpx.HTTPError as exc:
+            logger.error("[%s] upstream connect failed: %s", trace_id, exc)
+            return JSONResponse(
+                status_code=502, content={"error": {"message": "upstream unreachable"}}
+            )
+        except BaseException:
+            if not send_task.done():
+                send_task.cancel()
+            raise
+        try:
+            upstream = send_task.result()
         except httpx.HTTPError as exc:
             logger.error("[%s] upstream connect failed: %s", trace_id, exc)
             return JSONResponse(
@@ -201,23 +360,16 @@ async def forward(
                 headers=passthrough_headers(upstream.headers),
             )
         if translate_stream is not None:
-            lines = [line async for line in upstream.aiter_lines()]
-            try:
-                await upstream.aclose()
-            except Exception:
-                pass
             response = StreamingResponse(
-                translate_stream(lines, trace_id), media_type="text/event-stream"
+                translate_with_heartbeat(
+                    upstream,
+                    translate_stream,
+                    trace_id,
+                    stream_ingress,
+                    stream_usage_sink,
+                ),
+                media_type="text/event-stream",
             )
-            # Lines are already buffered: sniff IR usage now so _record_usage
-            # can attribute streamed tokens without waiting on the client.
-            if stream_ingress is not None:
-                try:
-                    response.stream_usage = sniff_stream_usage(lines, stream_ingress)
-                except Exception as exc:
-                    logger.debug(
-                        "[%s] translate-path usage sniff failed: %s", trace_id, exc
-                    )
             if warped:
                 response.headers["x-egress-provider"] = via_warp.get("provider_id", "")
                 if via_warp.get("warp_idx") is not None:

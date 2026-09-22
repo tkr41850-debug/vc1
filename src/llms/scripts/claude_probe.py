@@ -26,6 +26,7 @@ def main() -> int:
                 os.environ,
                 ANTHROPIC_BASE_URL=BASE_URL,
                 ANTHROPIC_API_KEY=secret,
+                ANTHROPIC_AUTH_TOKEN="",
                 ANTHROPIC_MODEL=MODEL,
             )
 

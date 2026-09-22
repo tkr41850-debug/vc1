@@ -46,20 +46,30 @@ def resolve_secret_key(request: Request, settings: Settings) -> str | None:
     The sk- key lives only on the header (Authorization: Bearer / x-api-key).
     It is authenticated here, never forwarded upstream (see zen_headers) and
     never mixed with the ak- affinity prefix (see middleware).
+
+    Claude Code sends both headers at once: an OAuth bearer meant for
+    api.anthropic.com plus our sk- in x-api-key. Prefer a known Bearer key,
+    but fall back to x-api-key when Bearer is unknown — otherwise every
+    OAuth-logged-in user 401s despite presenting a valid proxy key.
     """
     from llms.proxy.auth import presented_secret_key
     from llms.proxy.logging import setup_logging
 
     presented = presented_secret_key(request)
-    if presented is None:
+    candidates = [presented] if presented else []
+    api_key = request.headers.get("x-api-key", "").strip()
+    if api_key and api_key not in candidates:
+        candidates.append(api_key)
+    if not candidates:
         return None
     snapshot = _snapshot(settings)
-    if snapshot.get(presented, False):
-        return presented
-    canonical = _strip_ant_infix(presented)
-    if canonical is not None and snapshot.get(canonical, False):
-        setup_logging().info("accepted sk-ant- key form for an allowlisted key")
-        return canonical
+    for candidate in candidates:
+        if snapshot.get(candidate, False):
+            return candidate
+        canonical = _strip_ant_infix(candidate)
+        if canonical is not None and snapshot.get(canonical, False):
+            setup_logging().info("accepted sk-ant- key form for an allowlisted key")
+            return canonical
     return None
 
 

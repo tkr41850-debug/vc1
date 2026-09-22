@@ -131,7 +131,8 @@ across ready exits; with none ready it fails open to direct.
 | `ZEN_DEFAULT_MODEL` | `muse-spark-1.3-contributor-free` | Responses fallback |
 | `ZEN_DEFAULT_CHAT_MODEL` | `muse-spark-1.3-contributor-free` | Chat fallback |
 | `ZEN_DEFAULT_MESSAGES_MODEL` | `claude-haiku-4-5` | Messages fallback |
-| `ZEN_GATEWAY_OPENCODE_VERSION/CLIENT/PROJECT` | `1.18.4`/`cli`/`global` | Upstream identity headers |
+| `ZEN_GATEWAY_OPENCODE_VERSION/CLIENT/PROJECT` | `2.0.12`/`cli`/`global` | Upstream identity headers |
+| `ZEN_GATEWAY_CHANNEL` | `latest` | `User-Agent: opencode/<channel>/<version>/<client>` |
 | `NUM_BUCKETS` | `1024` | Affinity hash space |
 | `NUM_SLOTS` | `8` | Bucket-table slots (grows to the live warp ready-exit count) |
 | `SLOT_COOLDOWN_S` | `60` | Minimum bucket cooldown after a rate limit |

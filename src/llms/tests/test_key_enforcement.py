@@ -200,3 +200,31 @@ def test_admin_and_ui_require_login(app_client):
     r = tc.get("/", follow_redirects=False)
     assert r.status_code == 302
     assert r.headers["location"] == "/api/admin/login"
+
+
+def test_unknown_bearer_falls_back_to_valid_x_api_key(app_client):
+    # Claude Code sends both: an OAuth bearer for api.anthropic.com plus
+    # our sk- in x-api-key. The unknown Bearer must not shadow the valid key.
+    tc, _ = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={"input": "hi"},
+        headers={
+            "Authorization": "Bearer sk-ant-oauth01-unknown",
+            "x-api-key": TEST_SECRET,
+        },
+    )
+    assert r.status_code == 200
+
+
+def test_unknown_bearer_and_unknown_x_api_key_rejected(app_client):
+    tc, _ = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={"input": "hi"},
+        headers={
+            "Authorization": "Bearer sk-ant-oauth01-unknown",
+            "x-api-key": "sk-nope",
+        },
+    )
+    assert r.status_code == 401

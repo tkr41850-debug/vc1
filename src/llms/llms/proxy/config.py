@@ -14,7 +14,10 @@ class Settings:
     )
     zen_api_key: str = field(default_factory=lambda: os.getenv("ZEN_API_KEY", ""))
     opencode_version: str = field(
-        default_factory=lambda: os.getenv("ZEN_GATEWAY_OPENCODE_VERSION", "1.18.4")
+        default_factory=lambda: os.getenv("ZEN_GATEWAY_OPENCODE_VERSION", "2.0.12")
+    )
+    opencode_channel: str = field(
+        default_factory=lambda: os.getenv("ZEN_GATEWAY_CHANNEL", "latest")
     )
     opencode_client: str = field(
         default_factory=lambda: os.getenv("ZEN_GATEWAY_CLIENT", "cli")

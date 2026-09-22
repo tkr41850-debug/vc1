@@ -238,7 +238,9 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         convert=_convert_for(ingress, egress, req.model),
         translate_stream=_stream_for(ingress, egress, req.model),
         via_warp=via_warp,
-        stream_ingress=ingress if outbound.get("stream") is True else None,
+        # Usage is sniffed from upstream (egress-dialect) bytes; identical
+        # for passthrough (ingress == egress) and required for translate.
+        stream_ingress=egress if outbound.get("stream") is True else None,
         stream_usage_sink=stream_usage_cb,
     )
     elapsed_ms = (time.monotonic() - started) * 1000.0
@@ -515,7 +517,8 @@ def _record_usage(
     if tracker is None or secret_key is None:
         return
     if isinstance(response, StreamingResponse):
-        # Translate path: lines buffered, IR usage sniffed up-front.
+        # Translate path: usage arrives via stream_usage_sink when the
+        # heartbeat generator finishes (see forward.translate_with_heartbeat).
         done = getattr(response, "stream_usage", None)
         if isinstance(done, StreamDone):
             tracker.record(
