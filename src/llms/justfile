@@ -161,6 +161,12 @@ catalog:
     here="."
     cd "$here" && uv run python scripts/refresh_catalog.py
 
+refresh-fingerprint:
+    #!/usr/bin/env bash
+    set -u
+    here="."
+    cd "$here" && uv run python scripts/refresh_zen_fingerprint.py
+
 keygen label="local":
     #!/usr/bin/env bash
     # Bootstrap a gateway secret key without needing the admin UI/OAuth:
