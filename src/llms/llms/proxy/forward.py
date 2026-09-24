@@ -318,6 +318,7 @@ async def forward(
     trace_id: str,
     convert=None,
     translate_stream=None,
+    synthesize_json=None,
     via_warp: dict | None = None,
     stream_ingress: str | None = None,
     stream_usage_sink=None,
@@ -423,6 +424,63 @@ async def forward(
                     response.headers["x-pool-active-warp"] = str(via_warp["warp_idx"])
             return response
         return StreamingResponse(stream_upstream(upstream, trace_id), media_type=media)
+    if synthesize_json is not None:
+        # Anonymous responses leg: Zen requires stream:true even when the
+        # client asked for one JSON body. Stream upstream, fold the SSE
+        # into a ResponseIR, and emit a single JSON document downstream.
+        # (Downstream stays silent while collecting — JSON has no
+        # heartbeat channel; the streaming paths above cover that case.)
+        stream_body = dict(body, stream=True)
+        req = client.build_request("POST", url, headers=headers, json=stream_body)
+        req.extensions["timeout"] = {
+            "connect": 10.0,
+            "read": STREAM_TIMEOUT_S,
+            "write": 10.0,
+            "pool": 10.0,
+        }
+        try:
+            upstream = await client.send(req, stream=True)
+        except httpx.HTTPError as exc:
+            logger.error("[%s] upstream connect failed: %s", trace_id, exc)
+            return JSONResponse(
+                status_code=502, content={"error": {"message": "upstream unreachable"}}
+            )
+        log_response(trace_id, upstream.status_code, -1)
+        if upstream.status_code >= 400:
+            try:
+                payload = await upstream.aread()
+            finally:
+                await upstream.aclose()
+            try:
+                content = json.loads(payload.decode())
+            except Exception:
+                content = {
+                    "error": {"message": payload.decode(errors="replace")[:2000]}
+                }
+            return JSONResponse(
+                status_code=upstream.status_code,
+                content=content,
+                headers=passthrough_headers(upstream.headers),
+            )
+        lines = [line async for line in upstream.aiter_lines()]
+        try:
+            await upstream.aclose()
+        except Exception:
+            pass
+        try:
+            payload = synthesize_json(lines, trace_id)
+        except Exception as exc:
+            logger.error("[%s] response synthesis failed: %s", trace_id, exc)
+            return JSONResponse(
+                status_code=502,
+                content={"error": {"message": "response synthesis failed"}},
+            )
+        response = JSONResponse(status_code=upstream.status_code, content=payload)
+        if warped:
+            response.headers["x-egress-provider"] = via_warp.get("provider_id", "")
+            if via_warp.get("warp_idx") is not None:
+                response.headers["x-pool-active-warp"] = str(via_warp["warp_idx"])
+        return response
     try:
         upstream = await client.post(url, headers=headers, json=body)
     except httpx.HTTPError as exc:

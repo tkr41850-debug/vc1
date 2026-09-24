@@ -180,8 +180,10 @@ def test_secret_header_forwards_with_and_without_affinity(app_client, mock_upstr
         )
         assert r.status_code == 200, path
         assert seen_dict["url"].endswith("/responses")
-    # the sk- secret never reaches the upstream gateway
-    assert "authorization" not in seen_dict["headers"]
+    # the client sk- secret never reaches the upstream gateway — only the
+    # operator key (or the public free-tier marker) goes in Authorization.
+    assert seen_dict["headers"]["authorization"] == "Bearer public"
+    assert TEST_SECRET not in seen_dict["headers"]["authorization"]
 
 
 def test_models_requires_secret_but_lists_for_known_secret(app_client):

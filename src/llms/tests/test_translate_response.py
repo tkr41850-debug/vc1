@@ -210,3 +210,27 @@ def test_incomplete_reason_normalized_through_messages():
     out = messages_to_responses(responses_to_messages(payload, "m"), "m")
     assert out["status"] == "incomplete"
     assert out["incomplete_details"] == {"reason": "max_output_tokens"}
+
+
+def test_deltas_fold_into_response_ir():
+    from llms.proxy.ir import ReasoningDelta, StreamDone, TextDelta, ToolArgsDelta
+    from llms.proxy.translate_response import deltas_to_response_ir
+
+    rir = deltas_to_response_ir(
+        [
+            TextDelta("hel"),
+            TextDelta("lo"),
+            ToolArgsDelta("c1", "bash", '{"cmd":'),
+            ToolArgsDelta("c1", "bash", '"echo hi"}'),
+            ReasoningDelta("think"),
+            StreamDone("completed", input_tokens=4, output_tokens=2),
+        ],
+        "m",
+    )
+    assert rir.status == "completed"
+    assert (rir.input_tokens, rir.output_tokens) == (4, 2)
+    kinds = [type(b).__name__ for b in rir.messages[0].blocks]
+    assert kinds == ["ThinkingBlock", "TextBlock", "ToolCallBlock"]
+    call = rir.messages[0].blocks[2]
+    assert (call.call_id, call.name) == ("c1", "bash")
+    assert "echo hi" in call.arguments

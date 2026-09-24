@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from llms.proxy.usage import UsageTracker, extract_usage
+from tests.conftest import TEST_SECRET, build_app_client, make_settings
 
 
 def test_extract_usage_all_dialects():
@@ -151,23 +152,28 @@ def _post(tc, affinity, path, body):
     return tc.post(f"{prefix}/{path}", json=body, headers=TEST_HEADERS)
 
 
-def test_usage_recorded_for_responses(app_client):
-    from tests.conftest import TEST_SECRET
-
-    tc, _ = app_client
-    r = _post(
-        tc,
-        None,
-        "v1/responses",
-        {"model": "muse-spark-1.3-contributor-free", "input": "hi"},
-    )
-    assert r.status_code == 200
-    usage = tc.app.state.usage.snapshot()["keys"][TEST_SECRET]
-    assert usage["requests"] == 1
-    assert usage["input_tokens"] == 4
-    assert usage["output_tokens"] == 2
-    assert usage["cached_tokens"] == 0
-    assert usage["reasoning_tokens"] == 0
+def test_usage_recorded_for_responses(mock_upstream, tmp_path):
+    # Keyed operators keep the direct non-stream upstream path (exact
+    # passthrough with its usage intact); synthesis is anonymous-only.
+    client, _ = mock_upstream
+    with build_app_client(
+        make_settings(data_dir=str(tmp_path), zen_api_key="op-key"),
+        client,
+        seed_key=TEST_SECRET,
+    ) as tc:
+        r = _post(
+            tc,
+            None,
+            "v1/responses",
+            {"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+        )
+        assert r.status_code == 200
+        usage = tc.app.state.usage.snapshot()["keys"][TEST_SECRET]
+        assert usage["requests"] == 1
+        assert usage["input_tokens"] == 4
+        assert usage["output_tokens"] == 2
+        assert usage["cached_tokens"] == 0
+        assert usage["reasoning_tokens"] == 0
 
 
 def test_usage_recorded_for_chat_and_messages(app_client):

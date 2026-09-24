@@ -16,6 +16,9 @@ from llms.proxy.providers import RecentRequest
 from llms.proxy.rate_limit import classify
 from llms.proxy.router import ENDPOINT_PATH, pick, resolve_alias
 from llms.proxy.stream_translate import (
+    PARSERS,
+)
+from llms.proxy.stream_translate import (
     chat_to_messages as stream_chat_to_messages,
 )
 from llms.proxy.stream_translate import (
@@ -42,8 +45,13 @@ from llms.proxy.translate import (
     to_zen_responses,
     with_model,
 )
-from llms.proxy.translate_response import convert_response
-from llms.proxy.zen_headers import build_zen_headers
+from llms.proxy.translate_response import (
+    EMITTERS,
+    convert_response,
+    deltas_to_response_ir,
+)
+from llms.proxy.zen_fingerprint import note_free_tier_error
+from llms.proxy.zen_headers import build_zen_headers, stable_session_id
 
 logger = setup_logging()
 
@@ -79,6 +87,42 @@ def _stream_for(ingress: str, egress: str, model: str):
     return lambda lines, trace_id: translate(lines, trace_id, model)
 
 
+def _synthesize_for(ingress: str, egress: str, model: str):
+    """Fold upstream SSE into one downstream JSON body (responses leg only).
+
+    Anonymous Zen requires stream:true even for single-shot callers; the
+    deltas accumulate into a ResponseIR that the normal response emitters
+    render in the ingress dialect.
+    """
+    if egress != "responses":
+        return None
+
+    def run(lines, trace_id):
+        return EMITTERS[ingress](
+            deltas_to_response_ir(PARSERS[egress](lines), model), model
+        )
+
+    return run
+
+
+def _note_free_tier_error(
+    response: Response, settings: Settings, trace_id: str
+) -> None:
+    """Background a fingerprint re-check when Zen rejects the wire identity."""
+    if not isinstance(response, JSONResponse):
+        return
+    try:
+        payload = json.loads(response.body.decode())
+    except Exception:
+        return
+    if (
+        isinstance(payload, dict)
+        and isinstance(payload.get("error"), dict)
+        and payload["error"].get("type") == "FreeTierError"
+    ):
+        note_free_tier_error(settings.data_dir, trace_id, settings.zen_base_url)
+
+
 def _outcome_of(response: Response) -> tuple[str, float | None]:
     if isinstance(response, JSONResponse):
         try:
@@ -104,6 +148,13 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     req = with_model(req, resolve_alias(req.model, settings.model_aliases))
     egress = pick(req.model, ingress)
     outbound = TO[egress](req)
+    # Zen's free-tier gate requires body prompt_cache_key to equal the
+    # x-opencode-session header (both well-formed ses_ IDs) on the
+    # responses leg; mint one id here and share it with the headers.
+    # Chat has no such field/gate; messages needs a real API key instead.
+    session_id = stable_session_id(settings.zen_api_key)
+    if egress == "responses":
+        outbound["prompt_cache_key"] = session_id
     affinity = getattr(request.state, "affinity", None)
     secret_key = getattr(request.state, "secret_key", None)
     bucket = bucket_for(affinity, req.model, settings.num_buckets, secret_key)
@@ -122,7 +173,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             "slot": slot,
         },
     )
-    headers = build_zen_headers(settings)
+    headers = build_zen_headers(settings, session_id=session_id)
     url = settings.zen_base_url.rstrip("/") + ENDPOINT_PATH[egress]
     log_upstream(trace_id, url, headers, outbound)
     egress_provider = request.app.state.egress
@@ -237,6 +288,11 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         trace_id,
         convert=_convert_for(ingress, egress, req.model),
         translate_stream=_stream_for(ingress, egress, req.model),
+        synthesize_json=(
+            _synthesize_for(ingress, egress, req.model)
+            if outbound.get("stream") is not True and not settings.zen_api_key
+            else None
+        ),
         via_warp=via_warp,
         # Usage is sniffed from upstream (egress-dialect) bytes; identical
         # for passthrough (ingress == egress) and required for translate.
@@ -244,6 +300,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         stream_usage_sink=stream_usage_cb,
     )
     elapsed_ms = (time.monotonic() - started) * 1000.0
+    _note_free_tier_error(response, settings, trace_id)
     outcome, retry_after = _outcome_of(response)
     if outcome == "ratelimited":
         new_slot = table.note_ratelimited(bucket, retry_after)

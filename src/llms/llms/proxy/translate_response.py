@@ -269,3 +269,64 @@ def chat_to_messages(payload: dict, model: str) -> dict:
 
 def messages_to_chat(payload: dict, model: str) -> dict:
     return convert_response("messages", "chat", payload, model)
+
+
+def deltas_to_response_ir(deltas, model: str) -> ResponseIR:
+    """Fold an IR delta stream into one ResponseIR (stream-upstream adapter).
+
+    Lets a non-streaming downstream ride the streaming upstream leg (which
+    anonymous Zen requires) and still get a single JSON body: text /
+    reasoning / tool-argument chunks accumulate, the terminal StreamDone
+    supplies status + usage.
+    """
+    from llms.proxy.ir import ReasoningDelta, StreamDone, TextDelta, ToolArgsDelta
+
+    texts: list[str] = []
+    thinking: list[str] = []
+    tool_args: dict[str, list[str]] = {}
+    tool_names: dict[str, str] = {}
+    order: list[str] = []
+    status = "completed"
+    in_tok: int | None = None
+    out_tok: int | None = None
+    cached: int | None = None
+    reasoning_tok: int | None = None
+    for delta in deltas:
+        if isinstance(delta, TextDelta):
+            texts.append(delta.text)
+        elif isinstance(delta, ReasoningDelta):
+            thinking.append(delta.text)
+        elif isinstance(delta, ToolArgsDelta):
+            if delta.call_id not in tool_args:
+                tool_args[delta.call_id] = []
+                tool_names[delta.call_id] = delta.name
+                order.append(delta.call_id)
+            if not tool_names[delta.call_id] and delta.name:
+                tool_names[delta.call_id] = delta.name
+            tool_args[delta.call_id].append(delta.args_chunk)
+        elif isinstance(delta, StreamDone):
+            status = delta.status
+            in_tok = delta.input_tokens
+            out_tok = delta.output_tokens
+            cached = delta.cached_tokens
+            reasoning_tok = delta.reasoning_tokens
+    blocks: list = []
+    if thinking:
+        blocks.append(ThinkingBlock("".join(thinking)))
+    if "".join(texts):
+        blocks.append(TextBlock("".join(texts)))
+    for call_id in order:
+        args = "".join(tool_args[call_id])
+        if args or tool_names[call_id]:
+            blocks.append(ToolCallBlock(call_id, tool_names[call_id], args))
+    return ResponseIR(
+        model=model,
+        status=status,
+        messages=(LlmMessage(role=ROLE_ASSISTANT, blocks=tuple(blocks)),),
+        input_tokens=in_tok or 0,
+        output_tokens=out_tok or 0,
+        raw_id=uuid.uuid4().hex[:12],
+        cached_tokens=cached or 0,
+        reasoning_tokens=reasoning_tok or 0,
+        incomplete_reason="max_output_tokens" if status == "incomplete" else None,
+    )

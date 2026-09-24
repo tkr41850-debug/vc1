@@ -131,10 +131,13 @@ one slot.
 
 ## Upstream headers (rebuilt per request, never passthrough)
 
-`User-Agent: opencode/<ver>`, `x-opencode-client`, `x-opencode-project`,
-per-key stable `x-opencode-session`, per-request `x-opencode-request`,
-`Content-Type: application/json`, plus `Authorization: Bearer <ZEN_API_KEY>`
-when the operator key is set (never the client's).
+`User-Agent: opencode/<channel>/<ver>/<client>`, `x-opencode-client`,
+`x-opencode-project`, per-key stable `x-opencode-session` (mirrored as
+`x-session-affinity` / `x-session-id`), `Content-Type: application/json`,
+plus `Authorization: Bearer <ZEN_API_KEY>` when the operator key is set
+(`Bearer public` for the anonymous free tier — required, omitting it 403s).
+The responses body carries `prompt_cache_key` equal to the session id.
+No `x-opencode-request`: genuine v2 omits it and Zen 403s when present.
 `host`, `content-length`, `accept-*`, and harness identity headers are dropped;
 httpx regenerates transport headers. Free-tier Zen access depends on the
 opencode identity set; omitting it yields `MissingSessionID`.

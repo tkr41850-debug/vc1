@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import uuid
 
 from llms.proxy.config import Settings
 
@@ -20,19 +19,17 @@ def stable_session_id(api_key: str) -> str:
     return f"ses_{time_part}{rand_part}"
 
 
-def new_request_id() -> str:
-    return f"msg_{uuid.uuid4().hex[:16]}"
-
-
 def build_zen_headers(
-    settings: Settings, incoming_auth: str | None = None
+    settings: Settings, incoming_auth: str | None = None, session_id: str | None = None
 ) -> dict[str, str]:
     # Client credentials (sk- secrets, harness dummy keys) must never reach
     # the upstream gateway. Only the operator ZEN_API_KEY authenticates
-    # upstream; without it requests ride the anonymous free tier.
+    # upstream; without it requests ride the anonymous free tier as
+    # `Bearer public` (observed genuine v2 wire — the header is required,
+    # omitting it 403s even with everything else correct).
     _ = incoming_auth
     api_key = settings.zen_api_key
-    session_id = stable_session_id(api_key)
+    session_id = session_id or stable_session_id(api_key)
     headers = {
         "User-Agent": (
             f"opencode/{settings.opencode_channel}/"
@@ -43,9 +40,9 @@ def build_zen_headers(
         "x-opencode-session": session_id,
         "x-session-affinity": session_id,
         "x-session-id": session_id,
-        "x-opencode-request": new_request_id(),
+        # NOTE: no x-opencode-request — genuine v2 omits it and Zen's
+        # free-tier gate 403s when it is present (verified by bisect).
         "Content-Type": "application/json",
     }
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers["Authorization"] = f"Bearer {api_key}" if api_key else "Bearer public"
     return headers

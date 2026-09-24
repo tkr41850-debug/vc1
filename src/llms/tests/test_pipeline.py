@@ -3,8 +3,12 @@ from __future__ import annotations
 from tests.conftest import TEST_HEADERS
 
 
-def test_chat_ingress_routes_spark_to_responses(app_client):
+def test_chat_ingress_routes_spark_to_responses(app_client, mock_upstream):
     tc, seen = app_client
+    _, seen_dict = mock_upstream
+    # Anonymous responses egress streams upstream even for single-shot
+    # callers, folding SSE into one JSON body.
+    seen_dict["mode"] = "stream"
     r = tc.post(
         "/v1/chat/completions",
         json={
@@ -15,10 +19,11 @@ def test_chat_ingress_routes_spark_to_responses(app_client):
     )
     assert r.status_code == 200
     assert seen["url"].endswith("/responses")
+    assert seen["json"]["stream"] is True
     assert seen["json"]["input"][0]["content"] == [{"type": "input_text", "text": "hi"}]
     body = r.json()
     assert body["object"] == "chat.completion"
-    assert body["choices"][0]["message"]["content"] == "hello"
+    assert body["choices"][0]["message"]["content"] == "hi"
 
 
 def test_responses_ingress_routes_mimo_to_chat(app_client):
@@ -70,8 +75,10 @@ def test_cross_dialect_stream_translates(app_client, mock_upstream):
     assert "inference-cost" not in r.text
 
 
-def test_messages_ingress_routes_spark_to_responses(app_client):
+def test_messages_ingress_routes_spark_to_responses(app_client, mock_upstream):
     tc, seen = app_client
+    _, seen_dict = mock_upstream
+    seen_dict["mode"] = "stream"
     r = tc.post(
         "/v1/messages",
         json={
@@ -83,9 +90,10 @@ def test_messages_ingress_routes_spark_to_responses(app_client):
     )
     assert r.status_code == 200
     assert seen["url"].endswith("/responses")
+    assert seen["json"]["stream"] is True
     body = r.json()
     assert body["type"] == "message"
-    assert body["content"] == [{"type": "text", "text": "hello"}]
+    assert body["content"] == [{"type": "text", "text": "hi"}]
 
 
 def test_responses_ingress_routes_claude_to_messages(app_client):

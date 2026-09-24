@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from llms.proxy.config import Settings
-from llms.proxy.zen_headers import build_zen_headers, new_request_id, stable_session_id
+from llms.proxy.zen_headers import build_zen_headers, stable_session_id
 from tests.conftest import make_settings
 
 
@@ -14,18 +14,21 @@ def test_stable_session_id_differs_per_key():
     assert stable_session_id("key-a") != stable_session_id("key-b")
 
 
-def test_request_ids_unique():
-    assert new_request_id() != new_request_id()
-
-
-def test_free_tier_sends_no_auth_but_identity_headers():
+def test_free_tier_sends_public_bearer_but_identity_headers():
     headers = build_zen_headers(make_settings(zen_api_key=""))
-    assert "Authorization" not in headers
+    assert headers["Authorization"] == "Bearer public"
     assert headers["User-Agent"].startswith("opencode/")
     assert headers["x-opencode-client"] == "cli"
     assert headers["x-opencode-project"] == "global"
     assert headers["x-opencode-session"].startswith("ses_")
-    assert headers["x-opencode-request"].startswith("msg_")
+    assert "x-opencode-request" not in headers
+
+
+def test_session_id_override_shared_with_body():
+    headers = build_zen_headers(make_settings(zen_api_key=""), session_id="ses_custom")
+    assert headers["x-opencode-session"] == "ses_custom"
+    assert headers["x-session-affinity"] == "ses_custom"
+    assert headers["x-session-id"] == "ses_custom"
 
 
 def test_user_agent_matches_genuine_v2_shape():
@@ -55,10 +58,12 @@ def test_affinity_headers_mirror_session():
 
 def test_incoming_credentials_never_forwarded():
     # sk- secrets, harness dummy keys, anything client-sent: never upstream.
+    # The operator key (or the public free-tier marker) is the only
+    # Authorization that reaches Zen.
     settings: Settings = make_settings(zen_api_key="")
     for incoming in ("Bearer sk-client", "Bearer dummy", "Bearer incoming-key"):
         headers = build_zen_headers(settings, incoming)
-        assert "Authorization" not in headers
+        assert headers["Authorization"] == "Bearer public"
 
 
 def test_env_key_used_when_set():
