@@ -133,6 +133,8 @@ across ready exits; with none ready it fails open to direct.
 | `ZEN_DEFAULT_MESSAGES_MODEL` | `claude-haiku-4-5` | Messages fallback |
 | `ZEN_GATEWAY_OPENCODE_VERSION/CLIENT/PROJECT` | `2.0.12`/`cli`/`global` | Upstream identity headers |
 | `ZEN_GATEWAY_CHANNEL` | `latest` | `User-Agent: opencode/<channel>/<version>/<client>` |
+| `ZEN_SESSION_WARMING` | `1` | Title warming call on new responses conversations (`0` off) |
+| `ZEN_SESSION_TTL_S` | `1800` | Conversation→session map entry lifetime |
 | `NUM_BUCKETS` | `1024` | Affinity hash space |
 | `NUM_SLOTS` | `8` | Bucket-table slots (grows to the live warp ready-exit count) |
 | `SLOT_COOLDOWN_S` | `60` | Minimum bucket cooldown after a rate limit |

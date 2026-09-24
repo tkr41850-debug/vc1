@@ -24,6 +24,7 @@ from llms.proxy.routes.models import router as models_router
 from llms.proxy.routes.providers import operator_router as providers_operator_router
 from llms.proxy.routes.providers import router as providers_router
 from llms.proxy.routes.responses import router as responses_router
+from llms.proxy.sessions import SessionTracker
 from llms.proxy.usage import UsageTracker
 from llms.proxy.warp import WarpSupervisor
 
@@ -112,6 +113,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings or get_settings()
     app.state.usage = UsageTracker()
     app.state.usage.load_file(app.state.settings.data_dir)
+    app.state.sessions = SessionTracker()
     app.state.warp = WarpSupervisor(app.state.settings.data_dir)
     app.state.providers = ProviderRegistry(
         data_dir=app.state.settings.data_dir,

@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import os
+
+# Warming fires background upstream calls; unit tests assert exact upstream
+# bodies, so it stays off here unless explicitly enabled per test.
+os.environ.setdefault("ZEN_SESSION_WARMING", "0")
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient

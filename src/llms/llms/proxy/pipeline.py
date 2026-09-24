@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import time
@@ -7,6 +8,7 @@ import time
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from llms.proxy import sessions
 from llms.proxy.affinity import bucket_for
 from llms.proxy.config import Settings
 from llms.proxy.forward import forward, parse_body
@@ -17,6 +19,9 @@ from llms.proxy.rate_limit import classify
 from llms.proxy.router import ENDPOINT_PATH, pick, resolve_alias
 from llms.proxy.stream_translate import (
     PARSERS,
+    new_chat_id,
+    new_msg_id,
+    new_resp_id,
 )
 from llms.proxy.stream_translate import (
     chat_to_messages as stream_chat_to_messages,
@@ -134,6 +139,63 @@ def _outcome_of(response: Response) -> tuple[str, float | None]:
     return "ok", None
 
 
+def _record_conversation(
+    response: Response,
+    session_tracker,
+    secret_key: str | None,
+    session_id: str,
+    stream_id: str | None = None,
+) -> None:
+    """Remember downstream response ids so chained continuations reuse this session."""
+    if session_tracker is None or secret_key is None:
+        return
+    response_id = stream_id
+    if response_id is None and isinstance(response, JSONResponse):
+        if response.status_code >= 400:
+            return
+        try:
+            payload = json.loads(response.body.decode())
+        except Exception:
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("id"), str):
+            response_id = payload["id"]
+    # Passthrough streams reuse upstream ids the tap never parses, so only
+    # translate legs (explicit stream_id) and JSON bodies map here.
+    if response_id is not None:
+        session_tracker.remember(secret_key, "chain:" + response_id, session_id)
+
+
+def _warm_new_conversation(
+    response: Response,
+    is_new_conversation: bool,
+    egress: str,
+    client,
+    url: str,
+    headers: dict,
+    model: str,
+    session_id: str,
+    trace_id: str,
+) -> None:
+    """Background a title warming call for a brand-new responses conversation."""
+    if not is_new_conversation or egress != "responses" or not sessions.SESSION_WARMING:
+        return
+    if not isinstance(response, StreamingResponse):
+        if not isinstance(response, JSONResponse) or response.status_code >= 400:
+            return
+    elif getattr(response, "status_code", 200) >= 400:
+        return
+
+    async def _run() -> None:
+        try:
+            await sessions.warm_session(
+                client, url, headers, model, session_id, trace_id
+            )
+        except BaseException as exc:
+            logger.debug("[%s] session warm task ended: %r", trace_id, exc)
+
+    asyncio.create_task(_run())
+
+
 async def run(request: Request, settings: Settings, ingress: str) -> Response:
     trace_id = new_trace_id()
     body = await parse_body(request)
@@ -149,11 +211,30 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     req = with_model(req, resolve_alias(req.model, settings.model_aliases))
     egress = pick(req.model, ingress)
     outbound = TO[egress](req)
-    # Zen's free-tier gate requires body prompt_cache_key to equal the
-    # x-opencode-session header (both well-formed ses_ IDs) on the
-    # responses leg; mint one id here and share it with the headers.
+    affinity = getattr(request.state, "affinity", None)
+    secret_key = getattr(request.state, "secret_key", None)
+    # Upstream session: per-conversation simulation on the responses leg
+    # (previous_response_id chains, codex thread headers), stable per-key
+    # fallback everywhere else. Zen's free-tier gate requires body
+    # prompt_cache_key to equal the x-opencode-session header (both
+    # well-formed ses_ IDs); mint one id here and share it with headers.
     # Chat has no such field/gate; messages needs a real API key instead.
     session_id = stable_session_id(settings.zen_api_key)
+    is_new_conversation = False
+    session_tracker = getattr(request.app.state, "sessions", None)
+    if session_tracker is not None and ingress == "responses":
+        ref = sessions.conversation_ref(ingress, body, request.headers)
+        if ref is None:
+            session_id = sessions.mint_session_id()
+            is_new_conversation = True
+        else:
+            hit = session_tracker.lookup(secret_key, ref)
+            if hit is not None:
+                session_id = hit
+            elif not ref.startswith("chain:"):
+                session_id = sessions.mint_session_id()
+                session_tracker.remember(secret_key, ref, session_id)
+                is_new_conversation = True
     if egress == "responses":
         outbound["prompt_cache_key"] = session_id
         if not settings.zen_api_key:
@@ -164,8 +245,6 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             outbound["instructions"] = (
                 TITLE_PREFIX if not original else TITLE_PREFIX + SEAM + original
             )
-    affinity = getattr(request.state, "affinity", None)
-    secret_key = getattr(request.state, "secret_key", None)
     bucket = bucket_for(affinity, req.model, settings.num_buckets, secret_key)
     table = request.app.state.bucket_table
     slot = table.slot_for(bucket)
@@ -310,6 +389,28 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     )
     elapsed_ms = (time.monotonic() - started) * 1000.0
     _note_free_tier_error(response, settings, trace_id)
+    stream_id = None
+    if (
+        isinstance(response, StreamingResponse)
+        and _stream_for(ingress, egress, req.model) is not None
+    ):
+        stream_id = {
+            "responses": new_resp_id,
+            "chat": new_chat_id,
+            "messages": new_msg_id,
+        }[ingress](trace_id)
+    _record_conversation(response, session_tracker, secret_key, session_id, stream_id)
+    _warm_new_conversation(
+        response,
+        is_new_conversation,
+        egress,
+        client,
+        url,
+        headers,
+        req.model,
+        session_id,
+        trace_id,
+    )
     outcome, retry_after = _outcome_of(response)
     if outcome == "ratelimited":
         new_slot = table.note_ratelimited(bucket, retry_after)
