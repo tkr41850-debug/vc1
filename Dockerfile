@@ -22,13 +22,15 @@ RUN curl -fsSl https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor
  && rm -rf /var/lib/apt/lists/* \
  && warp-cli --version
 RUN pip install --no-cache-dir uv
-COPY docker-entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
 COPY src/llms/pyproject.toml src/llms/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY src/llms/ ./
 RUN uv sync --frozen --no-dev
 COPY --from=web /build/src/llms/llms/proxy/static ./llms/proxy/static
+# Entrypoint last: anything copied above the dep syncs (including this)
+# would bust the uv cache on every trivial edit.
+COPY docker-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 ENV DATA_DIR=/data ZEN_GATEWAY_PORT=8789
 EXPOSE 8789
 VOLUME /data
