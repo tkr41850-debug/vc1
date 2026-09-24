@@ -30,6 +30,8 @@ from pathlib import Path
 
 logger = logging.getLogger("zen_proxy")
 
+from llms.proxy.zen_prompts import TITLE_PREFIX
+
 EXPECTED = {
     # ua_version must be a version Zen currently ACCEPTS (allowlist lags
     # releases: 2.0.16 exists yet 403s). Only bump after a live probe 200s.
@@ -47,6 +49,7 @@ EXPECTED = {
     "forbidden_headers": ("x-opencode-request",),
     "session_pattern": r"ses_[0-9a-f]{12}[0-9A-Za-z]{14}",
     "prompt_cache_key": "mirror-session",
+    "title_prefix": TITLE_PREFIX,
 }
 
 SOURCES = {
@@ -135,6 +138,7 @@ def parse_expected(sources: dict[str, str]) -> dict:
         ),
         "session_pattern": rf"ses_[0-9a-f]{{12}}[{alpha_class}]{{{rand_len}}}",
         "prompt_cache_key": "mirror-session",
+        "title_prefix": sources["title_prompt"][:1500],
     }
 
 

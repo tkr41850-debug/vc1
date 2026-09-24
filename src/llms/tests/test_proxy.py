@@ -71,6 +71,25 @@ def test_responses_egress_prompt_cache_key_matches_session(app_client):
     assert seen["json"]["prompt_cache_key"] == seen["headers"]["x-opencode-session"]
 
 
+def test_anonymous_instructions_lead_with_canonical_prefix(app_client):
+    from llms.proxy.zen_prompts import SEAM, TITLE_PREFIX
+
+    tc, seen = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={
+            "model": "muse-spark-1.3-contributor-free",
+            "instructions": "Be brief.",
+            "input": "hi",
+        },
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 200
+    sent = seen["json"]["instructions"]
+    assert sent.startswith(TITLE_PREFIX)
+    assert sent.endswith(SEAM + "Be brief.")
+
+
 def _stream_seen_client(mock_upstream, tmp_path):
     from tests.conftest import TEST_SECRET, build_app_client, make_settings
 
@@ -84,8 +103,7 @@ def _stream_seen_client(mock_upstream, tmp_path):
 
 def test_anonymous_nonstream_synthesizes_json_from_upstream_sse(
     mock_upstream, tmp_path
-):
-    # Anonymous Zen requires stream:true even for single-shot callers: the
+):  # Anonymous Zen requires stream:true even for single-shot callers: the
     # proxy streams upstream and folds SSE into one JSON body.
     from tests.conftest import TEST_HEADERS
 

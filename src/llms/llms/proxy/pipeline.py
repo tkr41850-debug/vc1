@@ -52,6 +52,7 @@ from llms.proxy.translate_response import (
 )
 from llms.proxy.zen_fingerprint import note_free_tier_error
 from llms.proxy.zen_headers import build_zen_headers, stable_session_id
+from llms.proxy.zen_prompts import SEAM, TITLE_PREFIX
 
 logger = setup_logging()
 
@@ -155,6 +156,14 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     session_id = stable_session_id(settings.zen_api_key)
     if egress == "responses":
         outbound["prompt_cache_key"] = session_id
+        if not settings.zen_api_key:
+            # Anonymous free tier similarity-gates instructions against
+            # genuine prompts: lead with the canonical prefix, keep client
+            # text after the seam (verified live; keyed keeps fidelity).
+            original = outbound.get("instructions") or ""
+            outbound["instructions"] = (
+                TITLE_PREFIX if not original else TITLE_PREFIX + SEAM + original
+            )
     affinity = getattr(request.state, "affinity", None)
     secret_key = getattr(request.state, "secret_key", None)
     bucket = bucket_for(affinity, req.model, settings.num_buckets, secret_key)

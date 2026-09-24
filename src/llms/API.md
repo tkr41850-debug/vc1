@@ -137,6 +137,9 @@ one slot.
 plus `Authorization: Bearer <ZEN_API_KEY>` when the operator key is set
 (`Bearer public` for the anonymous free tier — required, omitting it 403s).
 The responses body carries `prompt_cache_key` equal to the session id.
+Anonymous responses requests additionally lead `instructions` with the
+canonical prompt prefix (`llms/proxy/zen_prompts.py`, tracked by the
+fingerprint checker) ahead of client text — the free tier gates on it.
 No `x-opencode-request`: genuine v2 omits it and Zen 403s when present.
 `host`, `content-length`, `accept-*`, and harness identity headers are dropped;
 httpx regenerates transport headers. Free-tier Zen access depends on the

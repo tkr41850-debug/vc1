@@ -4,6 +4,7 @@ import re
 import urllib.error
 
 from llms.proxy import zen_fingerprint as fp
+from llms.proxy.zen_prompts import TITLE_PREFIX
 
 IDENTIFIER_FIXTURE = """const length = 26
 const chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -42,7 +43,7 @@ def _sources(**overrides):
         "request": REQUEST_FIXTURE,
         "session_id": SESSION_ID_FIXTURE,
         "identifier": IDENTIFIER_FIXTURE,
-        "title_prompt": "You are a title generator.",
+        "title_prompt": TITLE_PREFIX + "\n<rest of the upstream prompt>",
         "tags": TAGS_FIXTURE,
     }
     base.update(overrides)
