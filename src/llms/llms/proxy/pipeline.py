@@ -58,7 +58,7 @@ from llms.proxy.translate_response import (
 )
 from llms.proxy.zen_fingerprint import note_free_tier_error
 from llms.proxy.zen_headers import build_zen_headers, stable_session_id
-from llms.proxy.zen_prompts import META_TEXT, SEAM, TITLE_PREFIX
+from llms.proxy.zen_prompts import TITLE_PREFIX
 from llms.proxy.zen_tools import GENUINE_TOOLS
 
 logger = setup_logging()
@@ -204,6 +204,36 @@ async def _steer_genuine_calls(
     return response, outbound
 
 
+def _ensure_chat_system(outbound: dict) -> None:
+    """Lead chat system content with the canonical prefix (anonymous only).
+
+    The chat leg gates like responses (bisected live: canonical system
+    streams 200, bare fails). Mutates outbound in place.
+    """
+    from llms.proxy.zen_prompts import SEAM
+
+    messages = outbound.get("messages", [])
+    original = ""
+    rest = messages
+    if (
+        messages
+        and isinstance(messages[0], dict)
+        and messages[0].get("role") == "system"
+    ):
+        first, rest = messages[0], messages[1:]
+        content = first.get("content", "")
+        if isinstance(content, str):
+            original = content
+        elif isinstance(content, list):
+            original = "".join(
+                p.get("text", "")
+                for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+    text = TITLE_PREFIX if not original else TITLE_PREFIX + SEAM + original
+    outbound["messages"] = [{"role": "system", "content": text}, *rest]
+
+
 def _note_free_tier_error(
     response: Response, settings: Settings, trace_id: str
 ) -> None:
@@ -331,29 +361,14 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     if egress == "responses":
         outbound["prompt_cache_key"] = session_id
         if not settings.zen_api_key:
-            # Anonymous free tier matches whole shapes (bisected live):
-            # bare single-shots ride the title prefix with no tools key;
-            # anything richer (client tools/system, dialogue) rides the
-            # agent prompt with the genuine tool set plus client extras.
+            # Anonymous free tier matches the genuine tool set (bisected
+            # live: full set + any client extras passes; bare/renamed
+            # sets 403). Instructions pass through untouched — any
+            # canonical lead steers behavior (title) or costs 9KB (agent).
             # Keyed operators keep exact fidelity.
-            client_tools = outbound.get("tools") or []
-            original = outbound.get("instructions") or ""
-            is_bare_single = (
-                not client_tools
-                and not original
-                and len(outbound.get("input", [])) <= 1
-            )
-            if is_bare_single:
-                outbound["instructions"] = TITLE_PREFIX
-            else:
-                model_name = (
-                    "Muse Glimmer" if "muse-glimmer" in req.model else "Muse Spark"
-                )
-                lead = META_TEXT.replace("{{MODEL_NAME}}", model_name)
-                outbound["instructions"] = (
-                    lead if not original else lead + SEAM + original
-                )
-                outbound["tools"] = list(GENUINE_TOOLS) + list(client_tools)
+            outbound["tools"] = list(GENUINE_TOOLS) + list(outbound.get("tools") or [])
+    elif egress == "chat" and not settings.zen_api_key:
+        _ensure_chat_system(outbound)
     bucket = bucket_for(affinity, req.model, settings.num_buckets, secret_key)
     table = request.app.state.bucket_table
     slot = table.slot_for(bucket)

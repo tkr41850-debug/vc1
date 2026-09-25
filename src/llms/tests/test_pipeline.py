@@ -35,7 +35,9 @@ def test_responses_ingress_routes_mimo_to_chat(app_client):
     )
     assert r.status_code == 200
     assert seen["url"].endswith("/chat/completions")
-    assert seen["json"]["messages"] == [{"role": "user", "content": "hi"}]
+    # Anonymous chat egress leads with the canonical system message.
+    assert seen["json"]["messages"][0]["role"] == "system"
+    assert seen["json"]["messages"][-1] == {"role": "user", "content": "hi"}
     body = r.json()
     assert body["object"] == "response"
     assert body["status"] == "completed"

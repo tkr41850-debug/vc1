@@ -71,10 +71,7 @@ def test_responses_egress_prompt_cache_key_matches_session(app_client):
     assert seen["json"]["prompt_cache_key"] == seen["headers"]["x-opencode-session"]
 
 
-def test_anonymous_instructions_lead_with_canonical_prefix(app_client):
-    # System text without tools rides the agent prompt (title is only for
-    # bare single-shots).
-    from llms.proxy.zen_prompts import SEAM
+def test_anonymous_instructions_pass_through_untouched(app_client):
     from llms.proxy.zen_tools import GENUINE_TOOLS
 
     tc, seen = app_client
@@ -88,16 +85,14 @@ def test_anonymous_instructions_lead_with_canonical_prefix(app_client):
         headers=TEST_HEADERS,
     )
     assert r.status_code == 200
-    sent = seen["json"]["instructions"]
-    assert sent.startswith("You are OpenCode")
-    assert sent.endswith(SEAM + "Be brief.")
+    assert seen["json"]["instructions"] == "Be brief."
     assert [t["name"] for t in seen["json"]["tools"]] == [
         t["name"] for t in GENUINE_TOOLS
     ]
 
 
-def test_anonymous_bare_single_uses_title_without_tools(app_client):
-    from llms.proxy.zen_prompts import TITLE_PREFIX
+def test_anonymous_bare_single_gets_genuine_tools_only(app_client):
+    from llms.proxy.zen_tools import GENUINE_TOOLS
 
     tc, seen = app_client
     r = tc.post(
@@ -106,11 +101,13 @@ def test_anonymous_bare_single_uses_title_without_tools(app_client):
         headers=TEST_HEADERS,
     )
     assert r.status_code == 200
-    assert seen["json"]["instructions"] == TITLE_PREFIX
-    assert "tools" not in seen["json"]
+    assert "instructions" not in seen["json"]
+    assert [t["name"] for t in seen["json"]["tools"]] == [
+        t["name"] for t in GENUINE_TOOLS
+    ]
 
 
-def test_anonymous_dialogue_without_tools_gets_agent_shape(app_client):
+def test_anonymous_dialogue_without_tools_gets_genuine_tools(app_client):
     from llms.proxy.zen_tools import GENUINE_TOOLS
 
     tc, seen = app_client
@@ -127,7 +124,7 @@ def test_anonymous_dialogue_without_tools_gets_agent_shape(app_client):
         headers=TEST_HEADERS,
     )
     assert r.status_code == 200
-    assert seen["json"]["instructions"].startswith("You are OpenCode")
+    assert "instructions" not in seen["json"]
     assert [t["name"] for t in seen["json"]["tools"]] == [
         t["name"] for t in GENUINE_TOOLS
     ]
@@ -160,9 +157,7 @@ def test_anonymous_tooled_turn_sends_genuine_superset(app_client):
         t["name"] for t in GENUINE_TOOLS
     ]
     assert sent_tools[-1]["name"] == "bash"
-    assert seen["json"]["instructions"].startswith("You are OpenCode")
-    assert "Be brief." in seen["json"]["instructions"]
-    assert "Muse Spark" in seen["json"]["instructions"]
+    assert seen["json"]["instructions"] == "Be brief."
 
 
 def test_steering_redirects_genuine_calls(tmp_path):

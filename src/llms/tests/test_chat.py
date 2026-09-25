@@ -16,7 +16,8 @@ def test_chat_passthrough_with_model(app_client):
     assert r.status_code == 200
     assert seen["url"].endswith("/chat/completions")
     assert seen["json"]["model"] == "mimo-v2.5-free"
-    assert seen["json"]["messages"] == [{"role": "user", "content": "hi"}]
+    assert seen["json"]["messages"][0]["role"] == "system"
+    assert seen["json"]["messages"][-1] == {"role": "user", "content": "hi"}
 
 
 def test_chat_model_defaults_when_missing(mock_upstream, tmp_path):
