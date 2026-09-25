@@ -126,6 +126,30 @@ def test_no_binary_stays_unhealthy_no_crash(monkeypatch, tmp_path):
         asyncio.run(pool.aclose())
 
 
+def test_run_cli_prepends_tos_for_connect(monkeypatch):
+    """`connect` must carry the global --accept-tos (warp-cli ≥2026.7
+    fails a bare connect with rc=1 ToS error); disconnect/status stay bare."""
+    seen: list = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    monkeypatch.setattr(
+        warp_mod.subprocess,
+        "run",
+        lambda argv, **k: seen.append(list(argv)) or FakeProc(),
+    )
+    assert warp_mod.run_cli("p", 0, "/tmp/nope-data", "connect") == (0, "ok")
+    assert warp_mod.run_cli("p", 0, "/tmp/nope-data", "disconnect") == (0, "ok")
+    assert warp_mod.run_cli("p", 0, "/tmp/nope-data", "status") == (0, "ok")
+    assert seen[0][:2] == ["warp-cli", "--accept-tos"]
+    assert seen[0][2] == "connect"
+    assert seen[1] == ["warp-cli", "disconnect"]
+    assert seen[2] == ["warp-cli", "status"]
+
+
 def test_reconnect_bounces_exits_and_repols(monkeypatch):
     pool = _pool()
     pool.instances = [

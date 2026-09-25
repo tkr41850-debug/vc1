@@ -121,11 +121,12 @@ def run_cli(
 ) -> tuple[int, str]:
     """Run warp-cli synchronously for one slot; call from an executor thread.
 
-    ``--accept-tos`` is prepended only for subcommands that accept it.
-    Zero-arg actions (``connect``/``disconnect``/``status``/``--version``)
-    reject any trailing flag, so they are passed through untouched.
+    ``--accept-tos`` is prepended as a global flag for every subcommand
+    except zero-arg actions (``disconnect``/``status``/``--version``), which
+    reject any flag. ``connect`` keeps the flag: warp-cli ≥2026.7 fails a
+    bare connect with rc=1 "Please accept the WARP Terms of Service".
     """
-    if args[:1] not in (("--accept-tos",), ("connect",), ("disconnect",), ("status",)):
+    if args[:1] not in (("--accept-tos",), ("disconnect",), ("status",)):
         args = ("--accept-tos", *args)
     try:
         proc = subprocess.run(  # noqa: PLW1510
@@ -591,10 +592,9 @@ class WarpPool:
         # Disconnected(Manual) into the MASQUE handshake; without it the
         # tunnel only starts if some other client flips always-on first
         # (live finding: ride2's daemon sat until an unrelated SetAlwaysOn).
-        # Note: the bare `connect` subcommand needs no --accept-tos, and
-        # run_cli would inject it anyway; pass it bare so the daemon observes
-        # exactly `warp-cli connect`. Log rc!=0 — a quiet failure here
-        # leaves the slot Disconnected(Manual) forever.
+        # run_cli prepends the global --accept-tos (bare connect fails with
+        # rc=1 ToS error on warp-cli ≥2026.7). Log rc!=0 — a quiet failure
+        # here leaves the slot Disconnected(Manual) forever.
         rc, out = await self._cli(slot, "connect")
         if rc != 0:
             log.warning(
