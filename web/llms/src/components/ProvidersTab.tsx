@@ -70,6 +70,14 @@ function DebugModal({
   };
 
   useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  useEffect(() => {
     let cancelled = false;
     api
       .providerHealth(provider.id)
@@ -136,7 +144,7 @@ function DebugModal({
               </button>
             )}
             <button className="text-sm text-gray-600 hover:underline" onClick={onClose}>
-              Close
+              Close (esc)
             </button>
           </div>
         </div>
