@@ -72,7 +72,10 @@ def test_responses_egress_prompt_cache_key_matches_session(app_client):
 
 
 def test_anonymous_instructions_lead_with_canonical_prefix(app_client):
-    from llms.proxy.zen_prompts import SEAM, TITLE_PREFIX
+    # System text without tools rides the agent prompt (title is only for
+    # bare single-shots).
+    from llms.proxy.zen_prompts import SEAM
+    from llms.proxy.zen_tools import GENUINE_TOOLS
 
     tc, seen = app_client
     r = tc.post(
@@ -86,8 +89,162 @@ def test_anonymous_instructions_lead_with_canonical_prefix(app_client):
     )
     assert r.status_code == 200
     sent = seen["json"]["instructions"]
-    assert sent.startswith(TITLE_PREFIX)
+    assert sent.startswith("You are OpenCode")
     assert sent.endswith(SEAM + "Be brief.")
+    assert [t["name"] for t in seen["json"]["tools"]] == [
+        t["name"] for t in GENUINE_TOOLS
+    ]
+
+
+def test_anonymous_bare_single_uses_title_without_tools(app_client):
+    from llms.proxy.zen_prompts import TITLE_PREFIX
+
+    tc, seen = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 200
+    assert seen["json"]["instructions"] == TITLE_PREFIX
+    assert "tools" not in seen["json"]
+
+
+def test_anonymous_dialogue_without_tools_gets_agent_shape(app_client):
+    from llms.proxy.zen_tools import GENUINE_TOOLS
+
+    tc, seen = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={
+            "model": "muse-spark-1.3-contributor-free",
+            "input": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": "again"},
+            ],
+        },
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 200
+    assert seen["json"]["instructions"].startswith("You are OpenCode")
+    assert [t["name"] for t in seen["json"]["tools"]] == [
+        t["name"] for t in GENUINE_TOOLS
+    ]
+
+
+def test_anonymous_tooled_turn_sends_genuine_superset(app_client):
+    from llms.proxy.zen_tools import GENUINE_TOOLS
+
+    tc, seen = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={
+            "model": "muse-spark-1.3-contributor-free",
+            "instructions": "Be brief.",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "bash",
+                    "description": "run",
+                    "parameters": {"type": "object"},
+                }
+            ],
+        },
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 200
+    sent_tools = seen["json"]["tools"]
+    assert [t["name"] for t in sent_tools[: len(GENUINE_TOOLS)]] == [
+        t["name"] for t in GENUINE_TOOLS
+    ]
+    assert sent_tools[-1]["name"] == "bash"
+    assert seen["json"]["instructions"].startswith("You are OpenCode")
+    assert "Be brief." in seen["json"]["instructions"]
+    assert "Muse Spark" in seen["json"]["instructions"]
+
+
+def test_steering_redirects_genuine_calls(tmp_path):
+    """A genuine tool call is answered with a redirect and re-requested."""
+    import json as _json
+
+    import httpx
+
+    from tests.conftest import (
+        TEST_HEADERS,
+        TEST_SECRET,
+        build_app_client,
+        make_settings,
+    )
+
+    calls: list = []
+
+    async def handler(request):
+        payload = _json.loads(request.content.decode())
+        calls.append(payload)
+        if len(calls) == 1:
+            body = (
+                'data: {"type":"response.output_item.added","output_index":1,'
+                '"item":{"id":"call_shell1","type":"function_call","name":"shell",'
+                '"arguments":"{}"}}\n\n'
+                'data: {"type":"response.function_call_arguments.delta",'
+                '"output_index":1,"item_id":"call_shell1","delta":"{}"}\n\n'
+                'data: {"type":"response.function_call_arguments.done",'
+                '"output_index":1,"item_id":"call_shell1","arguments":"{}"}\n\n'
+                'data: {"type":"response.completed","response":{"status":"completed",'
+                '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+            )
+        else:
+            body = (
+                'data: {"type":"response.output_text.delta","delta":"done"}\n\n'
+                'data: {"type":"response.completed","response":{"status":"completed",'
+                '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+            )
+        return httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    with build_app_client(
+        make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "hi",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "bash",
+                        "description": "run",
+                        "parameters": {"type": "object"},
+                    }
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+        assert r.status_code == 200
+        assert len(calls) == 2
+        followup = calls[1]
+        outputs = [
+            i
+            for i in followup["input"]
+            if isinstance(i, dict) and i.get("type") == "function_call_output"
+        ]
+        assert outputs and "bash" in outputs[0]["output"]
+        texts = [
+            p.get("text", "")
+            for m in r.json().get("output", [])
+            if m.get("type") == "message"
+            for p in m.get("content", [])
+        ]
+        assert "".join(texts) == "done"
 
 
 def _stream_seen_client(mock_upstream, tmp_path):

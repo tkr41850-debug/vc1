@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import time
 
 from fastapi import Request
@@ -57,7 +58,8 @@ from llms.proxy.translate_response import (
 )
 from llms.proxy.zen_fingerprint import note_free_tier_error
 from llms.proxy.zen_headers import build_zen_headers, stable_session_id
-from llms.proxy.zen_prompts import SEAM, TITLE_PREFIX
+from llms.proxy.zen_prompts import META_TEXT, SEAM, TITLE_PREFIX
+from llms.proxy.zen_tools import GENUINE_TOOLS
 
 logger = setup_logging()
 
@@ -109,6 +111,97 @@ def _synthesize_for(ingress: str, egress: str, model: str):
         )
 
     return run
+
+
+STEER_MAX_ITERS = int(os.getenv("ZEN_STEER_MAX_ITERS", "3"))
+
+
+def _genuine_calls_in(response: Response, client_names: set[str]) -> list[dict]:
+    """Assistant function_calls not in the client set (steer candidates)."""
+    if not isinstance(response, JSONResponse) or response.status_code >= 400:
+        return []
+    try:
+        payload = json.loads(response.body.decode())
+    except Exception:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    calls = []
+    for item in payload.get("output", []) or []:
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "function_call"
+            and item.get("name") not in client_names
+        ):
+            calls.append(item)
+    return calls
+
+
+async def _steer_genuine_calls(
+    response: Response,
+    *,
+    client,
+    url: str,
+    headers: dict,
+    outbound: dict,
+    synthesize,
+    trace_id: str,
+    client_names: set[str],
+) -> tuple[Response, dict]:
+    """Answer genuine tool calls with a redirect error and re-request.
+
+    Only for non-streaming downstream (streaming passes calls through —
+    mid-stream steering is a follow-up). Bounded; usage attributes the
+    final turn only.
+    """
+    for _ in range(STEER_MAX_ITERS):
+        calls = _genuine_calls_in(response, client_names)
+        if not calls:
+            break
+        names = sorted({str(c.get("name", "")) for c in calls})
+        logger.info(
+            "[%s] steering genuine tool call(s) %s back to client tools",
+            trace_id,
+            names,
+        )
+        followups: list = []
+        for call in calls:
+            call_id = str(call.get("call_id") or call.get("id") or "")
+            followups.append(
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": str(call.get("name", "")),
+                    "arguments": str(call.get("arguments", "")),
+                }
+            )
+            followups.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": (
+                        f"Tool '{call.get('name', '')}' is not available in "
+                        f"this session."
+                        + (
+                            f" Use one of these tools instead: "
+                            f"{', '.join(sorted(client_names))}."
+                            if client_names
+                            else ""
+                        )
+                        + " If none fits, answer directly without calling a tool."
+                    ),
+                }
+            )
+        outbound = dict(outbound, input=list(outbound.get("input", [])) + followups)
+        response = await forward(
+            client,
+            url,
+            headers,
+            outbound,
+            trace_id,
+            synthesize_json=synthesize,
+        )
+    return response, outbound
 
 
 def _note_free_tier_error(
@@ -238,13 +331,29 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     if egress == "responses":
         outbound["prompt_cache_key"] = session_id
         if not settings.zen_api_key:
-            # Anonymous free tier similarity-gates instructions against
-            # genuine prompts: lead with the canonical prefix, keep client
-            # text after the seam (verified live; keyed keeps fidelity).
+            # Anonymous free tier matches whole shapes (bisected live):
+            # bare single-shots ride the title prefix with no tools key;
+            # anything richer (client tools/system, dialogue) rides the
+            # agent prompt with the genuine tool set plus client extras.
+            # Keyed operators keep exact fidelity.
+            client_tools = outbound.get("tools") or []
             original = outbound.get("instructions") or ""
-            outbound["instructions"] = (
-                TITLE_PREFIX if not original else TITLE_PREFIX + SEAM + original
+            is_bare_single = (
+                not client_tools
+                and not original
+                and len(outbound.get("input", [])) <= 1
             )
+            if is_bare_single:
+                outbound["instructions"] = TITLE_PREFIX
+            else:
+                model_name = (
+                    "Muse Glimmer" if "muse-glimmer" in req.model else "Muse Spark"
+                )
+                lead = META_TEXT.replace("{{MODEL_NAME}}", model_name)
+                outbound["instructions"] = (
+                    lead if not original else lead + SEAM + original
+                )
+                outbound["tools"] = list(GENUINE_TOOLS) + list(client_tools)
     bucket = bucket_for(affinity, req.model, settings.num_buckets, secret_key)
     table = request.app.state.bucket_table
     slot = table.slot_for(bucket)
@@ -368,6 +477,11 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                     count_request=False,
                 )
 
+    synthesize = (
+        _synthesize_for(ingress, egress, req.model)
+        if outbound.get("stream") is not True and not settings.zen_api_key
+        else None
+    )
     response = await forward(
         client,
         url,
@@ -376,17 +490,27 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         trace_id,
         convert=_convert_for(ingress, egress, req.model),
         translate_stream=_stream_for(ingress, egress, req.model),
-        synthesize_json=(
-            _synthesize_for(ingress, egress, req.model)
-            if outbound.get("stream") is not True and not settings.zen_api_key
-            else None
-        ),
+        synthesize_json=synthesize,
         via_warp=via_warp,
         # Usage is sniffed from upstream (egress-dialect) bytes; identical
         # for passthrough (ingress == egress) and required for translate.
         stream_ingress=egress if outbound.get("stream") is True else None,
         stream_usage_sink=stream_usage_cb,
     )
+    if synthesize is not None and egress == "responses":
+        # Steer any non-client tool call (genuine or hallucinated) back:
+        # with client tools list them, otherwise demand a direct answer.
+        client_names = {t.name for t in req.tools if t.name}
+        response, outbound = await _steer_genuine_calls(
+            response,
+            client=client,
+            url=url,
+            headers=headers,
+            outbound=outbound,
+            synthesize=synthesize,
+            trace_id=trace_id,
+            client_names=client_names,
+        )
     elapsed_ms = (time.monotonic() - started) * 1000.0
     _note_free_tier_error(response, settings, trace_id)
     stream_id = None

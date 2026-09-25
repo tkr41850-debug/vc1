@@ -137,9 +137,12 @@ one slot.
 plus `Authorization: Bearer <ZEN_API_KEY>` when the operator key is set
 (`Bearer public` for the anonymous free tier — required, omitting it 403s).
 The responses body carries `prompt_cache_key` equal to the session id.
-Anonymous responses requests additionally lead `instructions` with the
-canonical prompt prefix (`llms/proxy/zen_prompts.py`, tracked by the
-fingerprint checker) ahead of client text — the free tier gates on it.
+Anonymous responses requests additionally shape `instructions`/tools to
+whole genuine turns (`llms/proxy/zen_prompts.py`, tracked by the
+fingerprint checker): bare single-shots ride the title prefix with no
+tools key; anything richer rides the agent prompt with the genuine tool
+set plus client extras. Non-client tool calls are steered back with a
+redirect error and re-requested (bounded).
 No `x-opencode-request`: genuine v2 omits it and Zen 403s when present.
 `host`, `content-length`, `accept-*`, and harness identity headers are dropped;
 httpx regenerates transport headers. Free-tier Zen access depends on the
