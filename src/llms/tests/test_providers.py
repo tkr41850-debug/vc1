@@ -159,6 +159,31 @@ def test_provider_admin_crud(admin_client, tmp_path):
     assert Store(data_dir=tmp_path).load_keys() is not None
 
 
+def test_provider_admin_updates_models(admin_client):
+    tc, _ = admin_client
+    r = tc.post(
+        "/api/admin/providers",
+        json={
+            "id": "warp-models",
+            "label": "M",
+            "kind": "warp",
+            "exits": 1,
+            "models": ["gpt-*"],
+            "enabled": True,
+        },
+    )
+    assert r.status_code == 201
+    r = tc.put(
+        "/api/admin/providers/warp-models",
+        json={"models": ["claude-*", "muse-spark-*"]},
+    )
+    assert r.status_code == 200
+    providers = tc.get("/api/admin/providers").json()["providers"]
+    entry = next(p for p in providers if p["id"] == "warp-models")
+    assert entry["models"] == ["claude-*", "muse-spark-*"]
+    assert tc.put("/api/admin/providers/nope", json={"models": []}).status_code == 404
+
+
 def test_warp_egress_socks_and_retry_tracking(monkeypatch):
     import asyncio
 

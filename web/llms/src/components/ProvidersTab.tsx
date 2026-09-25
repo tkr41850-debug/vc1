@@ -34,6 +34,8 @@ function DebugModal({
   const [streamError, setStreamError] = useState("");
   const [notice, setNotice] = useState("");
   const [reconnecting, setReconnecting] = useState(false);
+  const [modelsText, setModelsText] = useState(() => provider.models.join("\n"));
+  const [savingModels, setSavingModels] = useState(false);
   const esRef = useRef<EventSource | null>(null);
 
   const shown = live ?? provider;
@@ -67,6 +69,26 @@ function DebugModal({
         setError(e instanceof Error ? e.message : String(e));
       })
       .finally(() => setReconnecting(false));
+  };
+
+  const saveModels = () => {
+    const models = modelsText
+      .split("\n")
+      .map((m) => m.trim())
+      .filter(Boolean);
+    setSavingModels(true);
+    setNotice("");
+    api
+      .updateProvider(provider.id, { models })
+      .then(() => {
+        setNotice(`saved ${models.length} model pattern(s)`);
+        refresh();
+      })
+      .catch((e) => {
+        if (e instanceof ApiError && e.status === 401) return onAuthError();
+        setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => setSavingModels(false));
   };
 
   useEffect(() => {
@@ -185,6 +207,24 @@ function DebugModal({
             )}
           </tbody>
         </table>
+        <div className="mb-4">
+          <h3 className="mb-1 text-sm font-medium text-gray-600">
+            Models (one pattern per line, * = prefix)
+          </h3>
+          <textarea
+            className="mb-2 w-full rounded border px-2 py-1 font-mono text-xs"
+            rows={Math.min(8, Math.max(2, shown.models.length + 1))}
+            value={modelsText}
+            onChange={(e) => setModelsText(e.target.value)}
+          />
+          <button
+            className="rounded bg-blue-600 px-2 py-1 text-xs text-white hover:bg-blue-700 disabled:opacity-50"
+            onClick={saveModels}
+            disabled={savingModels}
+          >
+            {savingModels ? "saving…" : "save models"}
+          </button>
+        </div>
         {debug && Object.keys(debug).length > 0 && (
           <>
             <h3 className="mb-1 text-sm font-medium text-gray-600">Pool debug</h3>
