@@ -15,6 +15,7 @@ def main() -> int:
     try:
         with running_proxy(
             PORT,
+            os.getenv("PROXY_LOG", "/tmp/deepseek-probe-proxy.log"),
             data_dir=os.getenv("PROBE_DATA_DIR", "/tmp/dsh-probe-data"),
             probe_secret=os.getenv("PROBE_SECRET"),
         ) as (_, secret):
