@@ -129,7 +129,7 @@ probe-dsh:
     #!/usr/bin/env bash
     set -u
     here="."
-    cd "$here" && uv run --with deepseek-harness-sdk python scripts/dsh_headless_probe.py
+    cd "$here" && uv run --with deepseek-harness-sdk --with deepseek-harness-runtime-bin python scripts/dsh_headless_probe.py
 
 probe-claude:
     #!/usr/bin/env bash
