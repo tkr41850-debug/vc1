@@ -127,8 +127,9 @@ def test_no_binary_stays_unhealthy_no_crash(monkeypatch, tmp_path):
 
 
 def test_run_cli_prepends_tos_for_connect(monkeypatch):
-    """`connect` must carry the global --accept-tos (warp-cli ≥2026.7
-    fails a bare connect with rc=1 ToS error); disconnect/status stay bare."""
+    """Every invocation carries the global --accept-tos (warp-cli ≥2026.7
+    answers bare invocations — including zero-arg connect/disconnect/
+    status — with rc=1 ToS error when the slot state lacks acceptance)."""
     seen: list = []
 
     class FakeProc:
@@ -144,10 +145,14 @@ def test_run_cli_prepends_tos_for_connect(monkeypatch):
     assert warp_mod.run_cli("p", 0, "/tmp/nope-data", "connect") == (0, "ok")
     assert warp_mod.run_cli("p", 0, "/tmp/nope-data", "disconnect") == (0, "ok")
     assert warp_mod.run_cli("p", 0, "/tmp/nope-data", "status") == (0, "ok")
-    assert seen[0][:2] == ["warp-cli", "--accept-tos"]
-    assert seen[0][2] == "connect"
-    assert seen[1] == ["warp-cli", "disconnect"]
-    assert seen[2] == ["warp-cli", "status"]
+    assert warp_mod.run_cli("p", 0, "/tmp/nope-data", "--accept-tos", "status") == (
+        0,
+        "ok",
+    )
+    assert seen[0][:3] == ["warp-cli", "--accept-tos", "connect"]
+    assert seen[1][:3] == ["warp-cli", "--accept-tos", "disconnect"]
+    assert seen[2][:3] == ["warp-cli", "--accept-tos", "status"]
+    assert seen[3][:3] == ["warp-cli", "--accept-tos", "status"]
 
 
 def test_reconnect_bounces_exits_and_repols(monkeypatch):

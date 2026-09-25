@@ -121,12 +121,14 @@ def run_cli(
 ) -> tuple[int, str]:
     """Run warp-cli synchronously for one slot; call from an executor thread.
 
-    ``--accept-tos`` is prepended as a global flag for every subcommand
-    except zero-arg actions (``disconnect``/``status``/``--version``), which
-    reject any flag. ``connect`` keeps the flag: warp-cli ≥2026.7 fails a
-    bare connect with rc=1 "Please accept the WARP Terms of Service".
+    ``--accept-tos`` is prepended as a global flag on every invocation
+    (unless already present): warp-cli ≥2026.7 answers bare invocations —
+    including zero-arg ``connect``/``disconnect``/``status`` — with rc=1
+    "Please accept the WARP Terms of Service" when the slot state hasn't
+    recorded acceptance. The global (leading) position parses on every
+    subcommand; only a trailing flag would be rejected.
     """
-    if args[:1] not in (("--accept-tos",), ("disconnect",), ("status",)):
+    if args[:1] != ("--accept-tos",):
         args = ("--accept-tos", *args)
     try:
         proc = subprocess.run(  # noqa: PLW1510
