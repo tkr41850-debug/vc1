@@ -103,6 +103,106 @@ def test_responses_builtin_tools_dropped_on_chat_egress(app_client):
     assert "tools" not in seen["json"]
 
 
+OC_HEADERS = dict(
+    TEST_HEADERS,
+    **{
+        "User-Agent": "opencode/latest/2.0.12/cli",
+        "x-opencode-client": "cli",
+        "x-opencode-project": "global",
+        "x-opencode-session": "ses_abcdef1234567890abcdefghij12",
+    },
+)
+
+
+def test_genuine_opencode_responses_passthrough(app_client):
+    # Genuine opencode already carries the exact wire identity: its
+    # tools must not be duplicated and instructions pass untouched.
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+
+    tc, seen = app_client
+    genuine = [
+        {"type": "function", "name": n, "description": "d", "parameters": {}}
+        for n in sorted(GENUINE_TOOL_NAMES)
+    ]
+    r = tc.post(
+        "/v1/responses",
+        json={
+            "model": "muse-spark-1.3-contributor-free",
+            "instructions": "You are opencode.",
+            "input": "hi",
+            "tools": genuine,
+        },
+        headers=OC_HEADERS,
+    )
+    assert r.status_code == 200
+    assert seen["url"].endswith("/responses")
+    assert seen["json"]["instructions"] == "You are opencode."
+    names = [t.get("name") for t in seen["json"]["tools"]]
+    assert sorted(names) == sorted(GENUINE_TOOL_NAMES)
+
+
+def test_genuine_opencode_chat_passthrough(app_client):
+    # Genuine system prompt must not gain the TITLE_PREFIX lead.
+    tc, seen = app_client
+    r = tc.post(
+        "/v1/chat/completions",
+        json={
+            "model": "mimo-v2.5-free",
+            "messages": [
+                {"role": "system", "content": "You are opencode."},
+                {"role": "user", "content": "hi"},
+            ],
+        },
+        headers=OC_HEADERS,
+    )
+    assert r.status_code == 200
+    assert seen["json"]["messages"][0] == {
+        "role": "system",
+        "content": "You are opencode.",
+    }
+
+
+def test_nongenuine_overlapping_tools_deduped(app_client):
+    # A third-party client reusing a genuine tool name keeps the
+    # genuine definition once; true extras still append.
+    tc, seen = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={
+            "model": "muse-spark-1.3-contributor-free",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "read",
+                    "description": "mine",
+                    "parameters": {},
+                },
+                {
+                    "type": "function",
+                    "name": "mine",
+                    "description": "extra",
+                    "parameters": {},
+                },
+            ],
+        },
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 200
+    tools = seen["json"]["tools"]
+    assert [t.get("name") for t in tools].count("read") == 1
+    assert tools[-1]["name"] == "mine"
+
+
+def test_is_genuine_opencode_detection():
+    from llms.proxy.pipeline import is_genuine_opencode
+
+    assert is_genuine_opencode({"user-agent": "opencode/latest/2.0.12/cli"})
+    assert is_genuine_opencode({"x-opencode-client": "cli"})
+    assert not is_genuine_opencode({"user-agent": "claude-cli/2.1.0"})
+    assert not is_genuine_opencode({})
+
+
 def test_same_dialect_passes_through_untouched(app_client):
     tc, seen = app_client
     r = tc.post(

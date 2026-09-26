@@ -81,6 +81,12 @@ instead of failing with a billing 401. One-shot alternative without touching
 
 ## Other consumers
 
+Genuine opencode (sending `opencode/` UA or `x-opencode-client` headers)
+passes through unmangled on the anonymous tier: no tool-set injection
+(its 12 tools already match the gate) and no sysprompt prefixing.
+Third-party clients keep the shaping (tool injection + canonical chat
+system lead) that the free-tier gate requires.
+
 ```sh
 just llms probe        # OpenAI SDK → Responses → Muse Spark
 just llms probe-codex  # Codex CLI  → Responses → Muse Spark

@@ -184,6 +184,34 @@ async def _steer_genuine_calls(
     return response, outbound
 
 
+def is_genuine_opencode(headers) -> bool:
+    """True when the downstream client identifies as genuine opencode.
+
+    Genuine opencode already carries the exact wire identity Zen's gate
+    wants (canonical instructions + genuine tool set), so the anonymous
+    shaping below (tool injection, chat sysprompt prefix) must not
+    mangle it — passthrough instead. Other clients (Claude Code, Codex,
+    DSH) send no opencode product headers and keep the shaping.
+    """
+    ua = headers.get("user-agent", "")
+    return ua.startswith("opencode/") or bool(headers.get("x-opencode-client"))
+
+
+def _with_genuine_tools(outbound: dict) -> None:
+    """Prepend the genuine tool set ahead of client extras (no duplicates).
+
+    The free-tier gate fuzzy-matches the set: full genuine + extras
+    passes, bare/renamed 403s. A client tool reusing a genuine name
+    keeps the genuine definition (gate fidelity); extras append after.
+    Mutates outbound in place.
+    """
+    genuine_names = {t.get("name") for t in GENUINE_TOOLS}
+    extras = [
+        t for t in outbound.get("tools", []) or [] if t.get("name") not in genuine_names
+    ]
+    outbound["tools"] = [*GENUINE_TOOLS, *extras]
+
+
 def _ensure_chat_system(outbound: dict) -> None:
     """Lead chat system content with the canonical prefix (anonymous only).
 
@@ -338,16 +366,18 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 session_id = sessions.mint_session_id()
                 session_tracker.remember(secret_key, ref, session_id)
                 is_new_conversation = True
+    genuine = is_genuine_opencode(request.headers)
     if egress == "responses":
         outbound["prompt_cache_key"] = session_id
-        if not settings.zen_api_key:
-            # Anonymous free tier matches the genuine tool set (bisected
-            # live: full set + any client extras passes; bare/renamed
-            # sets 403). Instructions pass through untouched — any
-            # canonical lead steers behavior (title) or costs 9KB (agent).
-            # Keyed operators keep exact fidelity.
-            outbound["tools"] = list(GENUINE_TOOLS) + list(outbound.get("tools") or [])
-    elif egress == "chat" and not settings.zen_api_key:
+        # Anonymous free tier matches the genuine tool set (bisected
+        # live: full set + any client extras passes; bare/renamed
+        # sets 403). Instructions pass through untouched — any
+        # canonical lead steers behavior (title) or costs 9KB (agent).
+        # Keyed operators keep exact fidelity. Genuine opencode
+        # already carries the exact wire identity: passthrough.
+        if not settings.zen_api_key and not genuine:
+            _with_genuine_tools(outbound)
+    elif egress == "chat" and not settings.zen_api_key and not genuine:
         _ensure_chat_system(outbound)
     bucket = bucket_for(affinity, req.model, settings.num_buckets, secret_key)
     table = request.app.state.bucket_table
