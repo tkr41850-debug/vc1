@@ -182,9 +182,22 @@ def test_from_responses_list_input_with_history_and_outputs():
     assert req.stream is True
 
 
-def test_from_responses_rejects_unknown_item():
-    with pytest.raises(ValueError):
-        from_responses({"model": "m", "input": [{"type": "computer_call"}]})
+def test_from_responses_preserves_server_tool_history():
+    # Codex echoes prior outputs (web_search_call, computer_call, ...)
+    # back in the next request's input; 400ing breaks the session,
+    # so they ride through verbatim on the responses leg.
+    for item in (
+        {
+            "type": "web_search_call",
+            "id": "ws_1",
+            "status": "completed",
+            "action": {"type": "search", "query": "rust"},
+        },
+        {"type": "computer_call", "id": "co_1", "status": "completed"},
+    ):
+        req = from_responses({"model": "m", "input": [item]})
+        assert req.messages[0].blocks[0].item == item
+        assert item in to_zen_responses(req)["input"]
 
 
 def test_to_zen_chat_round_trip():

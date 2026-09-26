@@ -10,6 +10,7 @@ from llms.proxy.ir import (
     ImageBlock,
     LlmMessage,
     LlmParams,
+    OpaqueBlock,
     RequestIR,
     TextBlock,
     ThinkingBlock,
@@ -259,7 +260,17 @@ def from_responses(body: dict) -> RequestIR:
                     )
                 )
         else:
-            raise ValueError(f"unsupported responses input item: {kind}")
+            # Server-side history items (web_search_call, file_search_call,
+            # computer_call(_output), item_reference, ...) have no IR
+            # semantics here. Codex echoes prior outputs back verbatim;
+            # 400ing breaks the session, so preserve them for the
+            # responses leg (dropped on chat/messages legs). Upstream
+            # remains the validator for truly invalid items.
+            if not isinstance(item, dict):
+                raise ValueError(f"unsupported responses input item: {kind}")
+            messages.append(
+                LlmMessage(role=ROLE_ASSISTANT, blocks=(OpaqueBlock(dict(item)),))
+            )
     tools = tuple(
         _responses_tool_to_ir(t)
         for t in body.get("tools", [])
@@ -500,6 +511,8 @@ def to_zen_responses(req: RequestIR) -> dict:
                         "output": b.output,
                     }
                 )
+            elif isinstance(b, OpaqueBlock):
+                body["input"].append(dict(b.item))
         if content:
             body["input"].append(
                 {"type": "message", "role": msg.role, "content": content}
@@ -570,6 +583,10 @@ def responses_output_to_ir_messages(output: list) -> tuple:
                         ),
                     ),
                 )
+            )
+        elif kind not in ("message", "reasoning"):
+            messages.append(
+                LlmMessage(role=ROLE_ASSISTANT, blocks=(OpaqueBlock(dict(item)),))
             )
     return tuple(messages)
 
@@ -656,6 +673,8 @@ def ir_messages_to_responses_output(messages: tuple) -> list:
                         "arguments": b.arguments,
                     }
                 )
+            elif isinstance(b, OpaqueBlock):
+                output.append(dict(b.item))
     return output
 
 
@@ -832,6 +851,10 @@ def to_zen_messages(req: RequestIR) -> dict:
                         "content": b.output,
                     }
                 )
+            # OpaqueBlock (web_search_call et al.): no messages-leg
+            # equivalent; dropped below via the empty-parts guard.
+        if not parts:
+            continue
         if len(parts) == 1 and parts[0]["type"] == "text":
             content = parts[0]["text"]
         else:

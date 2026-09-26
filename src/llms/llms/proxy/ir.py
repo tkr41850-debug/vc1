@@ -32,6 +32,19 @@ class ThinkingBlock:
 
 
 @dataclass(frozen=True)
+class OpaqueBlock:
+    """Raw passthrough item (e.g. server-side tool history like web_search_call).
+
+    Codex/OpenAI clients echo prior response outputs (web_search_call,
+    file_search_call, ...) back in the next request's input. The proxy
+    has no IR semantics for these, so they ride through verbatim on the
+    responses leg and are dropped on chat/messages legs.
+    """
+
+    item: dict
+
+
+@dataclass(frozen=True)
 class LlmMessage:
     role: str
     blocks: tuple = ()

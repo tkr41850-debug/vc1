@@ -43,6 +43,36 @@ def test_responses_ingress_routes_mimo_to_chat(app_client):
     assert body["status"] == "completed"
 
 
+def test_responses_web_search_history_forwards_verbatim(app_client):
+    # Codex session continuation: prior web_search_call output echoed
+    # back in input must not 400; it forwards verbatim upstream.
+    tc, seen = app_client
+    ws = {
+        "type": "web_search_call",
+        "id": "ws_123",
+        "status": "completed",
+        "action": {"type": "search", "query": "rust async"},
+    }
+    r = tc.post(
+        "/v1/responses",
+        json={
+            "model": "muse-spark-1.3-contributor-free",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}],
+                },
+                ws,
+            ],
+        },
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 200
+    assert seen["url"].endswith("/responses")
+    assert ws in seen["json"]["input"]
+
+
 def test_same_dialect_passes_through_untouched(app_client):
     tc, seen = app_client
     r = tc.post(
