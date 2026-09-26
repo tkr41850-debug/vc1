@@ -213,6 +213,17 @@ def test_web_search_dropped_on_chat_endpoint():
     assert "tools" not in to_zen_chat(only_search)
 
 
+def test_messages_file_id_image_round_trips():
+    block = {"type": "image", "source": {"type": "file_id", "file_id": "fil_123"}}
+    req = from_messages(
+        {"model": "m", "messages": [{"role": "user", "content": [block]}]}
+    )
+    opaque = req.messages[0].blocks[0]
+    assert opaque.part is True
+    assert opaque.item == block
+    assert to_zen_messages(req)["messages"][0]["content"] == [block]
+
+
 def test_messages_thinking_budget_maps_to_effort():
     req = from_messages(
         {

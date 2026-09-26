@@ -11,6 +11,10 @@ class TextBlock:
 @dataclass(frozen=True)
 class ImageBlock:
     url: str
+    # Files-API reference when the client passed file_id instead of bytes
+    # (responses input_image / messages file_id source). Round-trips on
+    # legs that support file references; placeholder elsewhere.
+    file_id: str = ""
 
 
 @dataclass(frozen=True)

@@ -190,7 +190,13 @@ def _responses_content_to_blocks(content, role: str = "user") -> list:
         if kind in ("input_text", "output_text"):
             blocks.append(TextBlock(part.get("text", "")))
         elif kind == "input_image":
-            blocks.append(ImageBlock(str(part.get("image_url", ""))))
+            url = str(part.get("image_url") or "")
+            file_id = str(part.get("file_id") or "")
+            # file_id-only references (Files API) keep the id; neither
+            # present means a meaningless part — drop it rather than
+            # emitting an empty image_url upstream.
+            if url or file_id:
+                blocks.append(ImageBlock(url, file_id))
         elif kind == "input_file":
             # File bytes were never proxied; keep the turn alive with a
             # named placeholder instead of 400ing the session.
@@ -366,7 +372,14 @@ def to_zen_chat(req: RequestIR) -> dict:
             elif isinstance(b, ThinkingBlock):
                 thinking.append(b.text)
             elif isinstance(b, ImageBlock):
-                parts.append({"type": "image_url", "image_url": {"url": b.url}})
+                if b.url:
+                    parts.append({"type": "image_url", "image_url": {"url": b.url}})
+                elif b.file_id:
+                    # Chat completions cannot reference Files-API ids;
+                    # keep the turn visible instead of dropping it.
+                    parts.append(
+                        {"type": "text", "text": f"[attached file: {b.file_id}]"}
+                    )
             elif isinstance(b, ToolCallBlock):
                 calls.append(
                     {
@@ -525,7 +538,12 @@ def to_zen_responses(req: RequestIR) -> dict:
                     }
                 )
             elif isinstance(b, ImageBlock):
-                content.append({"type": "input_image", "image_url": b.url})
+                if b.url:
+                    content.append({"type": "input_image", "image_url": b.url})
+                elif b.file_id:
+                    content.append({"type": "input_image", "file_id": b.file_id})
+                # Neither: unresolvable reference — drop the part rather
+                # than emitting an empty image_url upstream.
             elif isinstance(b, ToolCallBlock):
                 body["input"].append(
                     {
@@ -630,6 +648,8 @@ def messages_content_to_ir_blocks(content: list) -> tuple:
 
     blocks: list = []
     for part in content:
+        if not isinstance(part, dict):
+            continue
         kind = part.get("type")
         if kind == "text":
             blocks.append(TextBlock(part.get("text", "")))
@@ -641,8 +661,15 @@ def messages_content_to_ir_blocks(content: list) -> tuple:
                     _json.dumps(part.get("input", {})),
                 )
             )
+        elif kind in ("thinking", "redacted_thinking"):
+            blocks.append(
+                ThinkingBlock(str(part.get("thinking", part.get("data", ""))))
+            )
         else:
-            raise ValueError(f"unsupported messages response block: {kind}")
+            # Upstream server blocks (server_tool_use,
+            # web_search_tool_result, ...) and any future block: keep as
+            # part-level opaques instead of 502ing the convert leg.
+            blocks.append(OpaqueBlock(dict(part), part=True))
     return tuple(blocks)
 
 
@@ -739,6 +766,10 @@ def _messages_block_to_ir(part: dict):
             return ImageBlock(
                 f"data:{source.get('media_type', '')};base64,{source.get('data', '')}"
             )
+        if isinstance(source, dict) and source.get("type") == "file_id":
+            # Files-API reference: round-trips verbatim on the messages
+            # leg via part-level opaque; dropped on other legs.
+            return OpaqueBlock(dict(part), part=True)
         raise ValueError(f"unsupported messages image source: {source}")
     if kind == "tool_use":
         import json as _json
@@ -849,6 +880,33 @@ def _messages_tool_from_ir(t: ToolDef) -> dict:
     return tool
 
 
+def _messages_image_part(b: ImageBlock) -> dict | None:
+    """Encode image bytes for the messages leg (Claude source shapes).
+
+    Data URLs split back into base64 sources — the url source only
+    accepts http(s), so stuffing data: bytes there was rejected
+    upstream. file_id references round-trip natively. Empty images
+    (unresolvable references) are dropped by the caller.
+    """
+    if b.url.startswith("data:"):
+        header, _, data = b.url.partition(",")
+        if ";base64" in header and data:
+            media = header[len("data:") :].split(";")[0]
+            return {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media,
+                    "data": data,
+                },
+            }
+    if b.url:
+        return {"type": "image", "source": {"type": "url", "url": b.url}}
+    if b.file_id:
+        return {"type": "image", "source": {"type": "file_id", "file_id": b.file_id}}
+    return None
+
+
 def to_zen_messages(req: RequestIR) -> dict:
     import json as _json
 
@@ -873,7 +931,9 @@ def to_zen_messages(req: RequestIR) -> dict:
             elif isinstance(b, ThinkingBlock):
                 parts.append({"type": "thinking", "thinking": b.text})
             elif isinstance(b, ImageBlock):
-                parts.append({"type": "image", "source": {"type": "url", "url": b.url}})
+                part = _messages_image_part(b)
+                if part is not None:
+                    parts.append(part)
             elif isinstance(b, ToolCallBlock):
                 try:
                     arguments = _json.loads(b.arguments) if b.arguments else {}

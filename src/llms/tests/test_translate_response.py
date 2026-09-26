@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from llms.proxy.translate_response import (
     chat_to_responses,
+    messages_to_chat,
     messages_to_responses,
     responses_to_chat,
     responses_to_messages,
@@ -234,3 +235,25 @@ def test_deltas_fold_into_response_ir():
     call = rir.messages[0].blocks[2]
     assert (call.call_id, call.name) == ("c1", "bash")
     assert "echo hi" in call.arguments
+
+
+def test_messages_thinking_and_server_blocks_convert():
+    # Upstream thinking / server-tool blocks (we enable thinking when the
+    # client sends a budget) must not 502 the convert leg.
+    payload = {
+        "model": "m",
+        "content": [
+            {"type": "thinking", "thinking": "hmm"},
+            {"type": "server_tool_use", "id": "srv_1", "name": "web_search"},
+            {"type": "text", "text": "hi"},
+        ],
+        "stop_reason": "end_turn",
+        "usage": {},
+    }
+    out = messages_to_responses(payload, "m")
+    kinds = [i.get("type") for i in out["output"]]
+    assert "reasoning" in kinds
+    assert "message" in kinds
+    chat = messages_to_chat(payload, "m")
+    assert chat["choices"][0]["message"]["reasoning_content"] == "hmm"
+    assert chat["choices"][0]["message"]["content"] == "hi"

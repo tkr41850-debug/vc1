@@ -280,6 +280,134 @@ def test_from_responses_malformed_item_is_400_not_500():
         from_responses({"model": "m", "input": [42]})
 
 
+IMG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAE"
+    "hQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+IMG_DATAURL = f"data:image/png;base64,{IMG_B64}"
+
+
+def test_image_bytes_survive_all_legs():
+    # Base64 bytes must arrive as bytes on every egress — stuffing a
+    # data: URL into Claude's url source (http(s) only) was rejected
+    # upstream.
+    req = from_chat(
+        {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "see"},
+                        {"type": "image_url", "image_url": {"url": IMG_DATAURL}},
+                    ],
+                }
+            ],
+        }
+    )
+    assert req.messages[0].blocks[1].url == IMG_DATAURL
+    assert to_zen_chat(req)["messages"][0]["content"][1] == {
+        "type": "image_url",
+        "image_url": {"url": IMG_DATAURL},
+    }
+    assert to_zen_responses(req)["input"][0]["content"][1] == {
+        "type": "input_image",
+        "image_url": IMG_DATAURL,
+    }
+    assert to_zen_messages(req)["messages"][0]["content"][1] == {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": IMG_B64},
+    }
+
+
+def test_messages_base64_image_round_trip():
+    req = from_messages(
+        {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": IMG_B64,
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    assert req.messages[0].blocks[0].url == IMG_DATAURL
+    assert to_zen_messages(req)["messages"][0]["content"] == [
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": IMG_B64},
+        }
+    ]
+
+
+def test_http_image_uses_url_source():
+    req = from_chat(
+        {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://x/i.png"},
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    assert to_zen_messages(req)["messages"][0]["content"] == [
+        {"type": "image", "source": {"type": "url", "url": "https://x/i.png"}}
+    ]
+
+
+def test_responses_file_id_image_round_trips():
+    req = from_responses(
+        {
+            "model": "m",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_image", "file_id": "fil_123"}],
+                }
+            ],
+        }
+    )
+    assert req.messages[0].blocks[0].file_id == "fil_123"
+    assert to_zen_responses(req)["input"][0]["content"] == [
+        {"type": "input_image", "file_id": "fil_123"}
+    ]
+    # Chat cannot reference Files-API ids: visible placeholder, no crash.
+    assert to_zen_chat(req)["messages"][-1]["content"] == "[attached file: fil_123]"
+    # Empty image parts (neither url nor id) are dropped, not emitted
+    # as broken empty image_urls.
+    empty = from_responses(
+        {
+            "model": "m",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_image"}],
+                }
+            ],
+        }
+    )
+    assert to_zen_responses(empty)["input"] == []
+
+
 def test_to_zen_chat_round_trip():
     req = from_responses(
         {
