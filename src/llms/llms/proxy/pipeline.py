@@ -24,24 +24,6 @@ from llms.proxy.stream_translate import (
     new_msg_id,
     new_resp_id,
 )
-from llms.proxy.stream_translate import (
-    chat_to_messages as stream_chat_to_messages,
-)
-from llms.proxy.stream_translate import (
-    chat_to_responses as stream_chat_to_responses,
-)
-from llms.proxy.stream_translate import (
-    messages_to_chat as stream_messages_to_chat,
-)
-from llms.proxy.stream_translate import (
-    messages_to_responses as stream_messages_to_responses,
-)
-from llms.proxy.stream_translate import (
-    responses_to_chat as stream_responses_to_chat,
-)
-from llms.proxy.stream_translate import (
-    responses_to_messages as stream_responses_to_messages,
-)
 from llms.proxy.translate import (
     from_chat,
     from_messages,
@@ -81,18 +63,16 @@ def _convert_for(ingress: str, egress: str, model: str):
 def _stream_for(ingress: str, egress: str, model: str):
     if ingress == egress:
         return None
-    translators = {
-        ("chat", "responses"): stream_responses_to_chat,
-        ("responses", "chat"): stream_chat_to_responses,
-        ("messages", "responses"): stream_responses_to_messages,
-        ("responses", "messages"): stream_messages_to_responses,
-        ("chat", "messages"): stream_messages_to_chat,
-        ("messages", "chat"): stream_chat_to_messages,
-    }
-    translate = translators.get((ingress, egress))
-    if translate is None:
+    if (ingress, egress) not in {
+        ("chat", "responses"),
+        ("responses", "chat"),
+        ("messages", "responses"),
+        ("responses", "messages"),
+        ("chat", "messages"),
+        ("messages", "chat"),
+    }:
         return None
-    return lambda lines, trace_id: translate(lines, trace_id, model)
+    return (ingress, egress, model)
 
 
 def _synthesize_for(ingress: str, egress: str, model: str):
@@ -504,7 +484,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         outbound,
         trace_id,
         convert=_convert_for(ingress, egress, req.model),
-        translate_stream=_stream_for(ingress, egress, req.model),
+        translate_dialects=_stream_for(ingress, egress, req.model),
         synthesize_json=synthesize,
         via_warp=via_warp,
         # Usage is sniffed from upstream (egress-dialect) bytes; identical
@@ -824,7 +804,7 @@ def _record_usage(
         return
     if isinstance(response, StreamingResponse):
         # Translate path: usage arrives via stream_usage_sink when the
-        # heartbeat generator finishes (see forward.translate_with_heartbeat).
+        # heartbeat generator finishes (see forward.translate_streaming).
         done = getattr(response, "stream_usage", None)
         if isinstance(done, StreamDone):
             tracker.record(

@@ -191,57 +191,94 @@ async def tap_stream_usage(upstream: httpx.Response, ingress: str, usage_sink=No
     return TappedStream(upstream, ingress, usage_sink)
 
 
-async def translate_with_heartbeat(
+async def translate_streaming(
     upstream: httpx.Response,
-    translate_fn,
+    ingress: str,
+    egress: str,
     trace_id: str,
+    model: str,
     stream_ingress: str | None,
     usage_sink=None,
 ):
-    """Yield SSE pings while upstream collects, then replay translated bytes.
+    """Translate upstream SSE incrementally as frames arrive (pure asyncio).
 
-    The IR stream parsers are synchronous over a full line buffer, so the
-    translate leg can't emit incrementally. Collect in a background task and
-    heartbeat with SSE comments (ignored by clients) until it finishes; then
-    replay the translated events in one burst and hand the sniffed StreamDone
-    to usage_sink (the request itself is counted at response-build time, so
-    the sink must not double-count — same contract as TappedStream).
+    A stateful parser/emitter pair consumes one upstream line at a time,
+    so translated bytes reach the client with true streaming TTFB instead
+    of buffering the whole body. Silence past the heartbeat interval
+    yields SSE comments (ignored by clients). Upstream reads race the
+    timer via a persistent task that is never cancelled on timeout, so
+    slow frames survive intact. No threads: safe under high concurrency.
+
+    Dialect note: the parser reads the UPSTREAM (egress) dialect and the
+    emitter writes the DOWNSTREAM (ingress) dialect.
     """
-    lines: list[str] = []
+    from llms.proxy.ir import StreamDone
+    from llms.proxy.stream_translate import (
+        STREAM_EMITTERS,
+        STREAM_PARSERS,
+        SseFramer,
+    )
 
-    async def _collect() -> None:
-        async for line in upstream.aiter_lines():
-            lines.append(line)
+    parser = STREAM_PARSERS[egress]()
+    emitter = STREAM_EMITTERS[ingress](trace_id, model)
+    framer = SseFramer()
+    seen_done = None
 
-    task = asyncio.create_task(_collect())
+    def _run_payloads(payloads: list[str]) -> list[bytes]:
+        nonlocal seen_done
+        out: list[bytes] = []
+        for payload in payloads:
+            for delta in parser.feed_payload(payload):
+                if isinstance(delta, StreamDone):
+                    seen_done = delta
+                out.extend(emitter.feed_delta(delta))
+        return out
+
+    it = upstream.aiter_lines()
+    read_task: asyncio.Task | None = None
     try:
-        while not task.done():
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=STREAM_HEARTBEAT_S)
-            except TimeoutError:
+        while True:
+            if read_task is None:
+                read_task = asyncio.create_task(anext(it, _END))
+            done_wait, _ = await asyncio.wait({read_task}, timeout=STREAM_HEARTBEAT_S)
+            if not done_wait:
                 yield b": ping\n\n"
-        task.result()
+                continue
+            line = read_task.result()
+            read_task = None
+            if line is _END:
+                break
+            for chunk in _run_payloads(framer.feed(line)):
+                yield chunk
+        for chunk in _run_payloads(framer.finish()):
+            yield chunk
+        terminal = parser.finish()
+        if terminal is not None:
+            if seen_done is None:
+                seen_done = terminal
+            for chunk in emitter.feed_delta(terminal):
+                yield chunk
     except BaseException:
-        if not task.done():
-            task.cancel()
+        if read_task is not None and not read_task.done():
+            read_task.cancel()
         raise
     finally:
         try:
             await upstream.aclose()
         except Exception:
             pass
-    for chunk in translate_fn(lines, trace_id):
-        yield chunk
-    if stream_ingress is not None and usage_sink is not None:
-        try:
-            usage_sink(sniff_stream_usage(lines, stream_ingress))
-        except Exception as exc:
-            logger.debug("translate-path usage sink failed: %s", exc)
+        if usage_sink is not None:
+            try:
+                usage_sink(seen_done)
+            except Exception as exc:
+                logger.debug("translate-path usage sink failed: %s", exc)
 
 
 async def slow_send_stream(
     send_task: asyncio.Task,
-    translate_fn,
+    ingress: str | None,
+    egress: str | None,
+    model: str,
     trace_id: str,
     stream_ingress: str | None,
     usage_sink=None,
@@ -280,9 +317,9 @@ async def slow_send_stream(
             except Exception:
                 pass
         return
-    if translate_fn is not None:
-        async for chunk in translate_with_heartbeat(
-            upstream, translate_fn, trace_id, stream_ingress, usage_sink
+    if ingress is not None and egress is not None:
+        async for chunk in translate_streaming(
+            upstream, ingress, egress, trace_id, model, stream_ingress, usage_sink
         ):
             yield chunk
         return
@@ -317,7 +354,7 @@ async def forward(
     body: dict,
     trace_id: str,
     convert=None,
-    translate_stream=None,
+    translate_dialects: tuple[str, str, str] | None = None,
     synthesize_json=None,
     via_warp: dict | None = None,
     stream_ingress: str | None = None,
@@ -348,10 +385,17 @@ async def forward(
                 asyncio.shield(send_task), timeout=STREAM_HEARTBEAT_S
             )
         except TimeoutError:
+            slow_ingress, slow_egress, slow_model = translate_dialects or (
+                None,
+                None,
+                "",
+            )
             response = StreamingResponse(
                 slow_send_stream(
                     send_task,
-                    translate_stream,
+                    slow_ingress,
+                    slow_egress,
+                    slow_model,
                     trace_id,
                     stream_ingress,
                     stream_usage_sink,
@@ -396,12 +440,15 @@ async def forward(
                 content=content,
                 headers=passthrough_headers(upstream.headers),
             )
-        if translate_stream is not None:
+        if translate_dialects is not None:
+            ingress, egress, model = translate_dialects
             response = StreamingResponse(
-                translate_with_heartbeat(
+                translate_streaming(
                     upstream,
-                    translate_stream,
+                    ingress,
+                    egress,
                     trace_id,
+                    model,
                     stream_ingress,
                     stream_usage_sink,
                 ),

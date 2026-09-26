@@ -242,6 +242,89 @@ def test_steering_redirects_genuine_calls(tmp_path):
         assert "".join(texts) == "done"
 
 
+def test_steering_names_client_tools_in_queued_message(tmp_path):
+    """Steer redirect lists the client's own tools (codex-shaped toolset).
+
+    The follow-up queued message carries function_call + function_call_output
+    with matching call ids, exactly like a normal queued tool result.
+    """
+    import json as _json
+
+    import httpx
+
+    from tests.conftest import (
+        TEST_HEADERS,
+        TEST_SECRET,
+        build_app_client,
+        make_settings,
+    )
+
+    calls: list = []
+
+    async def handler(request):
+        payload = _json.loads(request.content.decode())
+        calls.append(payload)
+        if len(calls) == 1:
+            body = (
+                'data: {"type":"response.output_item.added","output_index":2,'
+                '"item":{"id":"call_read1","type":"function_call","name":"read",'
+                '"arguments":"{}"}}\n\n'
+                'data: {"type":"response.function_call_arguments.delta",'
+                '"output_index":2,"item_id":"call_read1","delta":"{}"}\n\n'
+                'data: {"type":"response.completed","response":{"status":"completed",'
+                '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+            )
+        else:
+            body = (
+                'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+                'data: {"type":"response.completed","response":{"status":"completed",'
+                '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+            )
+        return httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    with build_app_client(
+        make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "read the readme",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "local_shell",
+                        "description": "run shell",
+                        "parameters": {"type": "object"},
+                    },
+                    {
+                        "type": "function",
+                        "name": "read_file",
+                        "description": "read file",
+                        "parameters": {"type": "object"},
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+        assert r.status_code == 200
+        assert len(calls) == 2
+        followup = calls[1]
+        items = [i for i in followup["input"] if isinstance(i, dict)]
+        call = next(i for i in items if i.get("type") == "function_call")
+        output = next(i for i in items if i.get("type") == "function_call_output")
+        assert call["name"] == "read"
+        assert output["call_id"] == call["call_id"] == "call_read1"
+        assert "local_shell, read_file" in output["output"]
+
+
 def _stream_seen_client(mock_upstream, tmp_path):
     from tests.conftest import TEST_SECRET, build_app_client, make_settings
 

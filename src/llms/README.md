@@ -88,6 +88,49 @@ just llms probe-dsh    # DeepSeek harness (chat) → auto-translated to model en
 just llms probe-claude # Claude Code headless (needs a messages-capable model)
 ```
 
+### Codex CLI (free, via Muse Spark)
+
+Codex talks the Responses wire API and streams SSE. Point it at the
+gateway in `~/.codex/config.toml` (create the `sk-` key in the admin UI
+first — needs `just llms up` running):
+
+```toml
+model = "muse-spark-1.3-contributor-free"
+model_provider = "zen-proxy"
+
+[model_providers.zen-proxy]
+name = "zen-proxy"
+base_url = "http://127.0.0.1:8789/v1"
+wire_api = "responses"
+env_key = "OPENAI_API_KEY"
+```
+
+with `export OPENAI_API_KEY="sk-your-key"`. The `env_key` line is load-
+bearing: custom providers only send auth from the env var it names —
+bare `OPENAI_API_KEY` without it sends no `Authorization` header at all
+and every request 401s. Verify: `just llms probe-codex`.
+
+### DeepSeek harness (chat)
+
+The harness speaks OpenAI chat completions and streams (`stream: true`);
+llms translates to the model's native Zen endpoint. Configure in code:
+
+```python
+DeepSeekHarnessConfig(
+    provider="deepseek-official",
+    model="muse-spark-1.3-contributor-free",  # or deepseek-v4-flash-free
+    base_url="http://127.0.0.1:8789/v1",
+    api_key="sk-your-key",
+    profile="sdk-minimal",
+    ...
+)
+```
+
+It also needs the runtime binary next to the SDK:
+`uv run --with deepseek-harness-sdk --with deepseek-harness-runtime-bin
+...` (without it, harness init times out before any HTTP happens).
+Verify: `just llms probe-dsh`.
+
 All requests (including `/v1/models`) must carry an `sk-` secret key from
 `data/keys.yaml` on the header (`Authorization: Bearer sk-...` or
 `x-api-key`), e.g. `curl -H "Authorization: Bearer sk-team1"
