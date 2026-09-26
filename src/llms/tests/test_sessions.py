@@ -81,6 +81,74 @@ def test_chained_turns_reuse_session(mock_upstream, tmp_path):
         assert seen["headers"]["x-opencode-session"] == first_session
 
 
+def test_streaming_chained_turns_reuse_session(tmp_path):
+    """Streaming passthrough chains previous_response_id to the session.
+
+    Streaming legs hand the client the upstream response id; without
+    chaining it at stream end the follow-up fell back to the per-key
+    session and the prompt cache went cold every turn.
+    """
+    import json as _json
+
+    import httpx
+
+    from tests.conftest import (
+        TEST_HEADERS,
+        TEST_SECRET,
+        build_app_client,
+        make_settings,
+    )
+
+    seen_keys: list = []
+
+    async def handler(request):
+        payload = _json.loads(request.content.decode())
+        seen_keys.append(payload.get("prompt_cache_key"))
+        body = (
+            'data: {"type":"response.created",'
+            '"response":{"id":"resp_up1","status":"in_progress"}}\n\n'
+            'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+            'data: {"type":"response.completed","response":{"status":"completed",'
+            '"usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6}}}\n\n'
+        )
+        return httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    with build_app_client(
+        make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        first = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "hi",
+                "stream": True,
+            },
+            headers=TEST_HEADERS,
+        )
+        assert first.status_code == 200
+        assert "resp_up1" in first.text
+        second = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "hi again",
+                "previous_response_id": "resp_up1",
+                "stream": True,
+            },
+            headers=TEST_HEADERS,
+        )
+        assert second.status_code == 200
+    assert len(seen_keys) == 2
+    assert seen_keys[0] and seen_keys[0] == seen_keys[1]
+
+
 def test_warming_fires_for_new_conversation(mock_upstream, tmp_path, monkeypatch):
     """New responses conversations background a title-shaped warming call."""
     import json as _json

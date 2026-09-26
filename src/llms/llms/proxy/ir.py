@@ -136,3 +136,7 @@ class StreamDone:
     output_tokens: int | None = None
     cached_tokens: int | None = None
     reasoning_tokens: int | None = None
+    # Upstream response id sniffed from streamed SSE (same-dialect legs
+    # pass it straight to the client, which echoes it as
+    # previous_response_id). Lets the next turn reuse this session.
+    response_id: str | None = None

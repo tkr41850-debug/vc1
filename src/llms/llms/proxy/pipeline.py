@@ -501,6 +501,24 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                     done.reasoning_tokens,
                     count_request=False,
                 )
+                # Streaming passthrough legs hand the client the upstream
+                # response id, which comes back as previous_response_id:
+                # chain it to this session now (stream end) so the
+                # follow-up turn reuses the session and the prompt cache
+                # stays warm. (JSON bodies record at response time in
+                # _record_conversation; translate legs mint downstream ids
+                # recorded synchronously there.)
+                if done.response_id and session_tracker is not None:
+                    try:
+                        session_tracker.remember(
+                            _key, "chain:" + done.response_id, session_id
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            "[%s] session chain remember failed: %r",
+                            trace_id,
+                            exc,
+                        )
 
     synthesize = (
         _synthesize_for(ingress, egress, req.model)

@@ -170,6 +170,8 @@ class TappedStream:
                 self._record()
 
     def _record(self) -> None:
+        from dataclasses import replace
+
         from llms.proxy.ir import StreamDone
         from llms.proxy.stream_translate import PARSERS
 
@@ -180,6 +182,14 @@ class TappedStream:
                     done = delta
         except Exception as exc:
             logger.debug("stream usage sniff failed: %s", exc)
+        if done is not None:
+            try:
+                rid = _stream_response_id(self._ingress, self._seen)
+            except Exception as exc:
+                logger.debug("stream id sniff failed: %s", exc)
+                rid = None
+            if rid:
+                done = replace(done, response_id=rid)
         try:
             self._sink(done)
         except Exception as exc:
@@ -189,6 +199,43 @@ class TappedStream:
 async def tap_stream_usage(upstream: httpx.Response, ingress: str, usage_sink=None):
     """Build a TappedStream for passthrough responses (see class docs)."""
     return TappedStream(upstream, ingress, usage_sink)
+
+
+def _stream_response_id(ingress: str, seen: list[str]) -> str | None:
+    """Upstream response id sniffed from streamed SSE lines.
+
+    Same-dialect legs pass upstream ids straight to the client, which
+    echoes them back as previous_response_id; capturing the id lets the
+    follow-up turn reuse this session so the prompt cache stays warm.
+    Best-effort: returns None when no id frame is seen.
+    """
+    import json as _json
+
+    for line in seen:
+        text = line.strip()
+        if text.startswith("data:"):
+            text = text[len("data:") :].strip()
+        if not text.startswith("{"):
+            continue
+        try:
+            payload = _json.loads(text)
+        except Exception as exc:
+            logger.debug("stream id sniff skipped non-JSON line: %r", exc)
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if ingress == "responses":
+            resp = payload.get("response")
+            if isinstance(resp, dict) and isinstance(resp.get("id"), str):
+                return resp["id"]
+        elif ingress == "chat":
+            if isinstance(payload.get("id"), str):
+                return payload["id"]
+        elif ingress == "messages":
+            msg = payload.get("message")
+            if isinstance(msg, dict) and isinstance(msg.get("id"), str):
+                return msg["id"]
+    return None
 
 
 async def translate_streaming(
