@@ -95,6 +95,8 @@ def _text_of(content) -> str:
 
 
 def _chat_part_to_block(part: dict):
+    if not isinstance(part, dict):
+        raise ValueError("unsupported chat content part: not an object")  # noqa: TRY004
     kind = part.get("type")
     if kind == "text":
         return TextBlock(part.get("text", ""))
@@ -107,9 +109,23 @@ def _chat_part_to_block(part: dict):
     raise ValueError(f"unsupported chat content part: {kind}")
 
 
+def _chat_tool_to_ir(t: dict) -> ToolDef:
+    fn = t.get("function", {})
+    if not isinstance(fn, dict):
+        fn = {}
+    params = fn.get("parameters", {})
+    return ToolDef(
+        str(fn.get("name", "")),
+        str(fn.get("description", "")),
+        dict(params or {}),
+    )
+
+
 def from_chat(body: dict) -> RequestIR:
     messages: list[LlmMessage] = []
     for msg in body.get("messages", []):
+        if not isinstance(msg, dict):
+            raise ValueError("unsupported chat message: not an object")  # noqa: TRY004
         role = msg.get("role")
         if role not in _CHAT_ROLES:
             raise ValueError(f"unsupported chat role: {role}")
@@ -135,7 +151,11 @@ def from_chat(body: dict) -> RequestIR:
         elif isinstance(content, list):
             blocks.extend(_chat_part_to_block(p) for p in content)
         for call in msg.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                raise ValueError("unsupported tool call: not an object")  # noqa: TRY004
             fn = call.get("function", {})
+            if not isinstance(fn, dict):
+                fn = {}
             if call.get("type", "function") != "function":
                 raise ValueError(f"unsupported tool call type: {call.get('type')}")
             blocks.append(
@@ -147,13 +167,9 @@ def from_chat(body: dict) -> RequestIR:
             )
         messages.append(LlmMessage(role=role, blocks=tuple(blocks)))
     tools = tuple(
-        ToolDef(
-            str(t.get("function", {}).get("name", "")),
-            str(t.get("function", {}).get("description", "")),
-            dict(t.get("function", {}).get("parameters", {})),
-        )
+        _chat_tool_to_ir(t)
         for t in body.get("tools", [])
-        if t.get("type", "function") == "function"
+        if isinstance(t, dict) and t.get("type", "function") == "function"
     )
     return RequestIR(
         model=str(body.get("model", "")),
@@ -168,25 +184,33 @@ def from_chat(body: dict) -> RequestIR:
 def _responses_content_to_blocks(content, role: str = "user") -> list:
     blocks: list = []
     for part in content:
+        if not isinstance(part, dict):
+            raise ValueError("unsupported responses content part: not an object")  # noqa: TRY004
         kind = part.get("type")
         if kind in ("input_text", "output_text"):
             blocks.append(TextBlock(part.get("text", "")))
         elif kind == "input_image":
             blocks.append(ImageBlock(str(part.get("image_url", ""))))
-        else:
-            raise ValueError(f"unsupported responses content part: {kind}")
+        elif kind == "input_file":
+            # File bytes were never proxied; keep the turn alive with a
+            # named placeholder instead of 400ing the session.
+            label = part.get("filename") or part.get("file_id") or "unnamed"
+            blocks.append(TextBlock(f"[attached file: {label}]"))
+        # Unknown future part kinds are dropped (fail-open: a 400 here
+        # would break the whole session; upstream validates fidelity).
     return blocks
 
 
 def _responses_tool_to_ir(t: dict) -> ToolDef:
     if t.get("type", "function") == "function":
+        params = t.get("parameters", {})
         return ToolDef(
             str(t.get("name", "")),
             str(t.get("description", "")),
-            dict(t.get("parameters", {})),
+            dict(params or {}),
         )
     return ToolDef(
-        str(t.get("name", "web_search")),
+        str(t.get("name", "")),
         "",
         {},
         kind=str(t.get("type", "")),
@@ -210,6 +234,10 @@ def from_responses(body: dict) -> RequestIR:
         if isinstance(item, str):
             messages.append(LlmMessage(role=ROLE_USER, blocks=(TextBlock(item),)))
             continue
+        if not isinstance(item, dict):
+            raise ValueError(  # noqa: TRY004
+                f"unsupported responses input item: {type(item).__name__}"
+            )
         kind = item.get("type", "message")
         if kind == "message":
             role = item.get("role", "user")
@@ -266,16 +294,11 @@ def from_responses(body: dict) -> RequestIR:
             # 400ing breaks the session, so preserve them for the
             # responses leg (dropped on chat/messages legs). Upstream
             # remains the validator for truly invalid items.
-            if not isinstance(item, dict):
-                raise ValueError(f"unsupported responses input item: {kind}")
             messages.append(
                 LlmMessage(role=ROLE_ASSISTANT, blocks=(OpaqueBlock(dict(item)),))
             )
     tools = tuple(
-        _responses_tool_to_ir(t)
-        for t in body.get("tools", [])
-        if t.get("type", "function") == "function"
-        or str(t.get("type", "")).startswith("web_search")
+        _responses_tool_to_ir(t) for t in body.get("tools", []) if isinstance(t, dict)
     )
     return RequestIR(
         model=str(body.get("model", "")),
@@ -377,21 +400,23 @@ def to_zen_chat(req: RequestIR) -> dict:
                 out["reasoning_content"] = "\n".join(thinking)
             body["messages"].append(out)
         body["messages"].extend(results)
-    for t in req.tools:
-        if t.kind != "function":
-            raise ValueError(f"tool type {t.kind} not supported on chat endpoint")
+    # Chat completions only support function tools: non-function tools
+    # (web_search, ...) are dropped instead of raising (was an
+    # unhandled 500 for responses/messages clients routed to chat).
     if req.tools:
-        body["tools"] = [
-            {
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                },
-            }
-            for t in req.tools
-        ]
+        function_tools = [t for t in req.tools if t.kind == "function"]
+        if function_tools:
+            body["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    },
+                }
+                for t in function_tools
+            ]
     if req.tool_choice is not None:
         body["tool_choice"] = req.tool_choice
     params = req.params
@@ -452,7 +477,14 @@ def _responses_tool_from_ir(t: ToolDef) -> dict:
         }
     if t.kind.startswith("web_search"):
         return {"type": "web_search"}
-    raise ValueError(f"unsupported tool type for responses endpoint: {t.kind}")
+    # Other built-in tools (file_search, computer, mcp, ...): forward the
+    # definition as-is (fail-open; upstream validates). Raising here was
+    # an unhandled 500 for messages-leg clients routed to responses.
+    tool: dict = {"type": t.kind}
+    if t.name:
+        tool["name"] = t.name
+    tool.update(t.options)
+    return tool
 
 
 def to_zen_responses(req: RequestIR) -> dict:
@@ -511,7 +543,9 @@ def to_zen_responses(req: RequestIR) -> dict:
                         "output": b.output,
                     }
                 )
-            elif isinstance(b, OpaqueBlock):
+            elif isinstance(b, OpaqueBlock) and not b.part:
+                # Top-level history items round-trip verbatim; part-level
+                # (messages-dialect) opaques have no responses equivalent.
                 body["input"].append(dict(b.item))
         if content:
             body["input"].append(
@@ -692,6 +726,8 @@ def _messages_text_of(content) -> str:
 
 
 def _messages_block_to_ir(part: dict):
+    if not isinstance(part, dict):
+        raise ValueError("unsupported messages content block: not an object")  # noqa: TRY004
     kind = part.get("type")
     if kind == "text":
         return TextBlock(part.get("text", ""))
@@ -720,7 +756,12 @@ def _messages_block_to_ir(part: dict):
         return ThinkingBlock(str(part.get("thinking", "")))
     if kind == "redacted_thinking":
         return ThinkingBlock(str(part.get("data", "")))
-    raise ValueError(f"unsupported messages content block: {kind}")
+    # Server-side history blocks (server_tool_use, web_search_tool_result,
+    # code_execution_tool_result, ...): Claude Code echoes prior turns
+    # back verbatim; 400ing breaks the session, so they ride through as
+    # part-level opaques (verbatim on the messages leg, dropped
+    # elsewhere). Upstream validates truly invalid blocks.
+    return OpaqueBlock(dict(part), part=True)
 
 
 def from_messages(body: dict) -> RequestIR:
@@ -731,6 +772,8 @@ def from_messages(body: dict) -> RequestIR:
             LlmMessage(role=ROLE_SYSTEM, blocks=(TextBlock(_messages_text_of(system)),))
         )
     for msg in body.get("messages", []):
+        if not isinstance(msg, dict):
+            raise ValueError("unsupported messages message: not an object")  # noqa: TRY004
         role = msg.get("role")
         if role not in (ROLE_USER, ROLE_ASSISTANT, ROLE_SYSTEM):
             raise ValueError(f"unsupported messages role: {role}")
@@ -753,7 +796,7 @@ def from_messages(body: dict) -> RequestIR:
                 )
             ),
             str(t.get("description", "")),
-            dict(t.get("input_schema", {})),
+            dict(t.get("input_schema", {}) or {}),
             kind=str(t.get("type", "function")),
             options={
                 k: v
@@ -762,6 +805,7 @@ def from_messages(body: dict) -> RequestIR:
             },
         )
         for t in body.get("tools", [])
+        if isinstance(t, dict)
     )
     choice = body.get("tool_choice")
     if isinstance(choice, dict):
@@ -851,6 +895,11 @@ def to_zen_messages(req: RequestIR) -> dict:
                         "content": b.output,
                     }
                 )
+            elif isinstance(b, OpaqueBlock) and b.part:
+                # Part-level (messages-dialect) history round-trips
+                # verbatim; item-level (responses-dialect) opaques have no
+                # messages equivalent and fall into the empty-parts guard.
+                parts.append(dict(b.item))
             # OpaqueBlock (web_search_call et al.): no messages-leg
             # equivalent; dropped below via the empty-parts guard.
         if not parts:

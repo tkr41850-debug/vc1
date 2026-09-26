@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import pytest
-
 from llms.proxy.translate import (
     from_chat,
     from_messages,
     from_responses,
+    to_zen_chat,
     to_zen_messages,
     to_zen_responses,
 )
@@ -66,14 +65,29 @@ def test_from_messages_tool_use_and_result():
     assert req.tool_choice == "required"
 
 
-def test_from_messages_rejects_unknown_block():
-    with pytest.raises(ValueError):
-        from_messages(
-            {
-                "model": "m",
-                "messages": [{"role": "user", "content": [{"type": "nonsense"}]}],
-            }
-        )
+def test_from_messages_preserves_server_tool_blocks():
+    # Claude Code echoes prior server-side blocks back verbatim;
+    # 400ing breaks the session, so they ride through as part-level
+    # opaques (verbatim on the messages leg, dropped elsewhere).
+    block = {"type": "server_tool_use", "id": "srv_1", "name": "web_search"}
+    req = from_messages(
+        {
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hi"}, block]}
+            ],
+        }
+    )
+    opaque = req.messages[0].blocks[1]
+    assert opaque.part is True
+    assert opaque.item == block
+    rebuilt = to_zen_messages(req)
+    assert block in rebuilt["messages"][0]["content"]
+    # Cross-dialect: dropped, not crashed.
+    assert to_zen_responses(req)["input"][0]["content"] == [
+        {"type": "input_text", "text": "hi"}
+    ]
+    assert to_zen_chat(req)["messages"][-1]["content"] == "hi"
 
 
 def test_from_messages_accepts_system_role_in_messages():
@@ -158,20 +172,45 @@ def test_web_search_tool_kind_preserved():
     ]
 
 
-def test_web_search_rejected_on_chat_endpoint():
-    import pytest
-
+def test_web_search_dropped_on_chat_endpoint():
+    # Chat completions have no web_search tool: the definition is
+    # dropped (was an unhandled 500) while function tools survive.
     from llms.proxy.translate import to_zen_chat
 
     req = from_messages(
         {
             "model": "m",
             "messages": [{"role": "user", "content": "hi"}],
+            "tools": [
+                {"type": "web_search_20260205", "name": "web_search"},
+                {
+                    "name": "bash",
+                    "description": "run",
+                    "input_schema": {"type": "object"},
+                },
+            ],
+        }
+    )
+    body = to_zen_chat(req)
+    assert body["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "description": "run",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+
+    only_search = from_messages(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
             "tools": [{"type": "web_search_20260205", "name": "web_search"}],
         }
     )
-    with pytest.raises(ValueError):
-        to_zen_chat(req)
+    assert "tools" not in to_zen_chat(only_search)
 
 
 def test_messages_thinking_budget_maps_to_effort():

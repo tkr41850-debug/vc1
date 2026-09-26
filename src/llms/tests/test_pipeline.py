@@ -73,6 +73,36 @@ def test_responses_web_search_history_forwards_verbatim(app_client):
     assert ws in seen["json"]["input"]
 
 
+def test_responses_builtin_tools_dropped_on_chat_egress(app_client):
+    # A responses client declaring web_search routed to a chat model
+    # must not 500: non-function tools are dropped, history passes on.
+    tc, seen = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={
+            "model": "mimo-v2.5-free",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}],
+                },
+                {
+                    "type": "web_search_call",
+                    "id": "ws_1",
+                    "status": "completed",
+                    "action": {"type": "search", "query": "rust"},
+                },
+            ],
+            "tools": [{"type": "web_search"}],
+        },
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 200
+    assert seen["url"].endswith("/chat/completions")
+    assert "tools" not in seen["json"]
+
+
 def test_same_dialect_passes_through_untouched(app_client):
     tc, seen = app_client
     r = tc.post(

@@ -200,6 +200,86 @@ def test_from_responses_preserves_server_tool_history():
         assert item in to_zen_responses(req)["input"]
 
 
+def test_from_responses_history_sweep_all_builtin_calls():
+    # Every server-side call type Codex/OpenAI clients can echo back
+    # must survive the round trip verbatim (regression sweep).
+    items = [
+        {
+            "type": "web_search_call",
+            "id": "ws_1",
+            "status": "completed",
+            "action": {"type": "search", "query": "rust"},
+        },
+        {"type": "file_search_call", "id": "fs_1", "status": "completed"},
+        {"type": "computer_call", "id": "co_1", "status": "completed"},
+        {"type": "computer_call_output", "call_id": "co_1", "output": {}},
+        {"type": "code_interpreter_call", "id": "ci_1", "status": "completed"},
+        {"type": "image_generation_call", "id": "ig_1", "status": "completed"},
+        {"type": "mcp_call", "id": "mcp_1", "status": "completed"},
+        {"type": "tool_search_call", "id": "ts_1", "status": "completed"},
+        {"type": "item_reference", "id": "ws_1"},
+    ]
+    req = from_responses({"model": "m", "input": items})
+    out = to_zen_responses(req)["input"]
+    for item in items:
+        assert item in out
+    # Cross-dialect legs drop them without crashing.
+    assert to_zen_chat(req)["messages"] == []
+    assert to_zen_messages(req)["messages"] == []
+
+
+def test_from_responses_preserves_builtin_tool_defs():
+    # file_search/mcp/computer tool definitions survive ingress and
+    # emit on the responses leg (was: silently dropped, then a 500 in
+    # the emitter for non-web_search kinds).
+    req = from_responses(
+        {
+            "model": "m",
+            "input": "hi",
+            "tools": [
+                {"type": "file_search", "vector_store_ids": ["vs_1"]},
+                {
+                    "type": "mcp",
+                    "server_label": "gh",
+                    "server_url": "https://mcp.example",
+                },
+            ],
+        }
+    )
+    assert req.tools[0].kind == "file_search"
+    assert req.tools[1].kind == "mcp"
+    tools = to_zen_responses(req)["tools"]
+    assert {"type": "file_search", "vector_store_ids": ["vs_1"]} in tools
+    assert {
+        "type": "mcp",
+        "server_label": "gh",
+        "server_url": "https://mcp.example",
+    } in tools
+
+
+def test_from_responses_input_file_becomes_placeholder():
+    req = from_responses(
+        {
+            "model": "m",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_file", "filename": "notes.pdf"}],
+                }
+            ],
+        }
+    )
+    assert req.messages[0].blocks[0].text == "[attached file: notes.pdf]"
+
+
+def test_from_responses_malformed_item_is_400_not_500():
+    # Non-object history entries are client errors (400 via ValueError),
+    # not unhandled 500s (AttributeError).
+    with pytest.raises(ValueError):
+        from_responses({"model": "m", "input": [42]})
+
+
 def test_to_zen_chat_round_trip():
     req = from_responses(
         {

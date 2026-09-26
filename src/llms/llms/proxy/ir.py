@@ -39,9 +39,15 @@ class OpaqueBlock:
     file_search_call, ...) back in the next request's input. The proxy
     has no IR semantics for these, so they ride through verbatim on the
     responses leg and are dropped on chat/messages legs.
+
+    part=True marks a message content-part-level opaque (messages
+    dialect, e.g. server_tool_use): verbatim only on the messages leg,
+    dropped elsewhere. part=False (default) is a top-level responses
+    input item: verbatim only on the responses leg.
     """
 
     item: dict
+    part: bool = False
 
 
 @dataclass(frozen=True)
