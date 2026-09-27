@@ -66,6 +66,20 @@ export interface RecentEntry {
   error: string;
 }
 
+export interface ProviderIp {
+  idx: number | null;
+  port: number | null;
+  ip: string | null;
+  error: string | null;
+}
+
+export interface ProviderIps {
+  id: string;
+  kind: string;
+  ips: ProviderIp[];
+  cached: boolean;
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -160,6 +174,10 @@ export const api = {
   providerRecent: (id: string) =>
     req<{ recent: RecentEntry[] }>(
       `/api/admin/providers/${encodeURIComponent(id)}/recent`,
+    ),
+  providerIps: (id: string) =>
+    req<ProviderIps>(
+      `/api/admin/providers/${encodeURIComponent(id)}/ips`,
     ),
   logout: () => req<{ status: string }>("/api/admin/logout", { method: "POST" }),
 };

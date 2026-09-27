@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, api, type ProviderEntry, type RecentEntry } from "../api";
+import {
+  ApiError,
+  api,
+  type ProviderEntry,
+  type ProviderIp,
+  type RecentEntry,
+} from "../api";
 import { useCrudTab } from "../useCrudTab";
 
 function fmtRetry(sec: number): string {
@@ -29,6 +35,8 @@ function DebugModal({
 }) {
   const [live, setLive] = useState<ProviderEntry | null>(null);
   const [recent, setRecent] = useState<RecentEntry[]>([]);
+  const [ips, setIps] = useState<ProviderIp[] | null>(null);
+  const [ipsCached, setIpsCached] = useState(false);
   const [debug, setDebug] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState("");
   const [streamError, setStreamError] = useState("");
@@ -119,6 +127,17 @@ function DebugModal({
         if (!cancelled) setRecent(r.recent);
       })
       .catch(() => {});
+    api
+      .providerIps(provider.id)
+      .then((r) => {
+        if (!cancelled) {
+          setIps(r.ips);
+          setIpsCached(r.cached);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setIps([]);
+      });
     const es = new EventSource(`/api/admin/providers/${encodeURIComponent(provider.id)}/stream`);
     esRef.current = es;
     es.onmessage = (ev) => {
@@ -202,6 +221,48 @@ function DebugModal({
                   {provider.kind === "noproxy"
                     ? "Direct egress has no warp exits."
                     : "No health data yet."}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+        <h3 className="mb-1 text-sm font-medium text-gray-600">
+          Egress IPs{ipsCached ? " (cached)" : ""}
+        </h3>
+        <table className="mb-4 w-full border-collapse text-sm">
+          <thead>
+            <tr className="border-b text-left text-gray-600">
+              <th className="py-1 pr-3">Exit</th>
+              <th className="py-1 pr-3">Socks</th>
+              <th className="py-1 pr-3">IP seen by provider</th>
+              <th className="py-1">Error</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(ips ?? []).map((e, i) => (
+              <tr
+                key={`${e.idx ?? "direct"}-${e.port ?? 0}-${i}`}
+                className="border-b font-mono text-xs"
+              >
+                <td className="py-1 pr-3">{e.idx ?? "direct"}</td>
+                <td className="py-1 pr-3">{e.port ?? "—"}</td>
+                <td className="py-1 pr-3">{e.ip ?? "—"}</td>
+                <td className="py-1">{e.error || "—"}</td>
+              </tr>
+            ))}
+            {ips !== null && ips.length === 0 && (
+              <tr>
+                <td colSpan={4} className="py-2 text-center text-gray-500">
+                  {provider.kind === "noproxy"
+                    ? "No egress IP data."
+                    : "No health data yet — reconnect, then reopen."}
+                </td>
+              </tr>
+            )}
+            {ips === null && (
+              <tr>
+                <td colSpan={4} className="py-2 text-center text-gray-500">
+                  Loading…
                 </td>
               </tr>
             )}

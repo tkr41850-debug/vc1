@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -15,6 +16,11 @@ from llms.proxy.store import StoreError
 router = APIRouter()
 
 operator_router = APIRouter()
+
+IP_ECHO_URL = "https://api.ipify.org?format=json"
+IP_TIMEOUT_S = 10.0
+IP_CACHE_TTL_S = 60.0
+_ip_cache: dict[str, tuple[float, dict]] = {}
 
 
 def _registry(request: Request) -> ProviderRegistry:
@@ -199,6 +205,102 @@ async def provider_reconnect_local(request: Request, provider_id: str):
     if getattr(request.state, "secret_key", None) is None:
         raise HTTPException(status_code=401, detail="missing or invalid secret key")
     return await _do_reconnect(request, provider_id)
+
+
+async def _fetch_ip(proxy_url: str | None) -> str:
+    """Egress IP as the outside world sees it, via an optional SOCKS exit.
+
+    Separated for tests: production passes socks5:// URLs matching the
+    real traffic path (see egress._socks_client); tests patch this out.
+    """
+    import httpx
+
+    kwargs: dict = {"timeout": IP_TIMEOUT_S, "trust_env": False}
+    if proxy_url:
+        kwargs["proxy"] = proxy_url
+    async with httpx.AsyncClient(**kwargs) as client:
+        response = await client.get(IP_ECHO_URL)
+        response.raise_for_status()
+        payload = response.json()
+    ip = payload.get("ip") if isinstance(payload, dict) else None
+    if not isinstance(ip, str) or not ip:
+        raise ValueError("ip echo returned no ip")
+    return ip
+
+
+async def _do_ips(request: Request, provider_id: str) -> dict:
+    registry = _registry(request)
+    provider = _find(registry, provider_id)
+    now = time.monotonic()
+    hit = _ip_cache.get(provider_id)
+    if hit is not None and now - hit[0] < IP_CACHE_TTL_S:
+        return {**hit[1], "cached": True}
+    if provider.kind == "warp":
+        rt = registry.runtime(provider_id)
+
+        async def _one(exit):
+            if not exit.ready or not exit.socks:
+                return {
+                    "idx": exit.idx,
+                    "port": exit.socks or None,
+                    "ip": None,
+                    "error": "exit not ready",
+                }
+            try:
+                ip = await _fetch_ip(f"socks5://127.0.0.1:{exit.socks}")
+            except Exception as exc:
+                return {
+                    "idx": exit.idx,
+                    "port": exit.socks,
+                    "ip": None,
+                    "error": f"{type(exc).__name__}: {exc}"[:200],
+                }
+            return {"idx": exit.idx, "port": exit.socks, "ip": ip, "error": None}
+
+        entries = await asyncio.gather(
+            *(_one(w) for w in sorted(rt.health.exits, key=lambda w: w.idx))
+        )
+    else:
+
+        async def _direct():
+            try:
+                return {
+                    "idx": None,
+                    "port": None,
+                    "ip": await _fetch_ip(None),
+                    "error": None,
+                }
+            except Exception as exc:
+                return {
+                    "idx": None,
+                    "port": None,
+                    "ip": None,
+                    "error": f"{type(exc).__name__}: {exc}"[:200],
+                }
+
+        entries = [await _direct()]
+    payload = {
+        "id": provider_id,
+        "kind": provider.kind,
+        "ips": list(entries),
+        "cached": False,
+    }
+    _ip_cache[provider_id] = (now, payload)
+    return payload
+
+
+@router.get("/api/admin/providers/{provider_id:path}/ips")
+async def provider_ips(
+    request: Request, provider_id: str, _admin: str = Depends(require_admin)
+):
+    return await _do_ips(request, provider_id)
+
+
+@operator_router.get("/api/providers/{provider_id:path}/ips")
+async def provider_ips_local(request: Request, provider_id: str):
+    if getattr(request.state, "secret_key", None) is None:
+        raise HTTPException(status_code=401, detail="missing or invalid secret key")
+    return await _do_ips(request, provider_id)
 
 
 @router.get("/api/admin/providers/{provider_id:path}/recent")
