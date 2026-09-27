@@ -832,3 +832,52 @@ def test_null_content_fields_tolerated():
         {"model": "m", "messages": [{"role": "user", "content": None}]}
     )
     assert msgs.messages[0].blocks == ()
+
+
+def test_responses_image_output_stays_viewable():
+    # Codex view_image results arrive as output arrays; flattening them
+    # with str() handed the model Python-repr garbage instead of images.
+    data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mM="
+    url = f"data:image/png;base64,{data}"
+    req = from_responses(
+        {
+            "model": "m",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "c1",
+                    "output": [
+                        {"type": "input_text", "text": "shot"},
+                        {"type": "input_image", "image_url": url},
+                    ],
+                }
+            ],
+        }
+    )
+    call, img = req.messages[0].blocks
+    assert (call.call_id, call.output) == ("c1", "shot")
+    assert img.url == url
+    out = to_zen_responses(req)["input"][0]
+    assert out["output"] == [
+        {"type": "input_text", "text": "shot"},
+        {"type": "input_image", "image_url": url},
+    ]
+    content = to_zen_messages(req)["messages"][0]["content"]
+    assert content[0] == {
+        "type": "tool_result",
+        "tool_use_id": "c1",
+        "content": "shot",
+    }
+    assert content[1]["source"]["type"] == "base64"
+    # Plain string outputs keep the exact legacy shape.
+    plain = from_responses(
+        {
+            "model": "m",
+            "input": [
+                {"type": "function_call_output", "call_id": "c2", "output": "ok"}
+            ],
+        }
+    )
+    assert to_zen_responses(plain)["input"] == [
+        {"type": "function_call_output", "call_id": "c2", "output": "ok"}
+    ]

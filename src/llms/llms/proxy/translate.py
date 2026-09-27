@@ -97,6 +97,41 @@ def _text_of(content) -> str:
     return content if isinstance(content, str) else str(content)
 
 
+def _responses_output_to_blocks(output) -> tuple:
+    """Split a function_call_output payload into (text, images).
+
+    Output may be a string, or an array of input_text / input_image /
+    input_file parts (Codex view_image results). Previously arrays were
+    flattened with str(), handing the model Python-repr garbage instead
+    of viewable images. Unknown parts are ignored.
+    """
+    if output is None:
+        return "", []
+    if isinstance(output, str):
+        return output, []
+    if isinstance(output, dict):
+        output = [output]
+    if isinstance(output, list):
+        texts: list = []
+        images: list = []
+        for part in output:
+            if not isinstance(part, dict):
+                continue
+            kind = part.get("type")
+            if kind == "input_text":
+                texts.append(str(part.get("text", "")))
+            elif kind == "input_image":
+                url = str(part.get("image_url") or "")
+                fid = str(part.get("file_id") or "")
+                if url or fid:
+                    images.append(ImageBlock(url, fid))
+            elif kind == "input_file":
+                label = part.get("filename") or part.get("file_id") or "unnamed"
+                texts.append(f"[attached file: {label}]")
+        return "".join(texts), images
+    return _text_of(output), []
+
+
 def _chat_part_to_block(part: dict):
     if not isinstance(part, dict):
         raise ValueError("unsupported chat content part: not an object")  # noqa: TRY004
@@ -133,14 +168,33 @@ def from_chat(body: dict) -> RequestIR:
         if role not in _CHAT_ROLES:
             raise ValueError(f"unsupported chat role: {role}")
         if role == ROLE_TOOL:
+            content = msg.get("content")
+            images: list = []
+            if isinstance(content, list):
+                # Image parts nested in tool content ride alongside the
+                # text result (same shape as other legs).
+                text = "".join(
+                    str(p.get("text", ""))
+                    for p in content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+                for p in content:
+                    if isinstance(p, dict) and p.get("type") == "image_url":
+                        ref = p.get("image_url", "")
+                        url = ref.get("url") if isinstance(ref, dict) else ref
+                        if url:
+                            images.append(ImageBlock(str(url)))
+            else:
+                text = _text_of(content)
             messages.append(
                 LlmMessage(
                     role=ROLE_TOOL,
                     blocks=(
                         ToolResultBlock(
                             str(msg.get("tool_call_id", "")),
-                            _text_of(msg.get("content")),
+                            text,
                         ),
+                        *images,
                     ),
                 )
             )
@@ -275,13 +329,13 @@ def from_responses(body: dict) -> RequestIR:
                 )
             )
         elif kind == "function_call_output":
+            text, images = _responses_output_to_blocks(item.get("output"))
             messages.append(
                 LlmMessage(
                     role=ROLE_TOOL,
                     blocks=(
-                        ToolResultBlock(
-                            str(item.get("call_id", "")), _text_of(item.get("output"))
-                        ),
+                        ToolResultBlock(str(item.get("call_id", "")), text),
+                        *images,
                     ),
                 )
             )
@@ -347,6 +401,11 @@ def to_zen_chat(req: RequestIR) -> dict:
     body: dict = {"model": req.model, "messages": []}
     for msg in req.messages:
         if msg.role == ROLE_TOOL:
+            if any(isinstance(b, ImageBlock) for b in msg.blocks):
+                # Chat tool messages are text-only: images nested in tool
+                # results cannot ride this leg and are dropped here (they
+                # survive on responses/messages legs).
+                logger.debug("chat egress dropping image in tool result")
             body["messages"].append(
                 {
                     "role": "tool",
@@ -523,6 +582,37 @@ def to_zen_responses(req: RequestIR) -> dict:
         if msg.role == ROLE_SYSTEM:
             continue
         if msg.role == ROLE_TOOL:
+            images = [b for b in msg.blocks if isinstance(b, ImageBlock)]
+            if images:
+                # Tool results carrying images (Codex view_image): the
+                # output array keeps text alongside viewable image parts
+                # instead of flattening everything to a string.
+                out: list = []
+                text = "".join(
+                    b.output for b in msg.blocks if isinstance(b, ToolResultBlock)
+                )
+                if text:
+                    out.append({"type": "input_text", "text": text})
+                for img in images:
+                    if img.url:
+                        out.append({"type": "input_image", "image_url": img.url})
+                    elif img.file_id:
+                        out.append({"type": "input_image", "file_id": img.file_id})
+                body["input"].append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": next(
+                            (
+                                b.call_id
+                                for b in msg.blocks
+                                if isinstance(b, ToolResultBlock)
+                            ),
+                            "",
+                        ),
+                        "output": out,
+                    }
+                )
+                continue
             for b in msg.blocks:
                 if isinstance(b, ToolResultBlock):
                     body["input"].append(
@@ -760,6 +850,35 @@ def _messages_text_of(content) -> str:
     return "".join(texts)
 
 
+def _messages_source_to_image(source: dict) -> ImageBlock | None:
+    """ImageBlock from a messages image source, or None when unresolvable."""
+    if not isinstance(source, dict):
+        return None
+    if source.get("type") == "url":
+        url = str(source.get("url", ""))
+        return ImageBlock(url) if url else None
+    if source.get("type") == "base64":
+        return ImageBlock(
+            f"data:{source.get('media_type', '')};base64,{source.get('data', '')}"
+        )
+    if source.get("type") == "file_id":
+        fid = str(source.get("file_id", ""))
+        return ImageBlock("", fid) if fid else None
+    return None
+
+
+def _messages_images_of(content) -> list:
+    """ImageBlocks for image parts nested in tool_result content."""
+    images: list = []
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image":
+                img = _messages_source_to_image(part.get("source", {}))
+                if img is not None:
+                    images.append(img)
+    return images
+
+
 def _cache_ttl(part: dict) -> str | None:
     """Anthropic cache breakpoint type from a content/tool block, if set."""
     cc = part.get("cache_control")
@@ -814,9 +933,15 @@ def _messages_block_to_ir(part: dict):
                     ttl = _cache_ttl(inner)
                     if ttl is not None:
                         break
-        return ToolResultBlock(
-            str(part.get("tool_use_id", "")), _messages_text_of(content), ttl
-        )
+        return [
+            ToolResultBlock(
+                str(part.get("tool_use_id", "")), _messages_text_of(content), ttl
+            ),
+            # Images nested in tool results (Claude Code Read of an image
+            # file) ride alongside as image parts; without them the model
+            # receives an empty result and stays blind.
+            *_messages_images_of(content),
+        ]
     if kind == "thinking":
         return ThinkingBlock(str(part.get("thinking", "")), _cache_ttl(part))
     if kind == "redacted_thinking":
@@ -855,7 +980,11 @@ def from_messages(body: dict) -> RequestIR:
         if isinstance(content, str):
             blocks = [TextBlock(content)] if content else []
         elif isinstance(content, list):
-            blocks = [_messages_block_to_ir(p) for p in content]
+            blocks = []
+            for p in content:
+                block = _messages_block_to_ir(p)
+                # tool_result with nested images expands to several blocks.
+                blocks.extend(block if isinstance(block, list) else [block])
         else:
             blocks = []
         messages.append(LlmMessage(role=role, blocks=tuple(blocks)))

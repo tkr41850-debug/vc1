@@ -361,3 +361,45 @@ def test_effort_round_trip_messages_responses_messages():
     )
     rebuilt = to_zen_messages(from_responses(to_zen_responses(req)))
     assert rebuilt["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+
+
+def test_messages_image_inside_tool_result_round_trips():
+    # Claude Code Read of an image file nests the bytes in tool_result
+    # content; dropping them left the model blind with an empty result.
+    data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mM="
+    req = from_messages(
+        {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t1",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/png",
+                                        "data": data,
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    call, img = req.messages[0].blocks
+    assert call.output == ""
+    assert img.url == f"data:image/png;base64,{data}"
+    assert to_zen_messages(req)["messages"][0]["content"] == [
+        {"type": "tool_result", "tool_use_id": "t1", "content": ""},
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": data},
+        },
+    ]
