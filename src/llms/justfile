@@ -155,6 +155,12 @@ probe-search:
     here="."
     cd "$here" && uv run python scripts/websearch_probe.py
 
+probe-image:
+    #!/usr/bin/env bash
+    set -u
+    here="."
+    cd "$here" && uv run --with pillow python scripts/image_probe.py
+
 catalog:
     #!/usr/bin/env bash
     set -u

@@ -320,3 +320,33 @@ def test_model_alias_remaps_before_routing(mock_upstream, tmp_path):
         assert r.status_code == 200
         assert seen["url"].endswith("/responses")
         assert seen["json"]["model"] == "muse-spark-1.3-contributor-free"
+
+
+def test_chat_image_forwards_on_chat_egress(app_client):
+    # DSH path (chat dialect both sides): image parts pass through
+    # byte-identical; the harness itself sends text-only, so this is
+    # the wire contract for any chat client attaching images.
+    tc, seen = app_client
+    url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mM="
+    r = tc.post(
+        "/v1/chat/completions",
+        json={
+            "model": "mimo-v2.5-free",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What colors?"},
+                        {"type": "image_url", "image_url": {"url": url}},
+                    ],
+                }
+            ],
+        },
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 200
+    assert seen["url"].endswith("/chat/completions")
+    assert seen["json"]["messages"][-1]["content"][1] == {
+        "type": "image_url",
+        "image_url": {"url": url},
+    }
