@@ -114,6 +114,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.usage = UsageTracker()
     app.state.usage.load_file(app.state.settings.data_dir)
     app.state.sessions = SessionTracker()
+    from llms.proxy.dedup import DedupTable, SessionReservations
+
+    app.state.dedup = DedupTable()
+    app.state.reservations = SessionReservations()
     app.state.warp = WarpSupervisor(app.state.settings.data_dir)
     app.state.providers = ProviderRegistry(
         data_dir=app.state.settings.data_dir,

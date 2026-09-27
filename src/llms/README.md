@@ -187,6 +187,7 @@ across ready exits; with none ready it fails open to direct.
 | `NUM_BUCKETS` | `1024` | Affinity hash space |
 | `NUM_SLOTS` | `8` | Bucket-table slots (grows to the live warp ready-exit count) |
 | `SLOT_COOLDOWN_S` | `60` | Minimum bucket cooldown after a rate limit |
+| `MAX_TIMEOUT` | `60` | Seconds a non-streaming request may run before the client gets `429 + Retry-After: 20` while upstream work continues in the background (a retry with the same body claims the held response; `0` disables) |
 | `EGRESS_MODE` | `direct` | Reserved; warp providers route via SOCKS when healthy, else fail open to direct |
 | `MODEL_ALIASES` | — | Opt-in remap, e.g. `gpt-*=muse-spark-1.3-contributor-free,claude-*=muse-spark-1.3-contributor-free`. Stabilizes clients pinned to billed models, but the client sees the requested id while another model answers |
 | `WARP_EXITS` (`WARP_SLOTS` legacy) | `8` | Default warp exits per provider (per-provider `exits` overrides) |

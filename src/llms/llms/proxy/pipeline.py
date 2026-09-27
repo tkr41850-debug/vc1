@@ -9,7 +9,7 @@ import time
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from llms.proxy import sessions
+from llms.proxy import dedup, sessions
 from llms.proxy.affinity import bucket_for
 from llms.proxy.config import Settings
 from llms.proxy.forward import forward, parse_body
@@ -270,6 +270,120 @@ def _outcome_of(response: Response) -> tuple[str, float | None]:
     return "ok", None
 
 
+def _reserved_session(request, ingress: str, model: str, body: dict) -> str | None:
+    """Session id reserved by an earlier identical fresh attempt, if any."""
+    table = getattr(request.app.state, "reservations", None)
+    if table is None:
+        return None
+    return table.lookup(
+        dedup.reserve_key(
+            getattr(request.state, "secret_key", None),
+            getattr(request.state, "affinity", None),
+            ingress,
+            model,
+            body,
+        )
+    )
+
+
+def _remember_reservation(
+    request, ingress: str, model: str, body: dict, session_id: str
+) -> None:
+    table = getattr(request.app.state, "reservations", None)
+    if table is None:
+        return
+    try:
+        table.remember(
+            dedup.reserve_key(
+                getattr(request.state, "secret_key", None),
+                getattr(request.state, "affinity", None),
+                ingress,
+                model,
+                body,
+            ),
+            session_id,
+        )
+    except Exception as exc:
+        logger.debug("session reservation failed: %r", exc)
+
+
+def _dedup_background_finish(task, **kwargs) -> None:
+    """Settle a deduped upstream task that outlived its foreground waiter.
+
+    Stores JSON results for later claims; on timeout abandonment also runs
+    the usage/conversation/warming bookkeeping the skipped tail would have
+    done (fast completions leave those to the normal tail — exactly once
+    either way). Best-effort: never raises.
+    """
+    table = kwargs["table"]
+    key = kwargs["key"]
+    entry = kwargs["entry"]
+    try:
+        if table.lookup(key) is not entry:
+            try:
+                task.result()
+            except BaseException:
+                pass
+            return
+        response = task.result()
+    except BaseException:
+        try:
+            table.drop(key)
+        except Exception:
+            pass
+        return
+    try:
+        from fastapi.responses import JSONResponse
+
+        if not isinstance(response, JSONResponse):
+            table.drop(key)
+            return
+        if not 200 <= response.status_code < 400:
+            # Never hold errors: a replayed 429/5xx would mask recovery
+            # (rebalance, failover, fresh retry-after). Retries rerun live.
+            table.drop(key)
+            return
+        table.complete(
+            key,
+            response.status_code,
+            bytes(response.body),
+            dedup.DedupTable.store_headers(response.headers),
+        )
+        if not entry.timed_out:
+            return
+        request = kwargs["request"]
+        try:
+            _record_usage(request, kwargs["ingress"], kwargs["model"], response)
+        except Exception as exc:
+            logger.debug("dedup background usage failed: %r", exc)
+        try:
+            _record_conversation(
+                response,
+                kwargs["session_tracker"],
+                kwargs["secret_key"],
+                kwargs["session_id"],
+                None,
+            )
+        except Exception as exc:
+            logger.debug("dedup background conversation failed: %r", exc)
+        try:
+            _warm_new_conversation(
+                response,
+                kwargs["is_new_conversation"],
+                kwargs["egress"],
+                kwargs["client"],
+                kwargs["url"],
+                kwargs["headers"],
+                kwargs["model"],
+                kwargs["session_id"],
+                kwargs["trace_id"],
+            )
+        except Exception as exc:
+            logger.debug("dedup background warm failed: %r", exc)
+    except Exception as exc:
+        logger.debug("dedup background finish failed: %r", exc)
+
+
 def _record_conversation(
     response: Response,
     session_tracker,
@@ -357,8 +471,16 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     if session_tracker is not None and ingress == "responses":
         ref = sessions.conversation_ref(ingress, body, request.headers)
         if ref is None:
-            session_id = sessions.mint_session_id()
-            is_new_conversation = True
+            # No trackable ref: reuse a session reserved by an earlier
+            # identical attempt (client retry after a dedup 429) so the
+            # retry matches the in-flight hash and its cache affinity.
+            reserved = _reserved_session(request, ingress, req.model, body)
+            if reserved is not None:
+                session_id = reserved
+            else:
+                session_id = sessions.mint_session_id()
+                _remember_reservation(request, ingress, req.model, body, session_id)
+                is_new_conversation = True
         else:
             hit = session_tracker.lookup(secret_key, ref)
             if hit is not None:
@@ -538,36 +660,110 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         if outbound.get("stream") is not True and not settings.zen_api_key
         else None
     )
-    response = await forward(
-        client,
-        url,
-        headers,
-        outbound,
-        trace_id,
-        convert=_convert_for(ingress, egress, req.model),
-        translate_dialects=_stream_for(ingress, egress, req.model),
-        synthesize_json=synthesize,
-        via_warp=via_warp,
-        # Usage is sniffed from upstream (egress-dialect) bytes; identical
-        # for passthrough (ingress == egress) and required for translate.
-        stream_ingress=egress if outbound.get("stream") is True else None,
-        stream_usage_sink=stream_usage_cb,
+    synthesize = (
+        _synthesize_for(ingress, egress, req.model)
+        if outbound.get("stream") is not True and not settings.zen_api_key
+        else None
     )
-    if synthesize is not None and egress == "responses":
-        # Steer any non-client tool call (genuine or hallucinated) back:
-        # with client tools list them, otherwise demand a direct answer.
-        client_names = {t.name for t in req.tools if t.name}
-        response, outbound = await _steer_genuine_calls(
-            response,
-            client=client,
-            url=url,
-            headers=headers,
-            outbound=outbound,
-            synthesize=synthesize,
-            trace_id=trace_id,
-            client_names=client_names,
+
+    async def _do_forward():
+        _response = await forward(
+            client,
+            url,
+            headers,
+            outbound,
+            trace_id,
+            convert=_convert_for(ingress, egress, req.model),
+            translate_dialects=_stream_for(ingress, egress, req.model),
+            synthesize_json=synthesize,
+            via_warp=via_warp,
+            # Usage is sniffed from upstream (egress-dialect) bytes; identical
+            # for passthrough (ingress == egress) and required for translate.
+            stream_ingress=egress if outbound.get("stream") is True else None,
+            stream_usage_sink=stream_usage_cb,
         )
+        if synthesize is not None and egress == "responses":
+            # Steer any non-client tool call (genuine or hallucinated) back:
+            # with client tools list them, otherwise demand a direct answer.
+            _client_names = {t.name for t in req.tools if t.name}
+            _response, _ = await _steer_genuine_calls(
+                _response,
+                client=client,
+                url=url,
+                headers=headers,
+                outbound=outbound,
+                synthesize=synthesize,
+                trace_id=trace_id,
+                client_names=_client_names,
+            )
+        return _response
+
+    # Slow-request dedup (non-streaming only): a request outrunning
+    # MAX_TIMEOUT gets 429 + Retry-After while its upstream work
+    # continues in the background; a retry with a matching hash claims
+    # the held response (evicting it) or 429s again while running.
+    dedup_table = getattr(request.app.state, "dedup", None)
+    dedup_key = None
+    if dedup_table is not None and not req.stream:
+        dedup_key = dedup.request_hash(
+            secret_key, affinity, ingress, req.model, body, session_id
+        )
+        _entry = dedup_table.lookup(dedup_key)
+        if _entry is not None:
+            if _entry.done:
+                response = dedup.replay_response(
+                    _entry.status, _entry.body, _entry.headers
+                )
+                dedup_table.drop(dedup_key)
+            else:
+                response = dedup.inflight_response()
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            return response
+        _timeout = float(settings.max_timeout_s)
+        if _timeout > 0:
+            _task = asyncio.create_task(_do_forward())
+            _entry = dedup_table.track(dedup_key, _task)
+            _task.add_done_callback(
+                lambda t: _dedup_background_finish(
+                    t,
+                    table=dedup_table,
+                    key=dedup_key,
+                    entry=_entry,
+                    request=request,
+                    ingress=ingress,
+                    model=req.model,
+                    session_tracker=session_tracker,
+                    secret_key=secret_key,
+                    session_id=session_id,
+                    is_new_conversation=is_new_conversation,
+                    egress=egress,
+                    client=client,
+                    url=url,
+                    headers=headers,
+                    trace_id=trace_id,
+                )
+            )
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.shield(_task), timeout=_timeout
+                )
+            except TimeoutError:
+                _entry.timed_out = True
+                response = dedup.inflight_response()
+                elapsed_ms = (time.monotonic() - started) * 1000.0
+                return response
+        else:
+            response = await _do_forward()
+    else:
+        response = await _do_forward()
     elapsed_ms = (time.monotonic() - started) * 1000.0
+    if (
+        isinstance(response, JSONResponse)
+        and response.headers.get(dedup.DEDUP_HEADER) is not None
+    ):
+        # Synthetic dedup response (inflight 429): skip every tail
+        # side-effect so it can never read as provider congestion.
+        return response
     _note_free_tier_error(response, settings, trace_id)
     stream_id = None
     if (

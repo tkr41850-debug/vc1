@@ -75,6 +75,9 @@ class Settings:
     warp_auto_cycle_cooldown_s: float = field(
         default_factory=lambda: float(os.getenv("WARP_AUTO_CYCLE_COOLDOWN_S", "300"))
     )
+    max_timeout_s: float = field(
+        default_factory=lambda: float(os.getenv("MAX_TIMEOUT", "60"))
+    )
     port: int = field(
         default_factory=lambda: int(os.getenv("ZEN_GATEWAY_PORT", "8789"))
     )
