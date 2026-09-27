@@ -93,3 +93,103 @@ def test_provider_ips_local_requires_key(app_client, tmp_path, monkeypatch):
     tc.app.state.providers = registry
     r = tc.get("/api/providers/pool1/ips")
     assert r.status_code == 401
+
+
+def test_reconnect_invalidates_ips(admin_client, tmp_path, monkeypatch):
+    from llms.proxy.providers import Provider, ProviderRegistry, WarpExit
+    from llms.proxy.routes import providers as routes
+
+    tc, _ = admin_client
+
+    class FakePool:
+        async def reconnect(self):
+            return {"ok": True, "before": {}, "after": {}}
+
+        async def refresh_statuses(self):
+            return None
+
+        def snapshot(self):
+            return {
+                "error": "",
+                "exits": [
+                    {
+                        "idx": 0,
+                        "ready": True,
+                        "status": "Connected",
+                        "reason": "",
+                        "socks": 40001,
+                        "registered": True,
+                        "error": "",
+                    }
+                ],
+            }
+
+    async def _ensure_pool(provider):
+        return FakePool()
+
+    registry = ProviderRegistry(data_dir=tmp_path)
+    monkeypatch.setattr(registry, "ensure_pool", _ensure_pool)
+    registry.save([Provider(id="pool1", kind="warp", exits=1, models=["*"])])
+    registry.runtime("pool1").health.exits = [
+        WarpExit(idx=0, ready=True, status="Connected", socks=40001)
+    ]
+    tc.app.state.providers = registry
+
+    calls: list = []
+
+    async def _fake_fetch(proxy_url):
+        calls.append(proxy_url)
+        return "9.9.9.9"
+
+    monkeypatch.setattr(routes, "_fetch_ip", _fake_fetch)
+    routes._ip_cache.clear()
+    headers = {"Authorization": "Bearer sk-test"}
+    assert (
+        tc.get("/api/admin/providers/pool1/ips", headers=headers).json()["cached"]
+        is False
+    )
+    assert (
+        tc.get("/api/admin/providers/pool1/ips", headers=headers).json()["cached"]
+        is True
+    )
+    assert len(calls) == 1
+    assert (
+        tc.post("/api/admin/providers/pool1/reconnect", headers=headers).status_code
+        == 200
+    )
+    assert (
+        tc.get("/api/admin/providers/pool1/ips", headers=headers).json()["cached"]
+        is False
+    )
+    assert len(calls) == 2
+
+
+def test_exit_churn_busts_cache(admin_client, tmp_path, monkeypatch):
+    from llms.proxy.providers import Provider, ProviderRegistry, WarpExit
+    from llms.proxy.routes import providers as routes
+
+    tc, _ = admin_client
+    registry = ProviderRegistry(data_dir=tmp_path)
+    registry.save([Provider(id="pool1", kind="warp", exits=2, models=["*"])])
+    rt = registry.runtime("pool1")
+    rt.health.exits = [WarpExit(idx=0, ready=True, status="Up", socks=40001)]
+    tc.app.state.providers = registry
+
+    calls: list = []
+
+    async def _fake_fetch(proxy_url):
+        calls.append(proxy_url)
+        return "9.9.9.9"
+
+    monkeypatch.setattr(routes, "_fetch_ip", _fake_fetch)
+    routes._ip_cache.clear()
+    headers = {"Authorization": "Bearer sk-test"}
+    assert (
+        tc.get("/api/admin/providers/pool1/ips", headers=headers).json()["cached"]
+        is False
+    )
+    rt.health.exits.append(WarpExit(idx=1, ready=True, status="Up", socks=40002))
+    body = tc.get("/api/admin/providers/pool1/ips", headers=headers).json()
+    assert body["cached"] is False
+    assert [e["port"] for e in body["ips"]] == [40001, 40002]
+    assert len(calls) == 3

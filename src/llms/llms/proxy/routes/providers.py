@@ -156,6 +156,7 @@ async def delete_provider(
     supervisor = getattr(registry, "_supervisor", None)
     if supervisor is not None:
         await supervisor.drop(provider_id)
+    invalidate_ips(provider_id)
     _sync_slots(request)
     return {"status": "ok"}
 
@@ -189,6 +190,7 @@ async def _do_reconnect(request: Request, provider_id: str) -> dict:
     if provider.kind != "warp":
         raise HTTPException(status_code=400, detail="only warp providers reconnect")
     result = await registry.reconnect(provider)
+    invalidate_ips(provider_id)
     _sync_slots(request)
     return {"id": provider_id, **result}
 
@@ -232,8 +234,12 @@ async def _do_ips(request: Request, provider_id: str) -> dict:
     registry = _registry(request)
     provider = _find(registry, provider_id)
     now = time.monotonic()
+    ports_key = _egress_ports_key(registry, provider)
     hit = _ip_cache.get(provider_id)
-    if hit is not None and now - hit[0] < IP_CACHE_TTL_S:
+    # Besides the TTL, exit churn busts the cache: reconnects, bounces
+    # and restarts change the ready-port set, and a fresh circuit can
+    # present a different IP even on a reused port.
+    if hit is not None and now - hit[0] < IP_CACHE_TTL_S and hit[2] == ports_key:
         return {**hit[1], "cached": True}
     if provider.kind == "warp":
         rt = registry.runtime(provider_id)
@@ -285,8 +291,24 @@ async def _do_ips(request: Request, provider_id: str) -> dict:
         "ips": list(entries),
         "cached": False,
     }
-    _ip_cache[provider_id] = (now, payload)
+    _ip_cache[provider_id] = (now, payload, ports_key)
     return payload
+
+
+def _egress_ports_key(registry, provider) -> tuple:
+    """Cache-busting key for the current exit set (see _do_ips)."""
+    if provider.kind != "warp":
+        return ("direct",)
+    try:
+        exits = registry.runtime(provider.id).health.exits
+    except Exception:
+        return ()
+    return tuple(sorted(w.socks for w in exits if w.ready and w.socks))
+
+
+def invalidate_ips(provider_id: str) -> None:
+    """Drop a provider's cached egress IPs (reconnect / pool churn)."""
+    _ip_cache.pop(provider_id, None)
 
 
 @router.get("/api/admin/providers/{provider_id:path}/ips")
