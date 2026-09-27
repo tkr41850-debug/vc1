@@ -350,3 +350,77 @@ def test_chat_image_forwards_on_chat_egress(app_client):
         "type": "image_url",
         "image_url": {"url": url},
     }
+
+
+def test_compacted_claude_turn_flows(app_client):
+    # Post-/compact wire shape from real transcripts: plain-text summary
+    # (+ redacted thinking, document blocks) must flow without 400s.
+    tc, seen = app_client
+    r = tc.post(
+        "/v1/messages",
+        json={
+            "model": "claude-haiku-4-5",
+            "system": "You are Claude Code.",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "<summary>Earlier: fixed image bugs.</summary>",
+                        }
+                    ],
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "redacted_thinking", "data": "enc"},
+                        {"type": "text", "text": "ack"},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "text",
+                                "media_type": "text/plain",
+                                "data": "notes",
+                            },
+                        },
+                        {"type": "text", "text": "continue"},
+                    ],
+                },
+            ],
+            "max_tokens": 64,
+        },
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 200
+    assert seen["url"].endswith("/messages")
+    bodies = seen["json"]["messages"]
+    assert "<summary>" in bodies[0]["content"]
+    assert {"type": "thinking", "thinking": "enc"} in bodies[1]["content"]
+    assert bodies[2]["content"][0]["type"] == "document"
+
+
+def test_compacted_codex_thread_keeps_session(app_client):
+    # Codex compaction keeps thread-id: the summary turn must reuse the
+    # pre-compaction session so the cache stays warm.
+    tc, seen = app_client
+    headers = dict(
+        TEST_HEADERS,
+        **{"originator": "codex_exec", "thread-id": "thread-compact-1"},
+    )
+    for i, text in enumerate(["do the thing", "<summary>did the thing</summary>"]):
+        r = tc.post(
+            "/v1/responses",
+            json={"model": "muse-spark-1.3-contributor-free", "input": text},
+            headers=headers,
+        )
+        assert r.status_code == 200
+        if i == 0:
+            first_key = seen["json"]["prompt_cache_key"]
+        else:
+            assert seen["json"]["prompt_cache_key"] == first_key
