@@ -338,3 +338,40 @@ def test_bounce_exit_dedupes_concurrent():
     pool.instances = []
     result = asyncio.run(pool.bounce_exit(3))
     assert result == {"ok": False, "idx": 3, "deduped": True}
+
+
+def test_auto_cycle_clears_retry_on_finish(cycle_world):
+    """429 backoff drops when the bounce lands: provider rejoins at once."""
+    import time
+
+    tc, registry, pool, _calls = cycle_world
+    r = _post(tc)
+    assert r.status_code == 429
+    rt = registry.runtime("pool1")
+    for _ in range(100):
+        if pool.bounces and rt.cycling is False:
+            break
+        time.sleep(0.05)
+    assert pool.bounces == [0] or pool.bounces == [1]
+    assert rt.retry_until == 0.0
+    assert rt.retry_reason == ""
+    assert rt.retry_in() == 0.0
+
+
+def test_failed_bounce_keeps_retry(cycle_world, monkeypatch):
+    """A bounce that lands nowhere keeps the backoff (no hot-looping)."""
+    import time
+
+    tc, registry, pool, _calls = cycle_world
+
+    async def _fail(idx: int) -> dict:
+        pool.bounces.append(idx)
+        return {"ok": False, "idx": idx}
+
+    monkeypatch.setattr(pool, "bounce_exit", _fail)
+    r = _post(tc)
+    assert r.status_code == 429
+    rt = registry.runtime("pool1")
+    assert rt.retry_until > time.monotonic()
+    _wait_cycling(registry, False)
+    assert rt.retry_until > time.monotonic()

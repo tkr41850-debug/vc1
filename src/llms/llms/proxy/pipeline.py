@@ -1009,8 +1009,12 @@ def _maybe_auto_cycle(
         )
 
         async def _bounce_and_clear() -> None:
+            bounced_ok = False
             try:
                 result = await pool.bounce_exit(inst.idx)
+                bounced_ok = (
+                    isinstance(result, dict) and bool(result.get("ok", False))
+                )
                 logger.info(
                     "[%s] warp provider %s exit %s bounce done: %s",
                     trace_id,
@@ -1037,6 +1041,19 @@ def _maybe_auto_cycle(
                         trace_id,
                         provider_id,
                         exc,
+                    )
+                if bounced_ok:
+                    # Fresh circuits: drop the 429 backoff so the provider
+                    # rejoins immediately instead of sitting out max(60s,
+                    # retry-after). A still-bad exit keeps its backoff and
+                    # the cooldown gates the next bounce.
+                    rt.retry_until = 0.0
+                    rt.retry_reason = ""
+                    logger.info(
+                        "[%s] warp provider %s exit %s backoff cleared",
+                        trace_id,
+                        provider_id,
+                        inst.idx,
                     )
 
         rt.cycle_task = asyncio.create_task(_bounce_and_clear())

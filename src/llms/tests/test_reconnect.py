@@ -141,3 +141,40 @@ def test_local_reconnect_pool_unknown_404(app_client):
         headers={"Authorization": "Bearer sk-test"},
     )
     assert r.status_code == 404
+
+
+def test_reconnect_clears_retry(admin_client, tmp_path, monkeypatch):
+    """Manual reconnect drops the 429 backoff (already the contract)."""
+    import time
+
+    from llms.proxy.providers import Provider, ProviderRegistry
+
+    tc, _ = admin_client
+    registry = ProviderRegistry(data_dir=tmp_path)
+    registry.save([Provider(id="pool1", kind="warp", exits=1, models=["*"])])
+
+    class _Pool:
+        async def reconnect(self):
+            return {"ok": True}
+
+        async def refresh_statuses(self):
+            return None
+
+        def snapshot(self):
+            return {"error": "", "exits": []}
+
+    async def _ensure_pool(provider):
+        return _Pool()
+
+    monkeypatch.setattr(registry, "ensure_pool", _ensure_pool)
+    tc.app.state.providers = registry
+    rt = registry.runtime("pool1")
+    rt.note_ratelimited(60.0, "slow down")
+    assert rt.retry_until > time.monotonic()
+    r = tc.post(
+        "/api/admin/providers/pool1/reconnect",
+        headers={"Authorization": "Bearer sk-test"},
+    )
+    assert r.status_code == 200
+    assert rt.retry_until == 0.0
+    assert rt.retry_reason == ""
