@@ -9,6 +9,11 @@ up:
     # Local gateway (uvicorn). Delegates to the llms module.
     @just llms up
 
+down:
+    # Stop the local gateway plus its orphaned warp exits (spares the
+    # system Zero Trust daemon). Delegates to the llms module.
+    @just llms down
+
 docker-up:
     #!/usr/bin/env bash
     set -eu
