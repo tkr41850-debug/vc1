@@ -203,6 +203,31 @@ def test_is_genuine_opencode_detection():
     assert not is_genuine_opencode({})
 
 
+def test_server_tool_specs_forwarded_never_500(app_client):
+    # Their curl repros #5/#6 against our proxy: unknown server-tool
+    # shapes (web_fetch, server_tool_use-as-tool) forward verbatim for
+    # upstream to judge — JSON downstream, never a plaintext 500.
+    tc, seen = app_client
+    r = tc.post(
+        "/v1/messages",
+        json={
+            "model": "muse-spark-1.3-contributor-free",
+            "max_tokens": 50,
+            "tools": [
+                {"type": "web_fetch_20260209", "name": "web_fetch"},
+                {"type": "server_tool_use", "name": "web_search"},
+            ],
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/json")
+    kinds = [t.get("type") for t in seen["json"]["tools"] if isinstance(t, dict)]
+    assert "web_fetch_20260209" in kinds
+    assert "server_tool_use" in kinds
+
+
 def test_same_dialect_passes_through_untouched(app_client):
     tc, seen = app_client
     r = tc.post(

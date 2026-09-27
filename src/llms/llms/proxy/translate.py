@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 
 from llms.proxy.ir import (
@@ -18,6 +19,8 @@ from llms.proxy.ir import (
     ToolDef,
     ToolResultBlock,
 )
+
+logger = logging.getLogger("zen_proxy")
 
 _CHAT_ROLES = (ROLE_SYSTEM, ROLE_USER, ROLE_ASSISTANT, ROLE_TOOL)
 _RESPONSES_ROLES = ("system", "developer", "user", "assistant")
@@ -416,7 +419,12 @@ def to_zen_chat(req: RequestIR) -> dict:
     # Chat completions only support function tools: non-function tools
     # (web_search, ...) are dropped instead of raising (was an
     # unhandled 500 for responses/messages clients routed to chat).
+    # Logged: the backend cannot execute server-side tools, so a
+    # dropped web_search means the model may answer from memory.
     if req.tools:
+        dropped = sorted({t.kind for t in req.tools if t.kind != "function"})
+        if dropped:
+            logger.debug("chat egress dropping non-function tools: %s", dropped)
         function_tools = [t for t in req.tools if t.kind == "function"]
         if function_tools:
             body["tools"] = [
