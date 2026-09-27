@@ -497,3 +497,72 @@ def test_distinct_codex_threads_get_distinct_sessions(app_client):
         assert r.status_code == 200
         keys.append(seen["json"]["prompt_cache_key"])
     assert keys[0] and keys[1] and keys[0] != keys[1]
+
+
+def test_messages_rebuild_is_byte_stable_across_turns(app_client):
+    # Prefix caching upstream depends on our rebuild being deterministic:
+    # identical logical turns must produce byte-identical bodies, and a
+    # follow-up must extend (never rewrite) the prefix.
+    import json as _json
+
+    tc, seen = app_client
+    bodies = []
+
+    def post(messages):
+        r = tc.post(
+            "/v1/messages",
+            json={
+                "model": "claude-haiku-4-5",
+                "system": [
+                    {"type": "text", "text": "sys"},
+                    {
+                        "type": "text",
+                        "text": "more",
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                ],
+                "messages": messages,
+                "tools": [
+                    {"name": "bash", "description": "run", "input_schema": {}},
+                    {
+                        "name": "read",
+                        "description": "read",
+                        "input_schema": {},
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                ],
+                "max_tokens": 64,
+            },
+            headers=TEST_HEADERS,
+        )
+        assert r.status_code == 200
+        bodies.append(_json.dumps(seen["json"], sort_keys=True))
+        return seen["headers"]["x-opencode-session"]
+
+    history = [
+        {"role": "user", "content": "do the thing"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "t1",
+                    "name": "bash",
+                    "input": {"c": "ls"},
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "a b"}],
+        },
+    ]
+    s1 = post(history)
+    s2 = post(history)
+    assert bodies[0] == bodies[1]
+    assert s1 == s2
+    s3 = post([*history, {"role": "user", "content": "and another"}])
+    assert s3 == s1
+    first_items = _json.loads(bodies[0])["messages"]
+    third_items = _json.loads(bodies[2])["messages"]
+    assert third_items[: len(first_items)] == first_items
