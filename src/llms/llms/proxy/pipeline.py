@@ -352,6 +352,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     # Chat has no such field/gate; messages needs a real API key instead.
     session_id = stable_session_id(settings.zen_api_key)
     is_new_conversation = False
+    session_tracked = False
     session_tracker = getattr(request.app.state, "sessions", None)
     if session_tracker is not None and ingress == "responses":
         ref = sessions.conversation_ref(ingress, body, request.headers)
@@ -362,6 +363,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             hit = session_tracker.lookup(secret_key, ref)
             if hit is not None:
                 session_id = hit
+                session_tracked = True
             elif not ref.startswith("chain:"):
                 session_id = sessions.mint_session_id()
                 session_tracker.remember(secret_key, ref, session_id)
@@ -379,7 +381,18 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             _with_genuine_tools(outbound)
     elif egress == "chat" and not settings.zen_api_key and not genuine:
         _ensure_chat_system(outbound)
-    bucket = bucket_for(affinity, req.model, settings.num_buckets, secret_key)
+    bucket = bucket_for(
+        affinity,
+        req.model,
+        settings.num_buckets,
+        secret_key,
+        # Tracked continuations only: a tracker hit means a real ongoing
+        # conversation, so its turns pin to one bucket (cache stays warm)
+        # while distinct conversations spread across slots. Fresh mints
+        # stay on the stable hash — no identity exists yet to pin, and
+        # this keeps untracked traffic (and its tests) deterministic.
+        session_id if session_tracked else None,
+    )
     table = request.app.state.bucket_table
     slot = table.slot_for(bucket)
     log_ingress(

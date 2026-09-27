@@ -55,3 +55,19 @@ def test_bucket_mixes_secret_key_with_affinity():
     assert bucket_for("ak-team1", "m", 1024, "sk-x") == bucket_for(
         "ak-team1", "m", 1024, "sk-x"
     )
+
+
+def test_bucket_pins_session_and_spreads_conversations():
+    # Same conversation (session) always hashes together — turn-to-turn
+    # pinning keeps the prompt cache warm — while distinct conversations
+    # spread across buckets for slot-level rebalancing.
+    a = "ses_AAAAAAAAAAAAAAAAAAAAAAAAAA"
+    b = "ses_BBBBBBBBBBBBBBBBBBBBBBBBBB"
+    assert bucket_for(None, "m", 1024, "sk-test", a) == bucket_for(
+        None, "m", 1024, "sk-test", a
+    )
+    assert bucket_for(None, "m", 1024, "sk-test", a) != bucket_for(
+        None, "m", 1024, "sk-test", b
+    )
+    seen = {bucket_for(None, "m", 1024, "sk-test", f"ses_{i:026d}") for i in range(50)}
+    assert len(seen) > 1

@@ -479,3 +479,21 @@ def test_codex_web_search_tool_forwarded(app_client):
     )
     assert r.status_code == 200
     assert seen["json"]["tools"][-1] == {"type": "web_search"}
+
+
+def test_distinct_codex_threads_get_distinct_sessions(app_client):
+    # Distinct conversations => distinct sessions (hence distinct
+    # buckets/slots); same thread stays pinned (see compact test).
+    tc, seen = app_client
+    keys = []
+    for thread in ("thread-A", "thread-B"):
+        r = tc.post(
+            "/v1/responses",
+            json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            headers=dict(
+                TEST_HEADERS, **{"originator": "codex_exec", "thread-id": thread}
+            ),
+        )
+        assert r.status_code == 200
+        keys.append(seen["json"]["prompt_cache_key"])
+    assert keys[0] and keys[1] and keys[0] != keys[1]
