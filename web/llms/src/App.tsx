@@ -6,8 +6,15 @@ import ProvidersTab from "./components/ProvidersTab";
 
 type Tab = "keys" | "models" | "providers";
 
+const TABS: Tab[] = ["keys", "models", "providers"];
+
+function tabFromPath(pathname: string): Tab {
+  const seg = pathname.split("/").filter(Boolean)[0];
+  return (TABS as string[]).includes(seg) ? (seg as Tab) : "keys";
+}
+
 export default function App() {
-  const [tab, setTab] = useState<Tab>("keys");
+  const [tab, setTab] = useState<Tab>(() => tabFromPath(window.location.pathname));
   const [keys, setKeys] = useState<ApiKeyEntry[]>([]);
   const [models, setModels] = useState<ModelEntry[]>([]);
   const [providers, setProviders] = useState<ProviderEntry[]>([]);
@@ -15,6 +22,11 @@ export default function App() {
   const [loading, setLoading] = useState(true);
 
   const onAuthError = useCallback(() => setAuthed(false), []);
+
+  const navigate = useCallback((t: Tab) => {
+    setTab(t);
+    window.history.pushState(null, "", `/${t}`);
+  }, []);
 
   const reload = useCallback(async () => {
     try {
@@ -32,6 +44,8 @@ export default function App() {
 
   useEffect(() => {
     reload();
+    const onPop = () => setTab(tabFromPath(window.location.pathname));
+    window.addEventListener("popstate", onPop);
     // Pause background polling while the tab is hidden: an idle admin page
     // shouldn't keep churning the server's YAML parses + usage snapshots.
     const onVis = () => {
@@ -42,6 +56,7 @@ export default function App() {
       if (!document.hidden) reload();
     }, 15000);
     return () => {
+      window.removeEventListener("popstate", onPop);
       document.removeEventListener("visibilitychange", onVis);
       clearInterval(t);
     };
@@ -93,7 +108,7 @@ export default function App() {
                 ? "border-b-2 border-blue-600 font-medium"
                 : "text-gray-500 hover:text-gray-800"
             }`}
-            onClick={() => setTab(t)}
+            onClick={() => navigate(t)}
           >
             {t}
           </button>

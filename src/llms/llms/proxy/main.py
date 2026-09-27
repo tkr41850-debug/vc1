@@ -6,6 +6,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -146,6 +147,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(messages_router)
     static_dir = Path(app.state.settings.static_dir)
     if static_dir.exists():
+        # SPA tab routes (/keys, /models, /providers): the gate rewrites
+        # logged-in browser hits to this internal route so reloads and
+        # deep links land on the UI. A single path (not per-tab routes)
+        # because /models doubles as a models API route registered
+        # earlier — unknown paths still 404.
+        index = static_dir / "index.html"
+
+        async def _spa_index():
+            return FileResponse(index)
+
+        app.get("/_ui", include_in_schema=False)(_spa_index)
         app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="ui")
     return app
 

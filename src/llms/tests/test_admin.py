@@ -87,3 +87,54 @@ def test_oauth_login_redirect_and_unconfigured(app_client):
     r = tc.get("/api/admin/login", follow_redirects=False)
     assert r.status_code == 500
     assert tc.post("/api/admin/logout").status_code == 200
+
+
+def _admin_session_cookie() -> str:
+    import base64 as _base64
+    import json as _json
+
+    import itsdangerous
+
+    signer = itsdangerous.TimestampSigner("test-secret")
+    raw = _base64.b64encode(_json.dumps({"admin_user": "tester"}).encode())
+    return signer.sign(raw).decode()
+
+
+def test_spa_tab_routes_serve_bundle(tmp_path):
+    """Reload-persistent tabs: logged-in browsers get index.html on
+    /keys|/models|/providers; /models keeps JSON API behavior for keys."""
+    import httpx
+
+    from tests.conftest import (
+        TEST_HEADERS,
+        TEST_SECRET,
+        build_app_client,
+        make_settings,
+    )
+
+    static = tmp_path / "static"
+    static.mkdir()
+    (static / "index.html").write_text("<html>llms</html>")
+    dummy = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))
+    )
+    settings = make_settings(
+        data_dir=str(tmp_path),
+        static_dir=str(static),
+        admin_github_users=("tester",),
+    )
+    with build_app_client(settings, dummy, seed_key=TEST_SECRET) as tc:
+        tc.cookies.set("session", _admin_session_cookie())
+        for path in ("/keys", "/models", "/providers"):
+            r = tc.get(path)
+            assert r.status_code == 200, path
+            assert "text/html" in r.headers["content-type"]
+            assert "llms" in r.text
+        assert tc.get("/nope", headers=TEST_HEADERS).status_code == 404
+        # Fresh client (no session, no key): legacy 401s untouched.
+        tc.cookies.clear()
+        assert tc.get("/models").status_code == 401
+        # sk- key: /models stays a JSON API.
+        r = tc.get("/models", headers=TEST_HEADERS)
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("application/json")

@@ -17,6 +17,9 @@ OPEN_ADMIN_PREFIXES = (
     "/api/admin/callback",
     "/api/admin/logout",
 )
+# SPA tab routes serving the admin bundle (see main.create_app): reloads
+# and deep links must pass the gate like "/" does.
+SPA_TAB_PATHS = ("/keys", "/models", "/providers")
 
 
 def is_open_path(path: str) -> bool:
@@ -32,7 +35,7 @@ def is_admin_path(path: str) -> bool:
 
 
 def is_ui_path(path: str) -> bool:
-    if path == "/" or path == "/index.html":
+    if path == "/" or path == "/index.html" or path == "/_ui":
         return True
     if path.startswith("/assets/"):
         return True
@@ -53,6 +56,15 @@ class GateMiddleware(BaseHTTPMiddleware):
         if is_open_path(path) or is_oauth_path(path):
             if affinity is not None:
                 request.scope["path"] = stripped
+            return await call_next(request)
+
+        if path in SPA_TAB_PATHS and session_login(request, settings) is not None:
+            # Logged-in browser on a UI tab route: serve the bundle via the
+            # internal /_ui route (browser URL unchanged, so the tab reads
+            # it). A rewrite (not a route) because /models doubles as a
+            # models API route registered earlier — everyone else falls
+            # through so sk- keys keep JSON API behavior (and 401s).
+            request.scope["path"] = "/_ui"
             return await call_next(request)
 
         if is_admin_path(path):
