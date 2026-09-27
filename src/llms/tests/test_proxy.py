@@ -457,3 +457,72 @@ def test_affinity_prefix_still_routes(app_client):
         assert r.status_code == 200, path
         assert seen["url"].endswith("/responses")
     assert seen["headers"]["authorization"] == "Bearer public"
+
+
+def test_tool_call_arguments_survive_synthesize(tmp_path):
+    """Multi-delta tool args (incl. workdir) reassemble byte-exact.
+
+    Non-streaming downstream on the anonymous responses leg folds
+    upstream SSE; argument chunks must concatenate verbatim or the
+    harness rejects the call (e.g. missing workdir).
+    """
+    import json as _json
+
+    import httpx
+
+    from tests.conftest import (
+        TEST_HEADERS,
+        TEST_SECRET,
+        build_app_client,
+        make_settings,
+    )
+
+    args = '{"command":"pwd","description":"x","workdir":"/tmp"}'
+    chunks = [args[:17], args[17:]]
+
+    async def handler(request):
+        body = (
+            'data: {"type":"response.output_item.added","output_index":1,'
+            '"item":{"id":"call_wd1","type":"function_call","name":"bash",'
+            '"arguments":"{}"}}\n\n'
+            + "".join(
+                f"data: {_json.dumps({'type': 'response.function_call_arguments.delta', 'output_index': 1, 'item_id': 'call_wd1', 'delta': c})}\n\n"
+                for c in chunks
+            )
+            + 'data: {"type":"response.completed","response":{"status":"completed",'
+            '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+        return httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    with build_app_client(
+        make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        r = tc.post(
+            "/v1/chat/completions",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "messages": [{"role": "user", "content": "pwd please"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "description": "run",
+                            "parameters": {},
+                        },
+                    }
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+        assert r.status_code == 200
+        calls = r.json()["choices"][0]["message"]["tool_calls"]
+        assert len(calls) == 1
+        assert calls[0]["function"]["arguments"] == args

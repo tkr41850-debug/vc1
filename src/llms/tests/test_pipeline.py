@@ -424,3 +424,58 @@ def test_compacted_codex_thread_keeps_session(app_client):
             first_key = seen["json"]["prompt_cache_key"]
         else:
             assert seen["json"]["prompt_cache_key"] == first_key
+
+
+def test_malformed_tool_specs_are_json_never_plaintext_500(app_client):
+    # Malformed/unknown tool specs on any dialect: JSON downstream
+    # (forwarded for upstream to judge, or 400) — never plaintext 500.
+    cases = [
+        (
+            "/v1/responses",
+            {
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "hi",
+                "tools": [{"type": "server_tool_use", "name": "web_search"}],
+            },
+        ),
+        (
+            "/v1/messages",
+            {
+                "model": "claude-haiku-4-5",
+                "max_tokens": 50,
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "server_tool_use", "name": "web_search"}],
+            },
+        ),
+        (
+            "/v1/chat/completions",
+            {
+                "model": "mimo-v2.5-free",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "weird", "name": "x"}],
+            },
+        ),
+    ]
+    tc, _ = app_client
+    for path, body in cases:
+        r = tc.post(path, json=body, headers=TEST_HEADERS)
+        assert r.status_code != 500, path
+        assert r.headers["content-type"].startswith("application/json"), path
+
+
+def test_codex_web_search_tool_forwarded(app_client):
+    # Codex equivalent of the web_search report: the declaration must
+    # reach upstream (execution is the backend's job, never the proxy's
+    # to fake by dropping).
+    tc, seen = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={
+            "model": "muse-spark-1.3-contributor-free",
+            "input": "search the web for SWE-smith",
+            "tools": [{"type": "web_search"}],
+        },
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 200
+    assert seen["json"]["tools"][-1] == {"type": "web_search"}
