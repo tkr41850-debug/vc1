@@ -9,8 +9,9 @@ type Tab = "keys" | "models" | "providers";
 const TABS: Tab[] = ["keys", "models", "providers"];
 
 function tabFromPath(pathname: string): Tab {
-  const seg = pathname.split("/").filter(Boolean)[0];
-  return (TABS as string[]).includes(seg) ? (seg as Tab) : "keys";
+  const segs = pathname.split("/").filter(Boolean);
+  const last = segs[segs.length - 1] ?? "";
+  return (TABS as string[]).includes(last) ? (last as Tab) : "keys";
 }
 
 export default function App() {
@@ -25,7 +26,7 @@ export default function App() {
 
   const navigate = useCallback((t: Tab) => {
     setTab(t);
-    window.history.pushState(null, "", `/${t}`);
+    window.history.pushState(null, "", `/ui/${t}`);
   }, []);
 
   const reload = useCallback(async () => {

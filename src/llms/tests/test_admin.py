@@ -100,9 +100,9 @@ def _admin_session_cookie() -> str:
     return signer.sign(raw).decode()
 
 
-def test_spa_tab_routes_serve_bundle(tmp_path):
-    """Reload-persistent tabs: logged-in browsers get index.html on
-    /keys|/models|/providers; /models keeps JSON API behavior for keys."""
+def test_spa_ui_routes(tmp_path):
+    """Browser UI under /ui/* (/ui/keys|models|providers); / redirects to
+    /ui/keys; /models stays a pure JSON API for keys."""
     import httpx
 
     from tests.conftest import (
@@ -125,14 +125,17 @@ def test_spa_tab_routes_serve_bundle(tmp_path):
     )
     with build_app_client(settings, dummy, seed_key=TEST_SECRET) as tc:
         tc.cookies.set("session", _admin_session_cookie())
-        for path in ("/keys", "/models", "/providers"):
+        for path in ("/ui", "/ui/keys", "/ui/models", "/ui/providers"):
             r = tc.get(path)
             assert r.status_code == 200, path
             assert "text/html" in r.headers["content-type"]
             assert "llms" in r.text
-        assert tc.get("/nope", headers=TEST_HEADERS).status_code == 404
-        # Fresh client (no session, no key): legacy 401s untouched.
+        r = tc.get("/", follow_redirects=False)
+        assert r.status_code == 302
+        assert r.headers["location"] == "/ui/keys"
         tc.cookies.clear()
+        # No session: UI paths bounce to login; API keeps legacy 401s.
+        assert tc.get("/ui/providers", follow_redirects=False).status_code == 302
         assert tc.get("/models").status_code == 401
         # sk- key: /models stays a JSON API.
         r = tc.get("/models", headers=TEST_HEADERS)
