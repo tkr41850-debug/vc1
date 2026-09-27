@@ -752,19 +752,34 @@ def _messages_text_of(content) -> str:
     return "".join(texts)
 
 
+def _cache_ttl(part: dict) -> str | None:
+    """Anthropic cache breakpoint type from a content/tool block, if set."""
+    cc = part.get("cache_control")
+    if isinstance(cc, dict) and isinstance(cc.get("type"), str):
+        return cc["type"]
+    return None
+
+
+def _with_cache(block: dict, ttl: str | None) -> dict:
+    if ttl:
+        block["cache_control"] = {"type": ttl}
+    return block
+
+
 def _messages_block_to_ir(part: dict):
     if not isinstance(part, dict):
         raise ValueError("unsupported messages content block: not an object")  # noqa: TRY004
     kind = part.get("type")
     if kind == "text":
-        return TextBlock(part.get("text", ""))
+        return TextBlock(part.get("text", ""), _cache_ttl(part))
     if kind == "image":
         source = part.get("source", {})
         if isinstance(source, dict) and source.get("type") == "url":
-            return ImageBlock(str(source.get("url", "")))
+            return ImageBlock(str(source.get("url", "")), cache=_cache_ttl(part))
         if isinstance(source, dict) and source.get("type") == "base64":
             return ImageBlock(
-                f"data:{source.get('media_type', '')};base64,{source.get('data', '')}"
+                f"data:{source.get('media_type', '')};base64,{source.get('data', '')}",
+                cache=_cache_ttl(part),
             )
         if isinstance(source, dict) and source.get("type") == "file_id":
             # Files-API reference: round-trips verbatim on the messages
@@ -778,15 +793,26 @@ def _messages_block_to_ir(part: dict):
             str(part.get("id", "")),
             str(part.get("name", "")),
             _json.dumps(part.get("input", {})),
+            _cache_ttl(part),
         )
     if kind == "tool_result":
+        content = part.get("content", "")
+        ttl = _cache_ttl(part)
+        if ttl is None and isinstance(content, list):
+            # Claude Code often pins the breakpoint on an inner content
+            # block instead of the tool_result itself — inherit it.
+            for inner in content:
+                if isinstance(inner, dict):
+                    ttl = _cache_ttl(inner)
+                    if ttl is not None:
+                        break
         return ToolResultBlock(
-            str(part.get("tool_use_id", "")), _messages_text_of(part.get("content", ""))
+            str(part.get("tool_use_id", "")), _messages_text_of(content), ttl
         )
     if kind == "thinking":
-        return ThinkingBlock(str(part.get("thinking", "")))
+        return ThinkingBlock(str(part.get("thinking", "")), _cache_ttl(part))
     if kind == "redacted_thinking":
-        return ThinkingBlock(str(part.get("data", "")))
+        return ThinkingBlock(str(part.get("data", "")), _cache_ttl(part))
     # Server-side history blocks (server_tool_use, web_search_tool_result,
     # code_execution_tool_result, ...): Claude Code echoes prior turns
     # back verbatim; 400ing breaks the session, so they ride through as
@@ -798,10 +824,19 @@ def _messages_block_to_ir(part: dict):
 def from_messages(body: dict) -> RequestIR:
     messages: list[LlmMessage] = []
     system = body.get("system", "")
-    if system:
-        messages.append(
-            LlmMessage(role=ROLE_SYSTEM, blocks=(TextBlock(_messages_text_of(system)),))
-        )
+    if isinstance(system, str):
+        if system:
+            messages.append(LlmMessage(role=ROLE_SYSTEM, blocks=(TextBlock(system),)))
+    elif isinstance(system, list):
+        # Anthropic system arrays carry per-block cache breakpoints —
+        # keep one TextBlock per text part instead of collapsing.
+        blocks = [
+            TextBlock(str(p.get("text", "")), _cache_ttl(p))
+            for p in system
+            if isinstance(p, dict) and p.get("type", "text") == "text"
+        ]
+        if blocks:
+            messages.append(LlmMessage(role=ROLE_SYSTEM, blocks=tuple(blocks)))
     for msg in body.get("messages", []):
         if not isinstance(msg, dict):
             raise ValueError("unsupported messages message: not an object")  # noqa: TRY004
@@ -870,11 +905,14 @@ def from_messages(body: dict) -> RequestIR:
 
 def _messages_tool_from_ir(t: ToolDef) -> dict:
     if t.kind == "function":
-        return {
+        tool = {
             "name": t.name,
             "description": t.description,
             "input_schema": t.parameters,
         }
+        # Passthrough extras (cache_control breakpoints ride here).
+        tool.update(t.options)
+        return tool
     tool = {"type": t.kind, "name": t.name}
     tool.update(t.options)
     return tool
@@ -912,14 +950,20 @@ def to_zen_messages(req: RequestIR) -> dict:
 
     body: dict = {"model": req.model, "messages": []}
     systems = [
-        b.text
+        (b.text, b.cache)
         for m in req.messages
         if m.role == ROLE_SYSTEM
         for b in m.blocks
         if isinstance(b, TextBlock)
     ]
-    if systems:
-        body["system"] = "\n".join(systems)
+    if len(systems) == 1 and not systems[0][1]:
+        body["system"] = systems[0][0]
+    elif systems:
+        # Multiple blocks or breakpoints: keep the array shape so
+        # cache_control survives (a joined string would drop it).
+        body["system"] = [
+            _with_cache({"type": "text", "text": text}, ttl) for text, ttl in systems
+        ]
     for msg in req.messages:
         if msg.role == ROLE_SYSTEM:
             continue
@@ -927,33 +971,41 @@ def to_zen_messages(req: RequestIR) -> dict:
         parts: list = []
         for b in msg.blocks:
             if isinstance(b, TextBlock):
-                parts.append({"type": "text", "text": b.text})
+                parts.append(_with_cache({"type": "text", "text": b.text}, b.cache))
             elif isinstance(b, ThinkingBlock):
-                parts.append({"type": "thinking", "thinking": b.text})
+                parts.append(
+                    _with_cache({"type": "thinking", "thinking": b.text}, b.cache)
+                )
             elif isinstance(b, ImageBlock):
                 part = _messages_image_part(b)
                 if part is not None:
-                    parts.append(part)
+                    parts.append(_with_cache(part, b.cache))
             elif isinstance(b, ToolCallBlock):
                 try:
                     arguments = _json.loads(b.arguments) if b.arguments else {}
                 except Exception:
                     arguments = {"_raw": b.arguments}
                 parts.append(
-                    {
-                        "type": "tool_use",
-                        "id": b.call_id,
-                        "name": b.name,
-                        "input": arguments,
-                    }
+                    _with_cache(
+                        {
+                            "type": "tool_use",
+                            "id": b.call_id,
+                            "name": b.name,
+                            "input": arguments,
+                        },
+                        b.cache,
+                    )
                 )
             elif isinstance(b, ToolResultBlock):
                 parts.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": b.call_id,
-                        "content": b.output,
-                    }
+                    _with_cache(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": b.call_id,
+                            "content": b.output,
+                        },
+                        b.cache,
+                    )
                 )
             elif isinstance(b, OpaqueBlock) and b.part:
                 # Part-level (messages-dialect) history round-trips

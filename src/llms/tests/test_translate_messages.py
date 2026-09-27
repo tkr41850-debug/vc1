@@ -224,6 +224,115 @@ def test_messages_file_id_image_round_trips():
     assert to_zen_messages(req)["messages"][0]["content"] == [block]
 
 
+def test_messages_cache_breakpoints_round_trip():
+    # Claude Code pins cache_control on system/tools/content so the
+    # provider caches the prefix; the rebuild must carry them through
+    # (values included — ephemeral_1h buys the long TTL).
+    original = {
+        "model": "claude-haiku-4-5",
+        "system": [
+            {"type": "text", "text": "sys"},
+            {
+                "type": "text",
+                "text": "more",
+                "cache_control": {"type": "ephemeral_1h"},
+            },
+        ],
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "bash",
+                        "input": {},
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "a b",
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    },
+                    {
+                        "type": "text",
+                        "text": "go",
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                ],
+            },
+        ],
+        "tools": [
+            {"name": "bash", "description": "run", "input_schema": {}},
+            {
+                "name": "read",
+                "description": "read",
+                "input_schema": {},
+                "cache_control": {"type": "ephemeral"},
+            },
+        ],
+        "max_tokens": 64,
+    }
+    rebuilt = to_zen_messages(from_messages(original))
+    assert rebuilt["system"] == [
+        {"type": "text", "text": "sys"},
+        {
+            "type": "text",
+            "text": "more",
+            "cache_control": {"type": "ephemeral_1h"},
+        },
+    ]
+    assert rebuilt["messages"][0]["content"] == [
+        {
+            "type": "tool_use",
+            "id": "t1",
+            "name": "bash",
+            "input": {},
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    assert rebuilt["messages"][1]["content"] == [
+        {
+            "type": "tool_result",
+            "tool_use_id": "t1",
+            "content": "a b",
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "text", "text": "go", "cache_control": {"type": "ephemeral"}},
+    ]
+    assert rebuilt["tools"][1] == {
+        "name": "read",
+        "description": "read",
+        "input_schema": {},
+        "cache_control": {"type": "ephemeral"},
+    }
+    # Cross-dialect legs have no breakpoint equivalent: dropped, no crash.
+    import json as _json
+
+    chat_body = to_zen_chat(from_messages(original))
+    assert "cache_control" not in _json.dumps(chat_body)
+    assert chat_body["messages"][-2]["content"] == [{"type": "text", "text": "go"}]
+    assert chat_body["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "t1",
+        "content": "a b",
+    }
+    resp_body = to_zen_responses(from_messages(original))
+    assert "cache_control" not in _json.dumps(resp_body)
+    assert resp_body["input"][-1]["content"] == [{"type": "input_text", "text": "go"}]
+
+
 def test_messages_thinking_budget_maps_to_effort():
     req = from_messages(
         {

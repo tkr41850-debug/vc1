@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True)
 class TextBlock:
     text: str
+    # Anthropic prompt-caching breakpoint surviving the messages leg
+    # ("ephemeral" / "ephemeral_1h" — the cache_control type). None
+    # means no breakpoint. Other legs have no equivalent and drop it.
+    cache: str | None = None
 
 
 @dataclass(frozen=True)
@@ -15,6 +19,7 @@ class ImageBlock:
     # (responses input_image / messages file_id source). Round-trips on
     # legs that support file references; placeholder elsewhere.
     file_id: str = ""
+    cache: str | None = None
 
 
 @dataclass(frozen=True)
@@ -22,17 +27,20 @@ class ToolCallBlock:
     call_id: str
     name: str
     arguments: str
+    cache: str | None = None
 
 
 @dataclass(frozen=True)
 class ToolResultBlock:
     call_id: str
     output: str
+    cache: str | None = None
 
 
 @dataclass(frozen=True)
 class ThinkingBlock:
     text: str
+    cache: str | None = None
 
 
 @dataclass(frozen=True)
