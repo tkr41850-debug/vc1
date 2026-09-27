@@ -61,6 +61,26 @@ down:
     #!/usr/bin/env bash
     if [ -f {{pidfile}} ]; then kill "$(cat {{pidfile}})" 2>/dev/null || true; rm -f {{pidfile}}; fi
     pkill -f "uvicorn llms.proxy.main" 2>/dev/null || true
+    # Warp exits orphan when the gateway dies (reparented to init, PPID 1)
+    # and pile up: reap ours, but never the system Zero Trust daemon.
+    main="$(systemctl show -p MainPID --value warp-svc.service 2>/dev/null || true)"
+    # Marked llms exits (sudo wrappers carry llms-warp runtime dirs).
+    sudo -n pkill -f "llms-warp" 2>/dev/null || true
+    if [ -n "$main" ]; then
+        for sig in "" "-9"; do
+            for pid in $(pgrep -x warp-svc 2>/dev/null || true); do
+                ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
+                if [ "$pid" != "$main" ] && [ "$ppid" = "1" ]; then
+                    # shellcheck disable=SC2086
+                    sudo -n kill $sig "$pid" 2>/dev/null || true
+                fi
+            done
+            sleep 1
+        done
+    else
+        echo "down: could not read warp-svc MainPID; leaving bare warp-svc orphans alone"
+        pgrep -ax warp-svc 2>/dev/null || true
+    fi
     echo stopped
 
 sync:
@@ -154,6 +174,12 @@ probe-search:
     set -u
     here="."
     cd "$here" && uv run python scripts/websearch_probe.py
+
+probe-image:
+    #!/usr/bin/env bash
+    set -u
+    here="."
+    cd "$here" && uv run --with pillow python scripts/image_probe.py
 
 catalog:
     #!/usr/bin/env bash
