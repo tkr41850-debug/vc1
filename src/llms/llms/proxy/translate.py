@@ -272,10 +272,11 @@ def _responses_tool_to_ir(t: dict) -> ToolDef:
             str(t.get("description", "")),
             dict(params or {}),
         )
-    return ToolDef(
+    params = t.get("parameters", {})
+    tool_def = ToolDef(
         str(t.get("name", "")),
-        "",
-        {},
+        str(t.get("description", "")),
+        dict(params or {}),
         kind=str(t.get("type", "")),
         options={
             k: v
@@ -283,6 +284,7 @@ def _responses_tool_to_ir(t: dict) -> ToolDef:
             if k not in ("type", "name", "description", "parameters")
         },
     )
+    return tool_def
 
 
 def from_responses(body: dict) -> RequestIR:
@@ -293,6 +295,7 @@ def from_responses(body: dict) -> RequestIR:
         )
     raw = body.get("input", "")
     items = raw if isinstance(raw, list) else [raw]
+    extra_tools: list = []
     for item in items:
         if isinstance(item, str):
             messages.append(LlmMessage(role=ROLE_USER, blocks=(TextBlock(item),)))
@@ -350,6 +353,15 @@ def from_responses(body: dict) -> RequestIR:
                         role=ROLE_ASSISTANT, blocks=(ThinkingBlock("".join(texts)),)
                     )
                 )
+        elif kind == "additional_tools":
+            # Codex deferred-tool definitions ride as input items, a shape
+            # Zen rejects outright ("input[0] did not match any supported
+            # type"). Dissolve the nested definitions into top-level tools
+            # (the same tools the model sees, in the shape Zen validates)
+            # and drop the item itself.
+            for t in item.get("tools", []) or []:
+                if isinstance(t, dict):
+                    extra_tools.append(_responses_tool_to_ir(t))
         else:
             # Server-side history items (web_search_call, file_search_call,
             # computer_call(_output), item_reference, ...) have no IR
@@ -362,7 +374,7 @@ def from_responses(body: dict) -> RequestIR:
             )
     tools = tuple(
         _responses_tool_to_ir(t) for t in body.get("tools", []) if isinstance(t, dict)
-    )
+    ) + tuple(extra_tools)
     return RequestIR(
         model=str(body.get("model", "")),
         messages=tuple(messages),
@@ -557,12 +569,17 @@ def _responses_tool_from_ir(t: ToolDef) -> dict:
         }
     if t.kind.startswith("web_search"):
         return {"type": "web_search"}
-    # Other built-in tools (file_search, computer, mcp, ...): forward the
-    # definition as-is (fail-open; upstream validates). Raising here was
-    # an unhandled 500 for messages-leg clients routed to responses.
-    tool: dict = {"type": t.kind}
+    # Other built-in tools (file_search, computer, mcp, namespace, ...):
+    # forward the definition as-is (fail-open; upstream validates).
+    # description rides along ALWAYS (even empty): Zen 400s server tools
+    # with a missing description key (seen live with codex namespace
+    # containers) — its validator reads like pydantic "field required",
+    # which an empty string satisfies but an absent key does not.
+    tool: dict = {"type": t.kind, "description": t.description or ""}
     if t.name:
         tool["name"] = t.name
+    if t.parameters:
+        tool["parameters"] = t.parameters
     tool.update(t.options)
     return tool
 
@@ -1051,6 +1068,10 @@ def _messages_tool_from_ir(t: ToolDef) -> dict:
         tool.update(t.options)
         return tool
     tool = {"type": t.kind, "name": t.name}
+    if t.description:
+        tool["description"] = t.description
+    if t.parameters:
+        tool["input_schema"] = t.parameters
     tool.update(t.options)
     return tool
 

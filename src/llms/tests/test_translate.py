@@ -249,9 +249,14 @@ def test_from_responses_preserves_builtin_tool_defs():
     assert req.tools[0].kind == "file_search"
     assert req.tools[1].kind == "mcp"
     tools = to_zen_responses(req)["tools"]
-    assert {"type": "file_search", "vector_store_ids": ["vs_1"]} in tools
+    assert {
+        "type": "file_search",
+        "description": "",
+        "vector_store_ids": ["vs_1"],
+    } in tools
     assert {
         "type": "mcp",
+        "description": "",
         "server_label": "gh",
         "server_url": "https://mcp.example",
     } in tools
@@ -881,3 +886,66 @@ def test_responses_image_output_stays_viewable():
     assert to_zen_responses(plain)["input"] == [
         {"type": "function_call_output", "call_id": "c2", "output": "ok"}
     ]
+
+
+def test_responses_namespace_tool_keeps_description():
+    # Live Zen 400: codex namespace containers without description.
+    req = from_responses(
+        {
+            "model": "m",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "multi_agent_v1",
+                    "description": "",
+                    "tools": [
+                        {"type": "function", "name": "close_agent"},
+                    ],
+                },
+            ],
+        }
+    )
+    assert req.tools[0].kind == "namespace"
+    out = to_zen_responses(req)["tools"][0]
+    assert out["type"] == "namespace"
+    assert "description" in out
+    assert out["tools"] == [{"type": "function", "name": "close_agent"}]
+
+
+def test_responses_additional_tools_dissolve():
+    # Live Zen 400 ("input[0] did not match any supported type"):
+    # codex additional_tools items dissolve into top-level tools and
+    # the item itself is dropped.
+    ns = {
+        "type": "namespace",
+        "name": "functions",
+        "description": "",
+        "tools": [{"type": "custom", "name": "exec", "description": "run js"}],
+    }
+    req = from_responses(
+        {
+            "model": "m",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}],
+                },
+                {
+                    "type": "additional_tools",
+                    "id": "at_1",
+                    "role": "developer",
+                    "tools": [ns],
+                },
+            ],
+        }
+    )
+    assert len(req.tools) == 1
+    assert req.tools[0].kind == "namespace"
+    out = to_zen_responses(req)
+    assert not [i for i in out["input"] if i.get("type") == "additional_tools"]
+    tools = out["tools"]
+    assert tools[0]["type"] == "namespace"
+    assert "description" in tools[0]
+    assert tools[0]["tools"][0]["name"] == "exec"
