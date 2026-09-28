@@ -9,7 +9,7 @@ class AdminHub:
     """asyncio.Queue fan-out for admin collection changes (keys/models/providers).
 
     CRUD writes in the admin routes publish a notification per topic; the
-    /ui/*/stream SSE endpoints re-snapshot their collection on each
+    /api/admin/*/sse SSE endpoints re-snapshot their collection on each
     notification. Mirrors ProviderRuntime's subscriber fan-out (asyncio only,
     no threads, slow readers are dropped instead of blocking writers).
     """

@@ -22,7 +22,7 @@ def _usage(request: Request):
 
 
 def keys_snapshot(store: Store, usage: dict) -> dict:
-    """Shared builder for GET /api/admin/keys and GET /ui/keys/stream."""
+    """Shared builder for GET /api/admin/keys and GET /api/admin/keys/sse."""
     usage_keys = usage.get("keys", {})
     return {
         "keys": [
@@ -48,7 +48,7 @@ def keys_snapshot(store: Store, usage: dict) -> dict:
 
 
 def models_snapshot(store: Store) -> dict:
-    """Shared builder for GET /api/admin/models and GET /ui/models/stream."""
+    """Shared builder for GET /api/admin/models and GET /api/admin/models/sse."""
     return {
         "models": [
             {"id": m.id, "label": m.label, "enabled": m.enabled}

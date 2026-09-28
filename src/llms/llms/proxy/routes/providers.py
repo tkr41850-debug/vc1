@@ -70,7 +70,7 @@ async def list_providers(request: Request, _admin: str = Depends(require_admin))
 
 
 def providers_snapshot(request: Request) -> dict:
-    """Shared builder for GET /api/admin/providers and GET /ui/providers/stream."""
+    """Shared builder for GET /api/admin/providers and GET /api/admin/providers/sse."""
     try:
         return {"providers": snapshot_all(_registry(request))}
     except StoreError as exc:
@@ -201,6 +201,9 @@ async def _do_reconnect(request: Request, provider_id: str) -> dict:
     result = await registry.reconnect(provider)
     invalidate_ips(provider_id)
     _sync_slots(request)
+    # Reconnect changes health/retry state in the snapshot; push it so SSE
+    # clients (no polling) see the new state without refetching.
+    await get_hub(request).publish("providers")
     return {"id": provider_id, **result}
 
 

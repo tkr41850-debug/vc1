@@ -15,9 +15,9 @@ import uvicorn
 from tests.conftest import make_settings
 
 STREAMS = (
-    ("/ui/keys/stream", "/api/admin/keys", "keys"),
-    ("/ui/models/stream", "/api/admin/models", "models"),
-    ("/ui/providers/stream", "/api/admin/providers", "providers"),
+    ("/api/admin/keys/sse", "/api/admin/keys", "keys"),
+    ("/api/admin/models/sse", "/api/admin/models", "models"),
+    ("/api/admin/providers/sse", "/api/admin/providers", "providers"),
 )
 
 
@@ -110,7 +110,7 @@ async def test_stream_snapshot_matches_rest(
 async def test_keys_stream_pushes_crud_updates(live_server):
     base, app = live_server
     async with _authed(base) as c:
-        async with c.stream("GET", "/ui/keys/stream") as r:
+        async with c.stream("GET", "/api/admin/keys/sse") as r:
             assert r.status_code == 200
             it = r.aiter_text()
             buf = ""
@@ -154,7 +154,7 @@ async def test_keys_stream_pushes_crud_updates(live_server):
 
 async def test_models_stream_pushes_crud_updates(live_server):
     base, _ = live_server
-    async with _authed(base) as c, c.stream("GET", "/ui/models/stream") as r:
+    async with _authed(base) as c, c.stream("GET", "/api/admin/models/sse") as r:
         assert r.status_code == 200
         it = r.aiter_text()
         buf = ""
@@ -176,7 +176,7 @@ async def test_models_stream_pushes_crud_updates(live_server):
 
 async def test_providers_stream_pushes_crud_updates(live_server):
     base, _ = live_server
-    async with _authed(base) as c, c.stream("GET", "/ui/providers/stream") as r:
+    async with _authed(base) as c, c.stream("GET", "/api/admin/providers/sse") as r:
         assert r.status_code == 200
         it = r.aiter_text()
         buf = ""
@@ -204,13 +204,13 @@ async def test_providers_stream_pushes_crud_updates(live_server):
 
 
 async def test_stream_heartbeats_are_ping_comments(live_server, monkeypatch):
-    from llms.proxy.routes import ui_streams
+    from llms.proxy.routes import admin_streams
 
     # Same process serves the stream (thread), so patching the cadence here
     # applies there too: no CRUD, just wait for a heartbeat comment.
-    monkeypatch.setattr(ui_streams, "HEARTBEAT_S", 0.2)
+    monkeypatch.setattr(admin_streams, "HEARTBEAT_S", 0.2)
     base, _ = live_server
-    async with _authed(base) as c, c.stream("GET", "/ui/models/stream") as r:
+    async with _authed(base) as c, c.stream("GET", "/api/admin/models/sse") as r:
         assert r.status_code == 200
         it = r.aiter_text()
         buf = ""
@@ -233,7 +233,7 @@ async def test_streams_reject_unauthenticated(live_server):
             assert r.json() == {"error": {"message": "admin login required"}}
 
 
-async def test_streams_registered_before_spa_fallback(live_server):
+async def test_streams_live_beside_spa_routes(live_server):
     base, _ = live_server
     async with _authed(base) as c:
         for stream_path, _, _ in STREAMS:
@@ -247,8 +247,10 @@ async def test_streams_registered_before_spa_fallback(live_server):
     async with httpx.AsyncClient(
         base_url=base, timeout=10.0, follow_redirects=False
     ) as c:
-        # Logged out: SPA pages bounce to login, but streams 401 like admin API.
+        # Logged out: SPA pages bounce to login, streams 401 like admin API
+        # (they live under /api/admin/*, so no gate special-casing).
         r = await c.get("/ui/keys")
         assert r.status_code == 302
-        r = await c.get("/ui/keys/stream")
+        r = await c.get("/api/admin/keys/sse")
         assert r.status_code == 401
+        assert r.json() == {"error": {"message": "admin login required"}}

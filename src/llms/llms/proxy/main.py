@@ -18,6 +18,7 @@ from llms.proxy.middleware import GateMiddleware
 from llms.proxy.providers import ProviderRegistry
 from llms.proxy.routes import router as health_router
 from llms.proxy.routes.admin import router as admin_router
+from llms.proxy.routes.admin_streams import router as admin_streams_router
 from llms.proxy.routes.auth import router as auth_router
 from llms.proxy.routes.chat import router as chat_router
 from llms.proxy.routes.messages import router as messages_router
@@ -25,7 +26,6 @@ from llms.proxy.routes.models import router as models_router
 from llms.proxy.routes.providers import operator_router as providers_operator_router
 from llms.proxy.routes.providers import router as providers_router
 from llms.proxy.routes.responses import router as responses_router
-from llms.proxy.routes.ui_streams import router as ui_streams_router
 from llms.proxy.sessions import SessionTracker
 from llms.proxy.usage import UsageTracker
 from llms.proxy.warp import WarpSupervisor
@@ -143,10 +143,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(admin_router)
+    app.include_router(admin_streams_router)
     app.include_router(providers_router)
-    # /ui/*/stream SSE endpoints must precede the SPA fallback below (and the
-    # static mount), or they'd serve index.html instead of text/event-stream.
-    app.include_router(ui_streams_router)
     app.include_router(providers_operator_router)
     app.include_router(models_router)
     app.include_router(responses_router)

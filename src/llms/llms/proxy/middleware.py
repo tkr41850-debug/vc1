@@ -28,17 +28,7 @@ def is_oauth_path(path: str) -> bool:
 
 
 def is_admin_path(path: str) -> bool:
-    if path == "/api/admin" or path.startswith("/api/admin/"):
-        return True
-    # Admin live-update SSE streams live under /ui/* alongside the SPA they
-    # feed, but they authenticate as admin API (401 JSON when logged out, like
-    # /api/admin/*) — not as SPA pages (302 to login). EventSource cannot do
-    # interactive login, and a redirect would serve index.html as a "stream".
-    return path in (
-        "/ui/keys/stream",
-        "/ui/models/stream",
-        "/ui/providers/stream",
-    )
+    return path == "/api/admin" or path.startswith("/api/admin/")
 
 
 def is_ui_path(path: str) -> bool:

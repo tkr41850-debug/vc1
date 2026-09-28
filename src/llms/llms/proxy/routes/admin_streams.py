@@ -16,7 +16,11 @@ from llms.proxy.store import Store
 
 router = APIRouter()
 
-# Heartbeat cadence mirrors the per-provider recent-request stream
+# Collection live-update streams for the admin UI. They sit next to the
+# REST list endpoints they mirror (same snapshot shape as GET
+# /api/admin/{keys,models,providers}) so the browser holds one SSE per
+# collection instead of polling GETs. Heartbeat cadence mirrors the
+# per-provider recent-request stream
 # (GET /api/admin/providers/{id}/stream): SSE comments only, never fake
 # events, so proxies don't kill idle connections.
 HEARTBEAT_S = 15.0
@@ -48,7 +52,7 @@ async def _collection_stream(
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
-@router.get("/ui/keys/stream")
+@router.get("/api/admin/keys/sse")
 async def keys_stream(
     request: Request,
     settings: Settings = Depends(settings_from_app),
@@ -64,7 +68,7 @@ async def keys_stream(
     return await _collection_stream(request, "keys", snapshot)
 
 
-@router.get("/ui/models/stream")
+@router.get("/api/admin/models/sse")
 async def models_stream(
     request: Request,
     settings: Settings = Depends(settings_from_app),
@@ -74,7 +78,7 @@ async def models_stream(
     return await _collection_stream(request, "models", lambda: models_snapshot(store))
 
 
-@router.get("/ui/providers/stream")
+@router.get("/api/admin/providers/sse")
 async def providers_stream(request: Request, _admin: str = Depends(require_admin)):
     return await _collection_stream(
         request, "providers", lambda: providers_snapshot(request)
