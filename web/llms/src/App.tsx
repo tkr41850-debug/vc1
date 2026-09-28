@@ -21,6 +21,7 @@ export default function App() {
   const [providers, setProviders] = useState<ProviderEntry[]>([]);
   const [authed, setAuthed] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [live, setLive] = useState(true);
 
   const onAuthError = useCallback(() => setAuthed(false), []);
 
@@ -47,19 +48,49 @@ export default function App() {
     reload();
     const onPop = () => setTab(tabFromPath(window.location.pathname));
     window.addEventListener("popstate", onPop);
-    // Pause background polling while the tab is hidden: an idle admin page
-    // shouldn't keep churning the server's YAML parses + usage snapshots.
+    // Live-update streams replace the old 15s poll loop: snapshot on
+    // connect (same shape as the REST endpoints above), then pushes on
+    // every CRUD write. EventSource auto-reconnects; on hard errors we
+    // fall back to a one-shot reload so the page never goes stale.
     const onVis = () => {
       if (!document.hidden) reload();
     };
     document.addEventListener("visibilitychange", onVis);
-    const t = setInterval(() => {
-      if (!document.hidden) reload();
-    }, 15000);
+    const subs: EventSource[] = [];
+    const watch = (
+      url: string,
+      apply: (msg: { keys?: ApiKeyEntry[]; models?: ModelEntry[]; providers?: ProviderEntry[] }) => void,
+    ) => {
+      const es = new EventSource(url);
+      subs.push(es);
+      es.onmessage = (ev) => {
+        try {
+          apply(JSON.parse(ev.data));
+        } catch {
+          /* keep old */
+        }
+      };
+      es.onerror = () => {
+        if (es.readyState === EventSource.CLOSED) return;
+        // Transient disconnect: EventSource retries on its own; flag the
+        // banner only if we stay dark (reload fills the gap meanwhile).
+        setLive(false);
+        reload().finally(() => setLive(true));
+      };
+    };
+    watch("/ui/keys/stream", (msg) => {
+      if (msg.keys) setKeys(msg.keys);
+    });
+    watch("/ui/models/stream", (msg) => {
+      if (msg.models) setModels(msg.models);
+    });
+    watch("/ui/providers/stream", (msg) => {
+      if (msg.providers) setProviders(msg.providers);
+    });
     return () => {
       window.removeEventListener("popstate", onPop);
       document.removeEventListener("visibilitychange", onVis);
-      clearInterval(t);
+      subs.forEach((es) => es.close());
     };
   }, [reload]);
 
@@ -96,9 +127,12 @@ export default function App() {
     <div className="mx-auto max-w-5xl p-6">
       <header className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-semibold">llms admin</h1>
-        <button className="text-sm text-gray-600 hover:underline" onClick={logout}>
-          Sign out
-        </button>
+        <div className="flex items-center gap-3">
+          {!live && <span className="text-xs text-amber-600">reconnecting…</span>}
+          <button className="text-sm text-gray-600 hover:underline" onClick={logout}>
+            Sign out
+          </button>
+        </div>
       </header>
       <nav className="mb-4 flex gap-2 border-b">
         {(["keys", "models", "providers"] as Tab[]).map((t) => (
