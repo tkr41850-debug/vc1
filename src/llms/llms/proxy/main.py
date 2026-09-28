@@ -25,6 +25,7 @@ from llms.proxy.routes.models import router as models_router
 from llms.proxy.routes.providers import operator_router as providers_operator_router
 from llms.proxy.routes.providers import router as providers_router
 from llms.proxy.routes.responses import router as responses_router
+from llms.proxy.routes.ui_streams import router as ui_streams_router
 from llms.proxy.sessions import SessionTracker
 from llms.proxy.usage import UsageTracker
 from llms.proxy.warp import WarpSupervisor
@@ -115,6 +116,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.usage = UsageTracker()
     app.state.usage.load_file(app.state.settings.data_dir)
     app.state.sessions = SessionTracker()
+    from llms.proxy.admin_hub import AdminHub
+
+    app.state.admin_hub = AdminHub()
     from llms.proxy.dedup import DedupTable, SessionReservations
 
     app.state.dedup = DedupTable()
@@ -140,6 +144,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth_router)
     app.include_router(admin_router)
     app.include_router(providers_router)
+    # /ui/*/stream SSE endpoints must precede the SPA fallback below (and the
+    # static mount), or they'd serve index.html instead of text/event-stream.
+    app.include_router(ui_streams_router)
     app.include_router(providers_operator_router)
     app.include_router(models_router)
     app.include_router(responses_router)

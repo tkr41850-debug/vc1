@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from llms.proxy.admin_hub import get_hub
 from llms.proxy.auth import require_admin
 from llms.proxy.config import Settings, settings_from_app
 from llms.proxy.store import ApiKey, ModelEntry, Store, is_secret_key
@@ -18,6 +19,42 @@ def _store(settings: Settings) -> Store:
 
 def _usage(request: Request):
     return request.app.state.usage.snapshot()
+
+
+def keys_snapshot(store: Store, usage: dict) -> dict:
+    """Shared builder for GET /api/admin/keys and GET /ui/keys/stream."""
+    usage_keys = usage.get("keys", {})
+    return {
+        "keys": [
+            {
+                "key": k.key,
+                "label": k.label,
+                "enabled": k.enabled,
+                "usage": usage_keys.get(
+                    k.key,
+                    {
+                        "requests": 0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cached_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "models": {},
+                    },
+                ),
+            }
+            for k in store.load_keys()
+        ]
+    }
+
+
+def models_snapshot(store: Store) -> dict:
+    """Shared builder for GET /api/admin/models and GET /ui/models/stream."""
+    return {
+        "models": [
+            {"id": m.id, "label": m.label, "enabled": m.enabled}
+            for m in store.load_models()
+        ]
+    }
 
 
 class KeyBody(BaseModel):
@@ -48,34 +85,13 @@ async def list_keys(
     settings: Settings = Depends(settings_from_app),
     _admin: str = Depends(require_admin),
 ):
-    keys = _store(settings).load_keys()
-    usage_keys = _usage(request).get("keys", {})
-    return {
-        "keys": [
-            {
-                "key": k.key,
-                "label": k.label,
-                "enabled": k.enabled,
-                "usage": usage_keys.get(
-                    k.key,
-                    {
-                        "requests": 0,
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "cached_tokens": 0,
-                        "reasoning_tokens": 0,
-                        "models": {},
-                    },
-                ),
-            }
-            for k in keys
-        ]
-    }
+    return keys_snapshot(_store(settings), _usage(request))
 
 
 @router.post("/api/admin/keys", status_code=201)
 async def create_key(
     body: KeyBody,
+    request: Request,
     settings: Settings = Depends(settings_from_app),
     _admin: str = Depends(require_admin),
 ):
@@ -92,6 +108,7 @@ async def create_key(
         raise HTTPException(status_code=409, detail="key already exists")
     keys.append(ApiKey(key=body.key, label=body.label, enabled=body.enabled))
     store.save_keys(keys)
+    await get_hub(request).publish("keys")
     return {"key": body.key, "label": body.label, "enabled": body.enabled}
 
 
@@ -103,6 +120,7 @@ class KeyRotate(BaseModel):
 async def update_key(
     key: str,
     body: KeyPatch,
+    request: Request,
     settings: Settings = Depends(settings_from_app),
     _admin: str = Depends(require_admin),
 ):
@@ -115,6 +133,7 @@ async def update_key(
             if body.enabled is not None:
                 k.enabled = body.enabled
             store.save_keys(keys)
+            await get_hub(request).publish("keys")
             return {"key": k.key, "label": k.label, "enabled": k.enabled}
     raise HTTPException(status_code=404, detail="key not found")
 
@@ -150,12 +169,14 @@ async def rotate_key(
     tracker = getattr(request.app.state, "usage", None)
     if tracker is not None:
         tracker.rekey(key, new_key)
+    await get_hub(request).publish("keys")
     return {"key": new_key, "label": old.label, "enabled": True}
 
 
 @router.delete("/api/admin/keys/{key:path}")
 async def delete_key(
     key: str,
+    request: Request,
     settings: Settings = Depends(settings_from_app),
     _admin: str = Depends(require_admin),
 ):
@@ -164,6 +185,7 @@ async def delete_key(
     if len(keys) == len(store.load_keys()):
         raise HTTPException(status_code=404, detail="key not found")
     store.save_keys(keys)
+    await get_hub(request).publish("keys")
     return {"status": "ok"}
 
 
@@ -172,17 +194,13 @@ async def list_models(
     settings: Settings = Depends(settings_from_app),
     _admin: str = Depends(require_admin),
 ):
-    return {
-        "models": [
-            {"id": m.id, "label": m.label, "enabled": m.enabled}
-            for m in _store(settings).load_models()
-        ]
-    }
+    return models_snapshot(_store(settings))
 
 
 @router.post("/api/admin/models", status_code=201)
 async def create_model(
     body: ModelBody,
+    request: Request,
     settings: Settings = Depends(settings_from_app),
     _admin: str = Depends(require_admin),
 ):
@@ -194,6 +212,7 @@ async def create_model(
         raise HTTPException(status_code=409, detail="model already exists")
     models.append(ModelEntry(id=body.id, label=body.label, enabled=body.enabled))
     store.save_models(models)
+    await get_hub(request).publish("models")
     return {"id": body.id, "label": body.label, "enabled": body.enabled}
 
 
@@ -201,6 +220,7 @@ async def create_model(
 async def update_model(
     model_id: str,
     body: ModelPatch,
+    request: Request,
     settings: Settings = Depends(settings_from_app),
     _admin: str = Depends(require_admin),
 ):
@@ -213,6 +233,7 @@ async def update_model(
             if body.enabled is not None:
                 m.enabled = body.enabled
             store.save_models(models)
+            await get_hub(request).publish("models")
             return {"id": m.id, "label": m.label, "enabled": m.enabled}
     raise HTTPException(status_code=404, detail="model not found")
 
@@ -220,6 +241,7 @@ async def update_model(
 @router.delete("/api/admin/models/{model_id:path}")
 async def delete_model(
     model_id: str,
+    request: Request,
     settings: Settings = Depends(settings_from_app),
     _admin: str = Depends(require_admin),
 ):
@@ -228,6 +250,7 @@ async def delete_model(
     if len(models) == len(store.load_models()):
         raise HTTPException(status_code=404, detail="model not found")
     store.save_models(models)
+    await get_hub(request).publish("models")
     return {"status": "ok"}
 
 

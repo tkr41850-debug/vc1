@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from llms.proxy.admin_hub import get_hub
 from llms.proxy.auth import require_admin
 from llms.proxy.config import Settings, settings_from_app
 from llms.proxy.providers import Provider, ProviderRegistry, snapshot_all
@@ -65,6 +66,11 @@ class ProviderPatch(BaseModel):
 
 @router.get("/api/admin/providers")
 async def list_providers(request: Request, _admin: str = Depends(require_admin)):
+    return providers_snapshot(request)
+
+
+def providers_snapshot(request: Request) -> dict:
+    """Shared builder for GET /api/admin/providers and GET /ui/providers/stream."""
     try:
         return {"providers": snapshot_all(_registry(request))}
     except StoreError as exc:
@@ -105,6 +111,7 @@ async def create_provider(
     if body.kind == "warp":
         registry.ensure_warp_dir(body.id)
     _sync_slots(request)
+    await get_hub(request).publish("providers")
     return {"id": body.id}
 
 
@@ -132,6 +139,7 @@ async def update_provider(
                 p.enabled = body.enabled
             registry.save(providers)
             _sync_slots(request)
+            await get_hub(request).publish("providers")
             return {"id": p.id, "enabled": p.enabled}
     raise HTTPException(status_code=404, detail="provider not found")
 
@@ -158,6 +166,7 @@ async def delete_provider(
         await supervisor.drop(provider_id)
     invalidate_ips(provider_id)
     _sync_slots(request)
+    await get_hub(request).publish("providers")
     return {"status": "ok"}
 
 
