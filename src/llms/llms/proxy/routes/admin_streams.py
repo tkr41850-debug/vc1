@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Request
@@ -11,8 +12,10 @@ from llms.proxy.admin_hub import get_hub
 from llms.proxy.auth import require_admin
 from llms.proxy.config import Settings, settings_from_app
 from llms.proxy.routes.admin import keys_snapshot, models_snapshot
-from llms.proxy.routes.providers import providers_snapshot
+from llms.proxy.routes.providers import _registry, providers_snapshot
 from llms.proxy.store import Store
+
+logger = logging.getLogger("zen_proxy")
 
 router = APIRouter()
 
@@ -42,15 +45,39 @@ def _mtimes(paths: list[Path]) -> float:
 
 
 async def _collection_stream(
-    request: Request, topic: str, snapshot, watch: list[Path] | None = None
+    request: Request,
+    topic: str,
+    snapshot,
+    watch: list[Path] | None = None,
+    refresh=None,
 ) -> StreamingResponse:
+    """Snapshot-now, refresh, then live updates.
+
+    The first frame is always what is currently known (pure in-memory
+    reads — never waits on refresh), so page load never stalls behind a
+    slow poll. When ``refresh`` is given (providers: TTL-gated health
+    re-poll), it runs after the first frame and a second frame goes out
+    only if the payload actually changed.
+    """
+
     async def gen():
         # Subscribe BEFORE the first snapshot: a CRUD publishing in between
         # stays queued and triggers an immediate second snapshot below,
         # so no write in that window is ever lost.
         q = await get_hub(request).subscribe(topic)
         try:
-            yield _frame(snapshot())
+            last = _frame(snapshot())
+            yield last
+            if refresh is not None:
+                try:
+                    await refresh()
+                except Exception as exc:
+                    logger.debug("sse %s refresh failed: %r", topic, exc)
+                else:
+                    fresh = _frame(snapshot())
+                    if fresh != last:
+                        last = fresh
+                        yield fresh
             # Out-of-band edits (keygen CLI, hand-edited YAML) bypass the
             # CRUD routes and their publishes; the heartbeat re-stats the
             # files and pushes a fresh snapshot when they moved.
@@ -65,11 +92,13 @@ async def _collection_stream(
                         now = _mtimes(watch)
                         if now > seen:
                             seen = now
-                            yield _frame(snapshot())
+                            last = _frame(snapshot())
+                            yield last
                             continue
                     yield ": ping\n\n"
                     continue
-                yield _frame(snapshot())
+                last = _frame(snapshot())
+                yield last
         finally:
             await get_hub(request).unsubscribe(topic, q)
 
@@ -117,6 +146,17 @@ async def providers_stream(
     _admin: str = Depends(require_admin),
 ):
     watch = [Path(settings.data_dir) / "providers.yaml"]
+
+    async def _refresh() -> None:
+        # TTL-gated (no force): a no-op when health is fresh, a background
+        # warp status poll otherwise. Never delays the first frame.
+        registry = _registry(request)
+        for p in registry.load():
+            try:
+                await registry.refresh_health(p)
+            except Exception as exc:
+                logger.debug("sse providers refresh %s failed: %r", p.id, exc)
+
     return await _collection_stream(
-        request, "providers", lambda: providers_snapshot(request), watch
+        request, "providers", lambda: providers_snapshot(request), watch, _refresh
     )

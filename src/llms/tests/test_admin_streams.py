@@ -180,6 +180,20 @@ async def test_providers_stream_pushes_crud_updates(live_server):
         assert r.status_code == 200
         it = r.aiter_text()
         buf = ""
+
+        async def _until(pred, what):
+            # Frames also arrive from the connect-time refresh pass, so
+            # scan (skipping pings) instead of asserting on the next frame.
+            nonlocal buf
+            for _ in range(30):
+                frame, buf = await asyncio.wait_for(_read_frame(it, buf), 10)
+                if frame == ": ping":
+                    continue
+                assert frame.startswith("data: ")
+                if pred(_data(frame)["providers"]):
+                    return
+            raise AssertionError(f"timed out waiting for providers {what}")
+
         frame, buf = await _read_frame(it, buf)
         assert "sse-stream-np" not in [p["id"] for p in _data(frame)["providers"]]
 
@@ -195,12 +209,10 @@ async def test_providers_stream_pushes_crud_updates(live_server):
             },
         )
         assert rc.status_code == 201
-        frame, buf = await asyncio.wait_for(_read_frame(it, buf), 10)
-        assert "sse-stream-np" in [p["id"] for p in _data(frame)["providers"]]
+        await _until(lambda ps: "sse-stream-np" in [p["id"] for p in ps], "create")
 
         await c.delete("/api/admin/providers/sse-stream-np")
-        frame, buf = await asyncio.wait_for(_read_frame(it, buf), 10)
-        assert "sse-stream-np" not in [p["id"] for p in _data(frame)["providers"]]
+        await _until(lambda ps: "sse-stream-np" not in [p["id"] for p in ps], "delete")
 
 
 async def test_providers_stream_pushes_reconnect(live_server, monkeypatch):
@@ -329,6 +341,44 @@ async def test_keys_stream_pushes_out_of_band_file_edits(live_server, monkeypatc
             assert seen
         finally:
             store.save_keys([k for k in store.load_keys() if k.key != "sk-oob-edit"])
+
+
+async def test_providers_stream_sends_stale_then_refreshed(live_server):
+    """First frame is what is known (never waits on refresh); the refresh
+    pass follows with a second frame only when the payload changed."""
+    base, _ = live_server
+    async with _authed(base) as c:
+        rc = await c.post(
+            "/api/admin/providers",
+            json={
+                "id": "sse-stream-refresh",
+                "label": "R",
+                "kind": "noproxy",
+                "models": [],
+                "enabled": True,
+                "exits": 1,
+            },
+        )
+        assert rc.status_code == 201
+        try:
+            async with c.stream("GET", "/api/admin/providers/sse") as r:
+                assert r.status_code == 200
+                it = r.aiter_text()
+                buf = ""
+                frame1, buf = await _read_frame(it, buf)
+                d1 = _data(frame1)
+                assert "sse-stream-refresh" in [p["id"] for p in d1["providers"]]
+                # The refresh pass re-polls health (fetched_at moves), so a
+                # changed second frame follows without any CRUD write.
+                frame2, buf = await asyncio.wait_for(_read_frame(it, buf), 10)
+                assert frame2.startswith("data: ")
+                d2 = _data(frame2)
+                assert [p["id"] for p in d2["providers"]] == [
+                    p["id"] for p in d1["providers"]
+                ]
+                assert frame2 != frame1
+        finally:
+            await c.delete("/api/admin/providers/sse-stream-refresh")
 
 
 async def test_stream_heartbeats_are_ping_comments(live_server, monkeypatch):

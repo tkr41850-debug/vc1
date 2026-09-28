@@ -250,6 +250,7 @@ class WarpPool:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        loop = asyncio.get_running_loop()
         for idx, proc in list(self._daemons.items()):
             if proc.returncode is not None:
                 continue
@@ -264,9 +265,12 @@ class WarpPool:
             # The IPC socket outlives a terminated daemon; a stale socket
             # makes the next ensure_daemon() return True for a dead daemon
             # (warp-cli then fails with "connection refused"). Remove it so
-            # the next boot spawns fresh.
-            self._unlink_stale_socket(
-                runtime_dir_for(self.provider_id, idx) / "warp_service"
+            # the next boot spawns fresh. Off-loop: unlink is a syscall but
+            # the sudo fallback shells out.
+            await loop.run_in_executor(
+                None,
+                self._unlink_stale_socket,
+                runtime_dir_for(self.provider_id, idx) / "warp_service",
             )
         self._daemons.clear()
 
@@ -511,7 +515,9 @@ class WarpPool:
                 self.provider_id,
                 slot.idx,
             )
-            if not self._unlink_stale_socket(sock):
+            if not await check_loop.run_in_executor(
+                None, self._unlink_stale_socket, sock
+            ):
                 log.warning(
                     "[%s] cannot remove stale socket #%s; skipping spawn",
                     self.provider_id,
