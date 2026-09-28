@@ -224,6 +224,24 @@ def test_warp_429_triggers_bounce_and_returns_429(cycle_world):
     assert registry.runtime("pool1").cycling is False
 
 
+def test_warp_429_publishes_providers(cycle_world):
+    """A 429 backoff (yellow status dot) pushes to the providers SSE hub,
+    so admin viewers converge without polling."""
+    import asyncio
+
+    tc, registry, _pool, _calls = cycle_world
+    hub = tc.app.state.admin_hub
+    q = asyncio.run(hub.subscribe("providers"))
+    try:
+        r = _post(tc)
+        assert r.status_code == 429
+        # The bounce task may already have cleared the backoff (portal lets
+        # background tasks finish); the queued notification is the proof.
+        asyncio.run(asyncio.wait_for(q.get(), 10))
+    finally:
+        asyncio.run(hub.unsubscribe("providers", q))
+
+
 def test_next_request_fails_over_to_direct_while_cycling(cycle_world):
     """While the warp bounce is in flight, traffic fails open to direct."""
     tc, registry, pool, calls = cycle_world

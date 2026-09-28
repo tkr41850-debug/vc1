@@ -30,8 +30,19 @@ def _frame(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+def _mtimes(paths: list[Path]) -> float:
+    """Newest mtime across paths (missing files sort as epoch)."""
+    latest = 0.0
+    for p in paths:
+        try:
+            latest = max(latest, p.stat().st_mtime)
+        except OSError:
+            pass
+    return latest
+
+
 async def _collection_stream(
-    request: Request, topic: str, snapshot
+    request: Request, topic: str, snapshot, watch: list[Path] | None = None
 ) -> StreamingResponse:
     async def gen():
         # Subscribe BEFORE the first snapshot: a CRUD publishing in between
@@ -40,12 +51,22 @@ async def _collection_stream(
         q = await get_hub(request).subscribe(topic)
         try:
             yield _frame(snapshot())
+            # Out-of-band edits (keygen CLI, hand-edited YAML) bypass the
+            # CRUD routes and their publishes; the heartbeat re-stats the
+            # files and pushes a fresh snapshot when they moved.
+            seen = _mtimes(watch or [])
             while True:
                 if await request.is_disconnected():
                     break
                 try:
                     await asyncio.wait_for(q.get(), timeout=HEARTBEAT_S)
                 except TimeoutError:
+                    if watch is not None:
+                        now = _mtimes(watch)
+                        if now > seen:
+                            seen = now
+                            yield _frame(snapshot())
+                            continue
                     yield ": ping\n\n"
                     continue
                 yield _frame(snapshot())
@@ -66,13 +87,14 @@ async def keys_stream(
     _admin: str = Depends(require_admin),
 ):
     store = Store(data_dir=Path(settings.data_dir))
+    watch = [Path(settings.data_dir) / "keys.yaml"]
 
     def snapshot() -> dict:
         # Usage is live (in-memory counters), so re-read it on every event;
         # closing over the connect-time snapshot would go stale.
         return keys_snapshot(store, request.app.state.usage.snapshot())
 
-    return await _collection_stream(request, "keys", snapshot)
+    return await _collection_stream(request, "keys", snapshot, watch)
 
 
 @router.get("/api/admin/models/sse")
@@ -82,11 +104,19 @@ async def models_stream(
     _admin: str = Depends(require_admin),
 ):
     store = Store(data_dir=Path(settings.data_dir))
-    return await _collection_stream(request, "models", lambda: models_snapshot(store))
+    watch = [Path(settings.data_dir) / "models.yaml"]
+    return await _collection_stream(
+        request, "models", lambda: models_snapshot(store), watch
+    )
 
 
 @router.get("/api/admin/providers/sse")
-async def providers_stream(request: Request, _admin: str = Depends(require_admin)):
+async def providers_stream(
+    request: Request,
+    settings: Settings = Depends(settings_from_app),
+    _admin: str = Depends(require_admin),
+):
+    watch = [Path(settings.data_dir) / "providers.yaml"]
     return await _collection_stream(
-        request, "providers", lambda: providers_snapshot(request)
+        request, "providers", lambda: providers_snapshot(request), watch
     )

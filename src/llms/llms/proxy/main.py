@@ -66,10 +66,14 @@ async def lifespan(app: FastAPI):
                 app.state.usage.save_file(settings.data_dir)
                 # Usage counters move on every proxied request with no CRUD
                 # in sight; republish so the keys SSE (no polling) refreshes
-                # its live usage aggregates about once a minute.
+                # its live usage aggregates about once a minute. Providers
+                # ride along so background heals/refreshes (green/red/gray
+                # flips with no admin write) converge within a minute too —
+                # hot paths (429, bounce-clear, reconnect) publish at once.
                 hub = getattr(app.state, "admin_hub", None)
                 if hub is not None:
                     await hub.publish("keys")
+                    await hub.publish("providers")
 
     task = asyncio.create_task(_flush_loop())
     if getattr(app.state, "warp", None) is None:

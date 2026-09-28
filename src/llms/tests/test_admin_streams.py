@@ -296,6 +296,41 @@ async def test_sse_ids_do_not_shadow_collection_streams(live_server):
             await c.delete("/api/admin/providers/sse")
 
 
+async def test_keys_stream_pushes_out_of_band_file_edits(live_server, monkeypatch):
+    """Edits bypassing the CRUD routes (keygen CLI, hand-edited YAML) still
+    push: the heartbeat re-stats keys.yaml and snapshots on change."""
+    from llms.proxy.routes import admin_streams
+    from llms.proxy.store import ApiKey, Store
+
+    monkeypatch.setattr(admin_streams, "HEARTBEAT_S", 0.2)
+    base, app = live_server
+    from pathlib import Path
+
+    store = Store(data_dir=Path(app.state.settings.data_dir))
+    async with _authed(base) as c, c.stream("GET", "/api/admin/keys/sse") as r:
+        assert r.status_code == 200
+        it = r.aiter_text()
+        buf = ""
+        frame, buf = await _read_frame(it, buf)
+        assert "sk-oob-edit" not in [k["key"] for k in _data(frame)["keys"]]
+        keys = store.load_keys()
+        keys.append(ApiKey(key="sk-oob-edit", label="oob"))
+        store.save_keys(keys)
+        try:
+            seen = False
+            for _ in range(20):
+                frame, buf = await asyncio.wait_for(_read_frame(it, buf), 10)
+                if frame == ": ping":
+                    continue
+                assert frame.startswith("data: ")
+                if "sk-oob-edit" in [k["key"] for k in _data(frame)["keys"]]:
+                    seen = True
+                    break
+            assert seen
+        finally:
+            store.save_keys([k for k in store.load_keys() if k.key != "sk-oob-edit"])
+
+
 async def test_stream_heartbeats_are_ping_comments(live_server, monkeypatch):
     from llms.proxy.routes import admin_streams
 

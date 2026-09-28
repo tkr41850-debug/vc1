@@ -10,6 +10,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from llms.proxy import dedup, sessions
+from llms.proxy.admin_hub import get_hub
 from llms.proxy.affinity import bucket_for
 from llms.proxy.config import Settings
 from llms.proxy.forward import forward, parse_body
@@ -841,6 +842,9 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                     "noproxy",
                 )
                 registry.runtime(direct_id).note_ratelimited(retry_after, reason)
+            # The 429 backoff feeds the providers SSE status (yellow dot):
+            # push so admin viewers converge without polling.
+            await get_hub(request).publish("providers")
             # Fast-failover hint: pool min-retry over providers serving this
             # model ("when the next request is ok" per the 429 memo). ~1s
             # floor so the client retries fast onto the failover provider.
@@ -1069,6 +1073,8 @@ def _maybe_auto_cycle(
                         provider_id,
                         inst.idx,
                     )
+                    # Backoff cleared: push the fresh (green) status to SSE.
+                    await get_hub(request).publish("providers")
 
         rt.cycle_task = asyncio.create_task(_bounce_and_clear())
     except Exception as exc:
