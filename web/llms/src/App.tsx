@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, type ApiKeyEntry, type ModelEntry, type ProviderEntry } from "./api";
 import KeysTab from "./components/KeysTab";
 import ModelsTab from "./components/ModelsTab";
@@ -22,6 +22,8 @@ export default function App() {
   const [authed, setAuthed] = useState(true);
   const [loading, setLoading] = useState(true);
   const [live, setLive] = useState(true);
+  const [hasData, setHasData] = useState(false);
+  const subsRef = useRef<EventSource[]>([]);
 
   const onAuthError = useCallback(() => setAuthed(false), []);
 
@@ -35,6 +37,20 @@ export default function App() {
   // rely on the hub push, so this is a stable no-op kept for the tab props.
   const reload = useCallback(() => {}, []);
 
+  const logout = useCallback(async () => {
+    try {
+      await api.logout();
+    } catch {
+      /* expired session already logged out server-side; fall through */
+    } finally {
+      // Stop the streams: otherwise they 401-retry forever behind the
+      // login screen (App never unmounts).
+      subsRef.current.forEach((es) => es.close());
+      subsRef.current = [];
+      setAuthed(false);
+    }
+  }, []);
+
   useEffect(() => {
     const onPop = () => setTab(tabFromPath(window.location.pathname));
     window.addEventListener("popstate", onPop);
@@ -42,43 +58,66 @@ export default function App() {
     // refetching on visibility change or on transient errors.
     let snapshots = 0;
     let failures = 0;
+    let postFails = 0;
+    let reProbeAt = 0;
     let authProbed = false;
+    const closeSubs = () => {
+      subsRef.current.forEach((es) => es.close());
+      subsRef.current = [];
+    };
+    const goLoggedOut = () => {
+      closeSubs();
+      setAuthed(false);
+      setLoading(false);
+    };
+    // Single failure-path probe (never steady-state polling): EventSource
+    // hides the status code, so this tells logged-out (login screen) from
+    // a down server (banner).
+    const probeAuth = () => {
+      authProbed = true;
+      api.keys().then(
+        () => {
+          setLoading(false);
+          setLive(false);
+        },
+        (e) => {
+          if (e instanceof ApiError && e.status === 401) goLoggedOut();
+          else {
+            setLoading(false);
+            setLive(false);
+          }
+        },
+      );
+    };
     const firstSnapshot = () => {
       snapshots += 1;
+      postFails = 0;
       setAuthed(true);
-      setLoading(false);
+      setHasData(true);
+      // All three collections clear the spinner; a 5s fallback covers a
+      // hung third stream so partial data still renders (see below).
+      if (snapshots >= 3) setLoading(false);
       setLive(true);
     };
     const streamFailed = () => {
       failures += 1;
       if (snapshots > 0) {
         // Data was flowing: transient drop, EventSource retries itself.
+        // But a logged-out session 401-loops forever the same way, so
+        // re-probe after sustained darkness (6 straight errors ≈ 2 per
+        // stream) instead of sitting on the banner indefinitely.
+        postFails += 1;
         setLive(false);
+        if (postFails >= 6 && failures >= reProbeAt) {
+          reProbeAt = failures + 6;
+          authProbed = false;
+          probeAuth();
+        }
         return;
       }
-      if (failures >= 3 && !authProbed) {
-        authProbed = true;
-        // EventSource hides the status code, so a single probe tells a
-        // logged-out session (login screen) from a down server (banner).
-        // Failure-path only — never steady-state polling.
-        api.keys().then(
-          () => {
-            setLoading(false);
-            setLive(false);
-          },
-          (e) => {
-            if (e instanceof ApiError && e.status === 401) {
-              setAuthed(false);
-              setLoading(false);
-            } else {
-              setLoading(false);
-              setLive(false);
-            }
-          },
-        );
-      }
+      if (failures >= 3 && !authProbed) probeAuth();
     };
-    const subs: EventSource[] = [];
+    const subs = subsRef.current;
     const watch = (
       url: string,
       apply: (msg: { keys?: ApiKeyEntry[]; models?: ModelEntry[]; providers?: ProviderEntry[] }) => void,
@@ -92,6 +131,7 @@ export default function App() {
         } catch {
           /* keep old */
         }
+        postFails = 0;
         if (!gotData) {
           gotData = true;
           firstSnapshot();
@@ -101,8 +141,7 @@ export default function App() {
       };
       es.onerror = () => {
         if (es.readyState === EventSource.CLOSED) return;
-        if (!gotData) streamFailed();
-        else setLive(false);
+        streamFailed();
       };
     };
     watch("/api/admin/keys/sse", (msg) => {
@@ -114,21 +153,16 @@ export default function App() {
     watch("/api/admin/providers/sse", (msg) => {
       if (msg.providers) setProviders(msg.providers);
     });
+    // Fallback so one hung stream can't hold the spinner forever; the
+    // arrived slices render with the reconnecting banner until it lands.
+    const t = setTimeout(() => setLoading(false), 5000);
     return () => {
       window.removeEventListener("popstate", onPop);
+      clearTimeout(t);
       subs.forEach((es) => es.close());
+      subsRef.current = [];
     };
   }, []);
-
-  const logout = async () => {
-    try {
-      await api.logout();
-    } catch {
-      /* expired session already logged out server-side; fall through */
-    } finally {
-      setAuthed(false);
-    }
-  };
 
   if (loading) {
     return <div className="p-8 text-gray-500">Loading…</div>;
@@ -154,7 +188,10 @@ export default function App() {
       <header className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-semibold">llms admin</h1>
         <div className="flex items-center gap-3">
-          {!live && <span className="text-xs text-amber-600">reconnecting…</span>}
+          {!live && hasData && <span className="text-xs text-amber-600">reconnecting…</span>}
+          {!live && !hasData && (
+            <span className="text-xs text-amber-600">server unreachable — retrying…</span>
+          )}
           <button className="text-sm text-gray-600 hover:underline" onClick={logout}>
             Sign out
           </button>
