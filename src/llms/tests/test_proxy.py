@@ -336,6 +336,197 @@ def _stream_seen_client(mock_upstream, tmp_path):
         yield tc, seen
 
 
+def _tool_call_sse(call_id: str, name: str, arguments: str = "{}") -> bytes:
+    """One upstream SSE body emitting a single function_call then completing."""
+    import json as _json
+
+    head = (
+        f'data: {{"type":"response.output_item.added","output_index":1,'
+        f'"item":{{"id":{_json.dumps(call_id)},"type":"function_call",'
+        f'"name":{_json.dumps(name)},"arguments":{_json.dumps(arguments)}}}}}\n\n'
+    )
+    delta = (
+        f"data: {_json.dumps({'type': 'response.function_call_arguments.delta', 'output_index': 1, 'item_id': call_id, 'delta': arguments})}\n\n"
+        f"data: {_json.dumps({'type': 'response.function_call_arguments.done', 'output_index': 1, 'item_id': call_id, 'arguments': arguments})}\n\n"
+    )
+    tail = (
+        'data: {"type":"response.completed","response":{"status":"completed",'
+        '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+    )
+    return (head + delta + tail).encode()
+
+
+def _text_sse(text: str) -> bytes:
+    import json as _json
+
+    body = (
+        f'data: {{"type":"response.output_text.delta","delta":{_json.dumps(text)}}}\n\n'
+        'data: {"type":"response.completed","response":{"status":"completed",'
+        '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+    )
+    return body.encode()
+
+
+def _steer_app_client(tmp_path, first_body: bytes, second_body: bytes):
+    """App client whose upstream emits first_body, then second_body."""
+    import httpx
+
+    from tests.conftest import TEST_SECRET, build_app_client, make_settings
+
+    calls: list = []
+
+    async def handler(request):
+        import json as _json
+
+        calls.append(_json.loads(request.content.decode()))
+        body = first_body if len(calls) == 1 else second_body
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    tc = build_app_client(
+        make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    )
+    return tc, calls
+
+
+def test_client_named_genuine_tool_call_passes_through_unsteered(tmp_path):
+    """A call naming a client-declared tool colliding with a genuine name
+    (read) is returned verbatim: no steer follow-up (exactly 1 upstream
+    call), and upstream saw the CLIENT's read definition."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_read1", "read", '{"path":"notes.txt"}'),
+        _text_sse("unreached"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "read notes",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "read",
+                        "description": "mine",
+                        "parameters": {},
+                    },
+                    {
+                        "type": "function",
+                        "name": "mine",
+                        "description": "extra",
+                        "parameters": {},
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    sent = {t.get("name"): t for t in calls[0]["tools"]}
+    assert sent["read"]["description"] == "mine"
+    assert sent["mine"]["description"] == "extra"
+    returned = [
+        i for i in r.json().get("output", []) if i.get("type") == "function_call"
+    ]
+    assert len(returned) == 1
+    assert returned[0]["name"] == "read"
+    assert returned[0]["call_id"] == "call_read1"
+    assert returned[0]["arguments"] == '{"path":"notes.txt"}'
+
+
+def test_undeclared_genuine_tool_call_still_steers(tmp_path):
+    """A genuine tool the client did NOT declare (shell, client only sent
+    mine) still steers: 2 upstream calls, redirect queued, text answered."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_shell1", "shell"),
+        _text_sse("done"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "hi",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "mine",
+                        "description": "extra",
+                        "parameters": {"type": "object"},
+                    }
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 2
+    followup = calls[1]
+    outputs = [
+        i
+        for i in followup["input"]
+        if isinstance(i, dict) and i.get("type") == "function_call_output"
+    ]
+    assert (
+        outputs and "shell" in outputs[0]["output"] and "mine" in outputs[0]["output"]
+    )
+    texts = [
+        p.get("text", "")
+        for m in r.json().get("output", [])
+        if m.get("type") == "message"
+        for p in m.get("content", [])
+    ]
+    assert "".join(texts) == "done"
+
+
+def test_hallucinated_tool_call_with_no_client_tools_still_steers(tmp_path):
+    """An undeclared name with zero client tools still steers with the
+    answer-directly nudge (no tool list)."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_h1", "frobnicate"),
+        _text_sse("ok"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 2
+    followup = calls[1]
+    outputs = [
+        i
+        for i in followup["input"]
+        if isinstance(i, dict) and i.get("type") == "function_call_output"
+    ]
+    assert len(outputs) == 1
+    assert "frobnicate" in outputs[0]["output"]
+    assert "answer directly" in outputs[0]["output"]
+    assert "Use one of these tools instead" not in outputs[0]["output"]
+    texts = [
+        p.get("text", "")
+        for m in r.json().get("output", [])
+        if m.get("type") == "message"
+        for p in m.get("content", [])
+    ]
+    assert "".join(texts) == "ok"
+
+
 def test_anonymous_nonstream_synthesizes_json_from_upstream_sse(
     mock_upstream, tmp_path
 ):  # Anonymous Zen requires stream:true even for single-shot callers: the

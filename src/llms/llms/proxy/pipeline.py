@@ -97,7 +97,13 @@ STEER_MAX_ITERS = int(os.getenv("ZEN_STEER_MAX_ITERS", "3"))
 
 
 def _genuine_calls_in(response: Response, client_names: set[str]) -> list[dict]:
-    """Assistant function_calls not in the client set (steer candidates)."""
+    """Assistant function_calls the client did NOT declare (steer candidates).
+
+    Matching is by exact tool name against the client's own set: a call
+    naming a client-declared tool — even one colliding with a genuine
+    tool name — is the client's to resolve and is never steered. Only
+    undeclared names (undeclared genuine tools, hallucinations) steer.
+    """
     if not isinstance(response, JSONResponse) or response.status_code >= 400:
         return []
     try:
@@ -108,12 +114,12 @@ def _genuine_calls_in(response: Response, client_names: set[str]) -> list[dict]:
         return []
     calls = []
     for item in payload.get("output", []) or []:
-        if (
-            isinstance(item, dict)
-            and item.get("type") == "function_call"
-            and item.get("name") not in client_names
-        ):
-            calls.append(item)
+        if not isinstance(item, dict) or item.get("type") != "function_call":
+            continue
+        name = item.get("name")
+        if isinstance(name, str) and name in client_names:
+            continue
+        calls.append(item)
     return calls
 
 
@@ -128,9 +134,14 @@ async def _steer_genuine_calls(
     trace_id: str,
     client_names: set[str],
 ) -> tuple[Response, dict]:
-    """Answer genuine tool calls with a redirect error and re-request.
+    """Answer undeclared tool calls with a redirect error and re-request.
 
-    Only for non-streaming downstream (streaming passes calls through —
+    Only calls naming tools the client did NOT declare steer (undeclared
+    genuine tools get a redirect listing client tools; hallucinations
+    with no client tools get an answer-directly nudge). A call naming a
+    client-declared tool — even one colliding with a genuine tool name —
+    passes straight back for the client to resolve. Only for
+    non-streaming downstream (streaming passes calls through —
     mid-stream steering is a follow-up). Bounded; usage attributes the
     final turn only.
     """
@@ -201,15 +212,20 @@ def _with_genuine_tools(outbound: dict) -> None:
     """Prepend the genuine tool set ahead of client extras (no duplicates).
 
     The free-tier gate fuzzy-matches the set: full genuine + extras
-    passes, bare/renamed 403s. A client tool reusing a genuine name
-    keeps the genuine definition (gate fidelity); extras append after.
+    passes, bare/renamed 403s. A client tool reusing a genuine name keeps
+    the CLIENT's definition in that slot (so the model calls the client's
+    shape and the call passes back for the client to resolve); genuine
+    names the client didn't touch keep their genuine definition, and true
+    extras append after. All genuine names stay present at least once.
     Mutates outbound in place.
     """
     genuine_names = {t.get("name") for t in GENUINE_TOOLS}
+    by_name = {t.get("name"): t for t in outbound.get("tools", []) or []}
+    head = [by_name.get(g.get("name"), g) for g in GENUINE_TOOLS]
     extras = [
         t for t in outbound.get("tools", []) or [] if t.get("name") not in genuine_names
     ]
-    outbound["tools"] = [*GENUINE_TOOLS, *extras]
+    outbound["tools"] = [*head, *extras]
 
 
 def _ensure_chat_system(outbound: dict) -> None:
@@ -1012,9 +1028,7 @@ def _maybe_auto_cycle(
             bounced_ok = False
             try:
                 result = await pool.bounce_exit(inst.idx)
-                bounced_ok = (
-                    isinstance(result, dict) and bool(result.get("ok", False))
-                )
+                bounced_ok = isinstance(result, dict) and bool(result.get("ok", False))
                 logger.info(
                     "[%s] warp provider %s exit %s bounce done: %s",
                     trace_id,

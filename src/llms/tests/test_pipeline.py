@@ -162,9 +162,13 @@ def test_genuine_opencode_chat_passthrough(app_client):
     }
 
 
-def test_nongenuine_overlapping_tools_deduped(app_client):
-    # A third-party client reusing a genuine tool name keeps the
-    # genuine definition once; true extras still append.
+def test_nongenuine_overlapping_tools_client_definition_wins(app_client):
+    # A third-party client reusing a genuine tool name keeps its OWN
+    # definition in that slot (so the model calls the client's shape and
+    # the call returns for the client to resolve); all genuine names
+    # still ride at least once and true extras append after.
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+
     tc, seen = app_client
     r = tc.post(
         "/v1/responses",
@@ -191,6 +195,9 @@ def test_nongenuine_overlapping_tools_deduped(app_client):
     assert r.status_code == 200
     tools = seen["json"]["tools"]
     assert [t.get("name") for t in tools].count("read") == 1
+    sent_read = next(t for t in tools if t.get("name") == "read")
+    assert sent_read["description"] == "mine"
+    assert GENUINE_TOOL_NAMES <= {t.get("name") for t in tools}
     assert tools[-1]["name"] == "mine"
 
 
@@ -201,6 +208,34 @@ def test_is_genuine_opencode_detection():
     assert is_genuine_opencode({"x-opencode-client": "cli"})
     assert not is_genuine_opencode({"user-agent": "claude-cli/2.1.0"})
     assert not is_genuine_opencode({})
+
+
+def test_genuine_calls_in_never_steers_client_named_calls():
+    # Exact-match rule: a call naming a client-declared tool — even one
+    # colliding with a genuine name — is the client's to resolve.
+    from fastapi.responses import JSONResponse
+
+    from llms.proxy.pipeline import _genuine_calls_in
+
+    def resp(*output):
+        return JSONResponse(status_code=200, content={"output": list(output)})
+
+    client_call = {
+        "type": "function_call",
+        "call_id": "c1",
+        "name": "read",
+        "arguments": "{}",
+    }
+    assert _genuine_calls_in(resp(client_call), {"read", "mine"}) == []
+    # Undeclared genuine names still steer...
+    assert _genuine_calls_in(resp(client_call), {"mine"}) == [client_call]
+    # ...as do hallucinations with zero client tools...
+    hallucinated = dict(client_call, call_id="c2", name="frobnicate")
+    assert _genuine_calls_in(resp(hallucinated), set()) == [hallucinated]
+    # ...while malformed items (missing/non-string name) stay steerable.
+    assert _genuine_calls_in(resp({"type": "function_call"}), {"read"}) == [
+        {"type": "function_call"}
+    ]
 
 
 def test_server_tool_specs_forwarded_never_500(app_client):
