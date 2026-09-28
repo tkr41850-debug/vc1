@@ -30,37 +30,60 @@ export default function App() {
     window.history.pushState(null, "", `/ui/${t}`);
   }, []);
 
-  const reload = useCallback(async () => {
-    try {
-      const [k, m, p] = await Promise.all([api.keys(), api.models(), api.providers()]);
-      setKeys(k.keys);
-      setModels(m.models);
-      setProviders(p.providers);
-      setAuthed(true);
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 401) setAuthed(false);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // Collection data flows ONLY over SSE (/api/admin/*/sse): snapshot on
+  // connect, then pushes on every CRUD write. No GET polling — mutations
+  // rely on the hub push, so this is a stable no-op kept for the tab props.
+  const reload = useCallback(() => {}, []);
 
   useEffect(() => {
-    reload();
     const onPop = () => setTab(tabFromPath(window.location.pathname));
     window.addEventListener("popstate", onPop);
-    // Live-update streams replace the old 15s poll loop: snapshot on
-    // connect (same shape as the REST endpoints above), then pushes on
-    // every CRUD write. EventSource auto-reconnects; on hard errors we
-    // fall back to a one-shot reload so the page never goes stale.
-    const onVis = () => {
-      if (!document.hidden) reload();
+    // EventSource auto-reconnects (snapshot on connect), so nothing needs
+    // refetching on visibility change or on transient errors.
+    let snapshots = 0;
+    let failures = 0;
+    let authProbed = false;
+    const firstSnapshot = () => {
+      snapshots += 1;
+      setAuthed(true);
+      setLoading(false);
+      setLive(true);
     };
-    document.addEventListener("visibilitychange", onVis);
+    const streamFailed = () => {
+      failures += 1;
+      if (snapshots > 0) {
+        // Data was flowing: transient drop, EventSource retries itself.
+        setLive(false);
+        return;
+      }
+      if (failures >= 3 && !authProbed) {
+        authProbed = true;
+        // EventSource hides the status code, so a single probe tells a
+        // logged-out session (login screen) from a down server (banner).
+        // Failure-path only — never steady-state polling.
+        api.keys().then(
+          () => {
+            setLoading(false);
+            setLive(false);
+          },
+          (e) => {
+            if (e instanceof ApiError && e.status === 401) {
+              setAuthed(false);
+              setLoading(false);
+            } else {
+              setLoading(false);
+              setLive(false);
+            }
+          },
+        );
+      }
+    };
     const subs: EventSource[] = [];
     const watch = (
       url: string,
       apply: (msg: { keys?: ApiKeyEntry[]; models?: ModelEntry[]; providers?: ProviderEntry[] }) => void,
     ) => {
+      let gotData = false;
       const es = new EventSource(url);
       subs.push(es);
       es.onmessage = (ev) => {
@@ -69,30 +92,33 @@ export default function App() {
         } catch {
           /* keep old */
         }
+        if (!gotData) {
+          gotData = true;
+          firstSnapshot();
+        } else {
+          setLive(true);
+        }
       };
       es.onerror = () => {
         if (es.readyState === EventSource.CLOSED) return;
-        // Transient disconnect: EventSource retries on its own; flag the
-        // banner only if we stay dark (reload fills the gap meanwhile).
-        setLive(false);
-        reload().finally(() => setLive(true));
+        if (!gotData) streamFailed();
+        else setLive(false);
       };
     };
-    watch("/ui/keys/stream", (msg) => {
+    watch("/api/admin/keys/sse", (msg) => {
       if (msg.keys) setKeys(msg.keys);
     });
-    watch("/ui/models/stream", (msg) => {
+    watch("/api/admin/models/sse", (msg) => {
       if (msg.models) setModels(msg.models);
     });
-    watch("/ui/providers/stream", (msg) => {
+    watch("/api/admin/providers/sse", (msg) => {
       if (msg.providers) setProviders(msg.providers);
     });
     return () => {
       window.removeEventListener("popstate", onPop);
-      document.removeEventListener("visibilitychange", onVis);
       subs.forEach((es) => es.close());
     };
-  }, [reload]);
+  }, []);
 
   const logout = async () => {
     try {
