@@ -64,6 +64,12 @@ async def lifespan(app: FastAPI):
                 break
             except TimeoutError:
                 app.state.usage.save_file(settings.data_dir)
+                # Usage counters move on every proxied request with no CRUD
+                # in sight; republish so the keys SSE (no polling) refreshes
+                # its live usage aggregates about once a minute.
+                hub = getattr(app.state, "admin_hub", None)
+                if hub is not None:
+                    await hub.publish("keys")
 
     task = asyncio.create_task(_flush_loop())
     if getattr(app.state, "warp", None) is None:

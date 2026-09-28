@@ -59,15 +59,18 @@ no upstream call.
 
 ```
 GET    /api/admin/keys            keys with live usage aggregates
+GET    /api/admin/keys/sse        SSE: keys snapshot + live updates (same shape)
 POST   /api/admin/keys            {key: sk-..., label?, enabled?} -> 201 (ak- rejected: 400)
 PUT    /api/admin/keys/{key}      {label?, enabled?}
 DELETE /api/admin/keys/{key}
 GET    /api/admin/models          [{id, label, enabled}]
+GET    /api/admin/models/sse      SSE: models snapshot + live updates (same shape)
 POST   /api/admin/models          {id, label?, enabled?} -> 201
 PUT    /api/admin/models/{id}     {label?, enabled?}
 DELETE /api/admin/models/{id}
 GET    /api/admin/usage           {keys: {<key>: {requests, input_tokens, output_tokens, models}}}
 GET    /api/admin/providers       [{id, label, kind, models, enabled, exits, retry_in, health{exits[]}}]
+GET    /api/admin/providers/sse   SSE: providers snapshot + live updates (same shape)
 POST   /api/admin/providers       {id, label?, kind?, models?, enabled?, exits?} -> 201 (409 duplicate, 400 bad kind/exits)
 PUT    /api/admin/providers/{id}  {label?, models?, enabled?, exits?}
 DELETE /api/admin/providers/{id}  (noproxy: 403; datadirs kept for same-id re-create)

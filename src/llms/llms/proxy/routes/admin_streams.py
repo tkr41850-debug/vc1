@@ -34,9 +34,12 @@ async def _collection_stream(
     request: Request, topic: str, snapshot
 ) -> StreamingResponse:
     async def gen():
-        yield _frame(snapshot())
+        # Subscribe BEFORE the first snapshot: a CRUD publishing in between
+        # stays queued and triggers an immediate second snapshot below,
+        # so no write in that window is ever lost.
         q = await get_hub(request).subscribe(topic)
         try:
+            yield _frame(snapshot())
             while True:
                 if await request.is_disconnected():
                     break
@@ -49,7 +52,11 @@ async def _collection_stream(
         finally:
             await get_hub(request).unsubscribe(topic, q)
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/api/admin/keys/sse")

@@ -203,6 +203,99 @@ async def test_providers_stream_pushes_crud_updates(live_server):
         assert "sse-stream-np" not in [p["id"] for p in _data(frame)["providers"]]
 
 
+async def test_providers_stream_pushes_reconnect(live_server, monkeypatch):
+    """POST .../reconnect publishes, so SSE clients see fresh health/retry
+    state without refetching (would hang without the publish)."""
+
+    class _FakePool:
+        async def reconnect(self):
+            return {"ok": True}
+
+        async def refresh_statuses(self):
+            return None
+
+        def snapshot(self):
+            return {"error": "", "exits": []}
+
+    base, app = live_server
+    registry = app.state.providers
+
+    async def _ensure_pool(provider):
+        return _FakePool()
+
+    monkeypatch.setattr(registry, "ensure_pool", _ensure_pool)
+    async with _authed(base) as c:
+        rc = await c.post(
+            "/api/admin/providers",
+            json={
+                "id": "sse-stream-reconnect",
+                "label": "R",
+                "kind": "warp",
+                "models": [],
+                "enabled": True,
+                "exits": 1,
+            },
+        )
+        assert rc.status_code == 201
+        try:
+            async with c.stream("GET", "/api/admin/providers/sse") as r:
+                assert r.status_code == 200
+                it = r.aiter_text()
+                buf = ""
+                frame, buf = await _read_frame(it, buf)
+                assert "sse-stream-reconnect" in [
+                    p["id"] for p in _data(frame)["providers"]
+                ]
+                rr = await c.post("/api/admin/providers/sse-stream-reconnect/reconnect")
+                assert rr.status_code == 200
+                frame, buf = await asyncio.wait_for(_read_frame(it, buf), 10)
+                assert "sse-stream-reconnect" in [
+                    p["id"] for p in _data(frame)["providers"]
+                ]
+        finally:
+            await c.delete("/api/admin/providers/sse-stream-reconnect")
+
+
+async def test_sse_ids_do_not_shadow_collection_streams(live_server):
+    """A model/provider literally id'd 'sse' must not capture the
+    collection routes (same-method overlap would serve JSON, not SSE)."""
+    base, _ = live_server
+    async with _authed(base) as c:
+        rm = await c.post(
+            "/api/admin/models", json={"id": "sse", "label": "S", "enabled": True}
+        )
+        assert rm.status_code == 201
+        rp = await c.post(
+            "/api/admin/providers",
+            json={
+                "id": "sse",
+                "label": "S",
+                "kind": "warp",
+                "models": [],
+                "enabled": True,
+                "exits": 1,
+            },
+        )
+        assert rp.status_code == 201
+        try:
+            async with c.stream("GET", "/api/admin/models/sse") as r:
+                assert r.status_code == 200
+                assert r.headers["content-type"].startswith("text/event-stream")
+                frame, _ = await _read_frame(r.aiter_text(), "")
+                assert "sse" in [m["id"] for m in _data(frame)["models"]]
+            async with c.stream("GET", "/api/admin/providers/sse") as r:
+                assert r.status_code == 200
+                assert r.headers["content-type"].startswith("text/event-stream")
+                frame, _ = await _read_frame(r.aiter_text(), "")
+                assert "sse" in [p["id"] for p in _data(frame)["providers"]]
+            # Item routes for id 'sse' still work alongside the streams.
+            ru = await c.put("/api/admin/models/sse", json={"label": "renamed"})
+            assert ru.status_code == 200
+        finally:
+            await c.delete("/api/admin/models/sse")
+            await c.delete("/api/admin/providers/sse")
+
+
 async def test_stream_heartbeats_are_ping_comments(live_server, monkeypatch):
     from llms.proxy.routes import admin_streams
 

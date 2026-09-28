@@ -178,6 +178,9 @@ async def provider_health(
     provider = _find(registry, provider_id)
     health = await registry.refresh_health(provider, force=True)
     _sync_slots(request)
+    # Force-refresh mutates the shared snapshot; push it so SSE clients
+    # (no polling) converge without waiting for the next CRUD/reconnect.
+    await get_hub(request).publish("providers")
     debug = await registry.fetch_debug_config(provider)
     rt = registry.runtime(provider_id)
     from llms.proxy.providers import provider_snapshot
