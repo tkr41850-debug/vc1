@@ -100,10 +100,11 @@ STEER_MAX_ITERS = int(os.getenv("ZEN_STEER_MAX_ITERS", "3"))
 def _genuine_calls_in(response: Response, client_names: set[str]) -> list[dict]:
     """Assistant function_calls the client did NOT declare (steer candidates).
 
-    Matching is by exact tool name against the client's own set: a call
+    Matching is case-insensitive against the client's own set: a call
     naming a client-declared tool — even one colliding with a genuine
-    tool name — is the client's to resolve and is never steered. Only
-    undeclared names (undeclared genuine tools, hallucinations) steer.
+    tool name in a different case (client "Read" vs genuine "read") —
+    is the client's to resolve and is never steered. Only undeclared
+    names (undeclared genuine tools, hallucinations) steer.
     """
     if not isinstance(response, JSONResponse) or response.status_code >= 400:
         return []
@@ -114,11 +115,12 @@ def _genuine_calls_in(response: Response, client_names: set[str]) -> list[dict]:
     if not isinstance(payload, dict):
         return []
     calls = []
+    lowered = {n.lower() for n in client_names if isinstance(n, str)}
     for item in payload.get("output", []) or []:
         if not isinstance(item, dict) or item.get("type") != "function_call":
             continue
         name = item.get("name")
-        if isinstance(name, str) and name in client_names:
+        if isinstance(name, str) and name.lower() in lowered:
             continue
         calls.append(item)
     return calls
@@ -140,8 +142,9 @@ async def _steer_genuine_calls(
     Only calls naming tools the client did NOT declare steer (undeclared
     genuine tools get a redirect listing client tools; hallucinations
     with no client tools get an answer-directly nudge). A call naming a
-    client-declared tool — even one colliding with a genuine tool name —
-    passes straight back for the client to resolve. Only for
+    client-declared tool — even one colliding with a genuine tool name
+    in a different case — passes straight back for the client to
+    resolve. Only for
     non-streaming downstream (streaming passes calls through —
     mid-stream steering is a follow-up). Bounded; usage attributes the
     final turn only.

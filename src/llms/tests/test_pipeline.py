@@ -211,8 +211,9 @@ def test_is_genuine_opencode_detection():
 
 
 def test_genuine_calls_in_never_steers_client_named_calls():
-    # Exact-match rule: a call naming a client-declared tool — even one
-    # colliding with a genuine name — is the client's to resolve.
+    # Case-insensitive rule: a call naming a client-declared tool — even
+    # one colliding with a genuine name in a different case (client
+    # "Read" vs genuine "read") — is the client's to resolve.
     from fastapi.responses import JSONResponse
 
     from llms.proxy.pipeline import _genuine_calls_in
@@ -227,8 +228,15 @@ def test_genuine_calls_in_never_steers_client_named_calls():
         "arguments": "{}",
     }
     assert _genuine_calls_in(resp(client_call), {"read", "mine"}) == []
+    # Case-variant declarations also win: client "Read" owns upstream
+    # "read" (and vice versa) — returned verbatim, never steered.
+    assert _genuine_calls_in(resp(client_call), {"Read", "mine"}) == []
+    assert (
+        _genuine_calls_in(resp(dict(client_call, name="Read")), {"read", "mine"}) == []
+    )
     # Undeclared genuine names still steer...
     assert _genuine_calls_in(resp(client_call), {"mine"}) == [client_call]
+    assert _genuine_calls_in(resp(client_call), {"Mine"}) == [client_call]
     # ...as do hallucinations with zero client tools...
     hallucinated = dict(client_call, call_id="c2", name="frobnicate")
     assert _genuine_calls_in(resp(hallucinated), set()) == [hallucinated]

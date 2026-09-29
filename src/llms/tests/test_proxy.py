@@ -395,6 +395,44 @@ def _steer_app_client(tmp_path, first_body: bytes, second_body: bytes):
     return tc, calls
 
 
+def test_client_named_genuine_tool_call_case_insensitive_passthrough(tmp_path):
+    """Client "Read" owns upstream "read": returned verbatim for the
+    client to resolve — no steer follow-up (exactly 1 upstream call)."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_read1", "read", '{"path":"notes.txt"}'),
+        _text_sse("unreached"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "read notes",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "Read",
+                        "description": "mine",
+                        "parameters": {},
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    returned = [
+        i for i in r.json().get("output", []) if i.get("type") == "function_call"
+    ]
+    assert len(returned) == 1
+    assert returned[0]["name"] == "read"
+    assert returned[0]["call_id"] == "call_read1"
+    assert returned[0]["arguments"] == '{"path":"notes.txt"}'
+
+
 def test_client_named_genuine_tool_call_passes_through_unsteered(tmp_path):
     """A call naming a client-declared tool colliding with a genuine name
     (read) is returned verbatim: no steer follow-up (exactly 1 upstream
