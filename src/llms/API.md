@@ -78,7 +78,7 @@ GET    /api/admin/providers/{id}/health   force-refresh + warp-cli debug
 POST   /api/admin/providers/{id}/reconnect  bounce exits, clear backoff, re-poll
 GET    /api/admin/providers/{id}/recent     last 10 requests
 GET    /api/admin/providers/{id}/stream     SSE: recent snapshot + live requests
-GET    /api/admin/providers/{id}/ips        egress IP per ready exit (60s cache)
+GET    /api/admin/providers/{id}/ips        egress IPv4 + IPv6 per ready exit (60s cache)
 
 Warp providers own local exits: `exits` sizes the supervised exit count
 (`data/warps/<id>/warp<N>/` datadirs, per-exit `warp-svc`, SOCKS on

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import time
 
@@ -19,6 +20,7 @@ router = APIRouter()
 operator_router = APIRouter()
 
 IP_ECHO_URL = "https://api.ipify.org?format=json"
+IP6_ECHO_URL = "https://api64.ipify.org?format=json"
 IP_TIMEOUT_S = 10.0
 IP_CACHE_TTL_S = 60.0
 _ip_cache: dict[str, tuple[float, dict]] = {}
@@ -245,6 +247,40 @@ async def _fetch_ip(proxy_url: str | None) -> str:
     return ip
 
 
+def _is_ipv6(value: object) -> bool:
+    try:
+        return isinstance(value, str) and ipaddress.ip_address(value).version == 6
+    except ValueError:
+        return False
+
+
+async def _fetch_ip6(proxy_url: str | None) -> str | None:
+    """Egress IPv6 as the outside world sees it, or None without v6 egress.
+
+    api.ipify.org is IPv4-only, so the v4 probe above can never show the
+    v6 address WARP typically assigns. api64.ipify.org answers over
+    whichever family the exit actually dials out on; anything that is
+    not a v6 literal (no v6 route, or v4 fallback echoing the v4
+    address) maps to None. Best-effort by design: missing v6 is normal,
+    so failures never raise and never flip the row to error.
+    Separated for tests like _fetch_ip.
+    """
+    import httpx
+
+    kwargs: dict = {"timeout": IP_TIMEOUT_S, "trust_env": False}
+    if proxy_url:
+        kwargs["proxy"] = proxy_url
+    try:
+        async with httpx.AsyncClient(**kwargs) as client:
+            response = await client.get(IP6_ECHO_URL)
+            response.raise_for_status()
+            payload = response.json()
+        ip = payload.get("ip") if isinstance(payload, dict) else None
+        return ip if _is_ipv6(ip) else None
+    except Exception:
+        return None
+
+
 async def _do_ips(request: Request, provider_id: str) -> dict:
     registry = _registry(request)
     provider = _find(registry, provider_id)
@@ -265,18 +301,27 @@ async def _do_ips(request: Request, provider_id: str) -> dict:
                     "idx": exit.idx,
                     "port": exit.socks or None,
                     "ip": None,
+                    "ipv6": None,
                     "error": "exit not ready",
                 }
+            proxy_url = f"socks5://127.0.0.1:{exit.socks}"
             try:
-                ip = await _fetch_ip(f"socks5://127.0.0.1:{exit.socks}")
+                ip = await _fetch_ip(proxy_url)
             except Exception as exc:
                 return {
                     "idx": exit.idx,
                     "port": exit.socks,
                     "ip": None,
+                    "ipv6": None,
                     "error": f"{type(exc).__name__}: {exc}"[:200],
                 }
-            return {"idx": exit.idx, "port": exit.socks, "ip": ip, "error": None}
+            return {
+                "idx": exit.idx,
+                "port": exit.socks,
+                "ip": ip,
+                "ipv6": await _fetch_ip6(proxy_url),
+                "error": None,
+            }
 
         entries = await asyncio.gather(
             *(_one(w) for w in sorted(rt.health.exits, key=lambda w: w.idx))
@@ -285,19 +330,22 @@ async def _do_ips(request: Request, provider_id: str) -> dict:
 
         async def _direct():
             try:
-                return {
-                    "idx": None,
-                    "port": None,
-                    "ip": await _fetch_ip(None),
-                    "error": None,
-                }
+                ip = await _fetch_ip(None)
             except Exception as exc:
                 return {
                     "idx": None,
                     "port": None,
                     "ip": None,
+                    "ipv6": None,
                     "error": f"{type(exc).__name__}: {exc}"[:200],
                 }
+            return {
+                "idx": None,
+                "port": None,
+                "ip": ip,
+                "ipv6": await _fetch_ip6(None),
+                "error": None,
+            }
 
         entries = [await _direct()]
     payload = {

@@ -17,6 +17,7 @@ def test_provider_ips_warp_per_exit(admin_client, tmp_path, monkeypatch):
     tc.app.state.providers = registry
 
     seen: list = []
+    seen6: list = []
 
     async def _fake_fetch(proxy_url):
         seen.append(proxy_url)
@@ -24,7 +25,12 @@ def test_provider_ips_warp_per_exit(admin_client, tmp_path, monkeypatch):
             raise RuntimeError("boom")
         return "9.9.9.9" if proxy_url else "1.2.3.4"
 
+    async def _fake_fetch6(proxy_url):
+        seen6.append(proxy_url)
+        return "2606:4700:4700::1111" if proxy_url else None
+
     monkeypatch.setattr(routes, "_fetch_ip", _fake_fetch)
+    monkeypatch.setattr(routes, "_fetch_ip6", _fake_fetch6)
     routes._ip_cache.clear()
     r = tc.get(
         "/api/admin/providers/pool1/ips", headers={"Authorization": "Bearer sk-test"}
@@ -37,13 +43,19 @@ def test_provider_ips_warp_per_exit(admin_client, tmp_path, monkeypatch):
         "idx": 0,
         "port": 40001,
         "ip": "9.9.9.9",
+        "ipv6": "2606:4700:4700::1111",
         "error": None,
     }
     assert body["ips"][1]["idx"] == 1
     assert body["ips"][1]["ip"] is None
+    assert body["ips"][1]["ipv6"] is None
     assert "boom" in body["ips"][1]["error"]
     assert body["ips"][2]["error"] == "exit not ready"
+    assert body["ips"][2]["ipv6"] is None
     assert "socks5://127.0.0.1:40001" in seen
+    assert "socks5://127.0.0.1:40001" in seen6
+    # A failed v4 row never probes v6.
+    assert "socks5://127.0.0.1:40002" not in seen6
     # Second call serves the cache without refetching.
     r2 = tc.get(
         "/api/admin/providers/pool1/ips", headers={"Authorization": "Bearer sk-test"}
@@ -65,14 +77,25 @@ def test_provider_ips_noproxy_direct(admin_client, tmp_path, monkeypatch):
         assert proxy_url is None
         return "5.6.7.8"
 
+    async def _fake_fetch6(proxy_url):
+        assert proxy_url is None
+        return "2606:4700:4700::1111"
+
     monkeypatch.setattr(routes, "_fetch_ip", _fake_fetch)
+    monkeypatch.setattr(routes, "_fetch_ip6", _fake_fetch6)
     routes._ip_cache.clear()
     r = tc.get(
         "/api/admin/providers/direct/ips", headers={"Authorization": "Bearer sk-test"}
     )
     assert r.status_code == 200
     assert r.json()["ips"] == [
-        {"idx": None, "port": None, "ip": "5.6.7.8", "error": None}
+        {
+            "idx": None,
+            "port": None,
+            "ip": "5.6.7.8",
+            "ipv6": "2606:4700:4700::1111",
+            "error": None,
+        }
     ]
 
 
@@ -141,7 +164,11 @@ def test_reconnect_invalidates_ips(admin_client, tmp_path, monkeypatch):
         calls.append(proxy_url)
         return "9.9.9.9"
 
+    async def _fake_fetch6(proxy_url):
+        return None
+
     monkeypatch.setattr(routes, "_fetch_ip", _fake_fetch)
+    monkeypatch.setattr(routes, "_fetch_ip6", _fake_fetch6)
     routes._ip_cache.clear()
     headers = {"Authorization": "Bearer sk-test"}
     assert (
@@ -181,7 +208,11 @@ def test_exit_churn_busts_cache(admin_client, tmp_path, monkeypatch):
         calls.append(proxy_url)
         return "9.9.9.9"
 
+    async def _fake_fetch6(proxy_url):
+        return "2606:4700:4700::1111"
+
     monkeypatch.setattr(routes, "_fetch_ip", _fake_fetch)
+    monkeypatch.setattr(routes, "_fetch_ip6", _fake_fetch6)
     routes._ip_cache.clear()
     headers = {"Authorization": "Bearer sk-test"}
     assert (
@@ -192,4 +223,5 @@ def test_exit_churn_busts_cache(admin_client, tmp_path, monkeypatch):
     body = tc.get("/api/admin/providers/pool1/ips", headers=headers).json()
     assert body["cached"] is False
     assert [e["port"] for e in body["ips"]] == [40001, 40002]
+    assert all(e["ipv6"] == "2606:4700:4700::1111" for e in body["ips"])
     assert len(calls) == 3

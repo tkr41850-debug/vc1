@@ -234,7 +234,8 @@ function DebugModal({
             <tr className="border-b text-left text-gray-600">
               <th className="py-1 pr-3">Exit</th>
               <th className="py-1 pr-3">Socks</th>
-              <th className="py-1 pr-3">IP seen by provider</th>
+              <th className="py-1 pr-3">IPv4</th>
+              <th className="py-1 pr-3">IPv6</th>
               <th className="py-1">Error</th>
             </tr>
           </thead>
@@ -247,12 +248,13 @@ function DebugModal({
                 <td className="py-1 pr-3">{e.idx ?? "direct"}</td>
                 <td className="py-1 pr-3">{e.port ?? "—"}</td>
                 <td className="py-1 pr-3">{e.ip ?? "—"}</td>
+                <td className="py-1 pr-3">{e.ipv6 ?? "—"}</td>
                 <td className="py-1">{e.error || "—"}</td>
               </tr>
             ))}
             {ips !== null && ips.length === 0 && (
               <tr>
-                <td colSpan={4} className="py-2 text-center text-gray-500">
+                <td colSpan={5} className="py-2 text-center text-gray-500">
                   {provider.kind === "noproxy"
                     ? "No egress IP data."
                     : "No health data yet — reconnect, then reopen."}
@@ -261,7 +263,7 @@ function DebugModal({
             )}
             {ips === null && (
               <tr>
-                <td colSpan={4} className="py-2 text-center text-gray-500">
+                <td colSpan={5} className="py-2 text-center text-gray-500">
                   Loading…
                 </td>
               </tr>

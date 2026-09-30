@@ -70,6 +70,7 @@ export interface ProviderIp {
   idx: number | null;
   port: number | null;
   ip: string | null;
+  ipv6: string | null;
   error: string | null;
 }
 
