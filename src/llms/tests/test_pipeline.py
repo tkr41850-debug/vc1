@@ -609,3 +609,35 @@ def test_messages_rebuild_is_byte_stable_across_turns(app_client):
     first_items = _json.loads(bodies[0])["messages"]
     third_items = _json.loads(bodies[2])["messages"]
     assert third_items[: len(first_items)] == first_items
+
+
+def test_case_variant_client_tool_not_duplicated(app_client):
+    # Client "Read" vs genuine "read": injection keeps the client
+    # definition once (no case-variant duplicate), matching the
+    # case-insensitive steer rule in _genuine_calls_in.
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+
+    tc, seen = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={
+            "model": "muse-spark-1.3-contributor-free",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "Read",
+                    "description": "mine",
+                    "parameters": {},
+                },
+            ],
+        },
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 200
+    tools = seen["json"]["tools"]
+    names = [t.get("name") for t in tools]
+    assert len(names) == len({n.lower() for n in names})
+    assert GENUINE_TOOL_NAMES <= {t.get("name", "").lower() for t in tools}
+    sent = next(t for t in tools if t.get("name") == "Read")
+    assert sent["description"] == "mine"
