@@ -26,6 +26,21 @@ STREAM_TIMEOUT_S = float(os.getenv("STREAM_TIMEOUT_S", "600"))
 _END: object = object()
 
 
+def _slow_error_frame(status: int, message: str) -> bytes:
+    """Terminal SSE error event for the slow-send path.
+
+    The downstream response already committed to 200 + text/event-stream,
+    so the status cannot travel as HTTP. Emit it as a data frame the
+    client can treat as failure instead of ending the stream silently
+    (an empty 200 reads as success to SDKs and records as one).
+    """
+    return (
+        b"data: "
+        + json.dumps({"type": "error", "error": {"status": status, "message": message}}).encode()
+        + b"\n\n"
+    )
+
+
 def is_cost_frame(line: bytes) -> bool:
     return b"inference-cost" in line
 
@@ -334,8 +349,9 @@ async def slow_send_stream(
 
     Entered only after the send grace (one heartbeat interval) expires, at
     which point the response has committed to 200 + SSE — upstream error
-    statuses can no longer become JSONResponses, so they end the stream
-    instead (fast errors never reach here; they keep the JSON path).
+    statuses can no longer become JSONResponses, so they surface as a
+    terminal SSE error event instead (fast errors never reach here; they
+    keep the JSON path). A bare empty 200 would read as success to SDKs.
     """
     try:
         while not send_task.done():
@@ -349,6 +365,7 @@ async def slow_send_stream(
             upstream = send_task.result()
         except httpx.HTTPError as exc:
             logger.error("[%s] upstream connect failed: %s", trace_id, exc)
+            yield _slow_error_frame(502, "upstream unreachable")
             return
     except BaseException:
         if not send_task.done():
@@ -357,12 +374,20 @@ async def slow_send_stream(
     log_response(trace_id, upstream.status_code, -1)
     if upstream.status_code >= 400:
         try:
-            await upstream.aread()
+            payload = await upstream.aread()
         finally:
             try:
                 await upstream.aclose()
             except Exception:
                 pass
+        try:
+            body = json.loads(payload.decode())
+            message = str(
+                body.get("error", {}).get("message", "") if isinstance(body, dict) else ""
+            ) or payload.decode(errors="replace")[:500]
+        except Exception:
+            message = payload.decode(errors="replace")[:500]
+        yield _slow_error_frame(upstream.status_code, message or "upstream error")
         return
     if ingress is not None and egress is not None:
         async for chunk in translate_streaming(

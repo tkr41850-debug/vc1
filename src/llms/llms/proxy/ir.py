@@ -117,6 +117,7 @@ class ResponseIR:
     cached_tokens: int = 0
     reasoning_tokens: int = 0
     incomplete_reason: str | None = None
+    finish_reason: str | None = None
 
 
 @dataclass(frozen=True)

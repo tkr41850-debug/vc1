@@ -949,3 +949,54 @@ def test_responses_additional_tools_dissolve():
     assert tools[0]["type"] == "namespace"
     assert "description" in tools[0]
     assert tools[0]["tools"][0]["name"] == "exec"
+
+
+def test_tool_choice_canonicalized_across_dialects():
+    from llms.proxy.translate import from_chat, from_messages, to_zen_chat, to_zen_messages
+
+    # messages-shaped choice arriving on chat ingress normalizes to IR name form
+    req = from_chat(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_choice": {"type": "tool", "name": "bash"},
+        }
+    )
+    assert req.tool_choice == {"name": "bash"}
+    assert to_zen_chat(req)["tool_choice"] == {"name": "bash"}
+    assert to_zen_messages(req)["tool_choice"] == {"type": "tool", "name": "bash"}
+
+    # chat function-form choice degrades to auto no longer: it maps by name
+    req2 = from_messages(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_choice": {"type": "tool", "name": "bash"},
+            "max_tokens": 8,
+        }
+    )
+    assert req2.tool_choice == {"name": "bash"}
+    assert to_zen_messages(req2)["tool_choice"] == {"type": "tool", "name": "bash"}
+
+
+def test_stop_sequences_round_trip_on_messages_leg():
+    from llms.proxy.translate import from_chat, from_messages, to_zen_messages
+
+    req = from_chat(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop": ["END", "STOP"],
+        }
+    )
+    assert to_zen_messages(req)["stop_sequences"] == ["END", "STOP"]
+    req2 = from_messages(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop_sequences": ["END"],
+            "max_tokens": 8,
+        }
+    )
+    assert req2.params.stop == ["END"]
+    assert to_zen_messages(req2)["stop_sequences"] == ["END"]

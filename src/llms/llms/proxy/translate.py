@@ -147,6 +147,35 @@ def _chat_part_to_block(part: dict):
     raise ValueError(f"unsupported chat content part: {kind}")
 
 
+def _canonical_tool_choice(choice) -> str | dict | None:
+    """Normalize a per-dialect tool_choice into IR form.
+
+    IR keeps the chat wire shape (OpenAI-style): "auto" | "required" |
+    {"name": ...} | {"type": "function", "function": {...}}. Each egress
+    renderer converts back to its own dialect (to_zen_chat passes it
+    through, to_zen_responses unwraps function form, to_zen_messages maps
+    to type any/tool/auto). Without this, a choice arriving on one dialect
+    leaks verbatim onto another where it is invalid or misread.
+    """
+    if choice is None or isinstance(choice, str):
+        return choice
+    if not isinstance(choice, dict):
+        return None
+    kind = choice.get("type", "auto")
+    if kind == "tool":
+        return {"name": choice.get("name", "")}
+    if kind == "any":
+        return "required"
+    if kind == "auto":
+        return "auto"
+    fn = choice.get("function")
+    if isinstance(fn, dict) and fn.get("name"):
+        return {"name": fn["name"]}
+    if choice.get("name"):
+        return {"name": choice["name"]}
+    return "auto"
+
+
 def _chat_tool_to_ir(t: dict) -> ToolDef:
     fn = t.get("function", {})
     if not isinstance(fn, dict):
@@ -232,7 +261,7 @@ def from_chat(body: dict) -> RequestIR:
         model=str(body.get("model", "")),
         messages=tuple(messages),
         tools=tools,
-        tool_choice=body.get("tool_choice"),
+        tool_choice=_canonical_tool_choice(body.get("tool_choice")),
         stream=body.get("stream") is True,
         params=_params_from_chat(body),
     )
@@ -379,7 +408,7 @@ def from_responses(body: dict) -> RequestIR:
         model=str(body.get("model", "")),
         messages=tuple(messages),
         tools=tools,
-        tool_choice=body.get("tool_choice"),
+        tool_choice=_canonical_tool_choice(body.get("tool_choice")),
         stream=body.get("stream") is True,
         params=LlmParams(
             temperature=body.get("temperature"),
@@ -687,7 +716,13 @@ def to_zen_responses(req: RequestIR) -> dict:
     if req.tools:
         body["tools"] = [_responses_tool_from_ir(t) for t in req.tools]
     if req.tool_choice is not None:
-        body["tool_choice"] = req.tool_choice
+        # Responses mirrors the chat wire shape (string or function-form
+        # dict); a messages-shaped {"type": "tool"} choice canonicalized
+        # at ingress into {"name": ...} would otherwise leak through.
+        choice = req.tool_choice
+        if isinstance(choice, dict) and choice.get("type") == "tool":
+            choice = {"name": choice.get("name", "")}
+        body["tool_choice"] = choice
     if req.params.temperature is not None:
         body["temperature"] = req.params.temperature
     if req.params.top_p is not None:
@@ -1027,14 +1062,8 @@ def from_messages(body: dict) -> RequestIR:
         for t in body.get("tools", [])
         if isinstance(t, dict)
     )
-    choice = body.get("tool_choice")
-    if isinstance(choice, dict):
-        kind = choice.get("type", "auto")
-        tool_choice = {"auto": "auto", "any": "required"}.get(kind, choice)
-        if kind == "tool":
-            tool_choice = {"name": choice.get("name", "")}
-    else:
-        tool_choice = choice
+    choice = _canonical_tool_choice(body.get("tool_choice"))
+    stop = body.get("stop_sequences")
     effort: str | None = None
     thinking = body.get("thinking")
     if isinstance(thinking, dict) and thinking.get("type") == "enabled":
@@ -1046,12 +1075,13 @@ def from_messages(body: dict) -> RequestIR:
         model=str(body.get("model", "")),
         messages=tuple(messages),
         tools=tools,
-        tool_choice=tool_choice,
+        tool_choice=choice,
         stream=body.get("stream") is True,
         params=LlmParams(
             temperature=body.get("temperature"),
             top_p=body.get("top_p"),
             max_tokens=body.get("max_tokens"),
+            stop=stop,
             reasoning_effort=effort,
         ),
     )
@@ -1185,12 +1215,20 @@ def to_zen_messages(req: RequestIR) -> dict:
         choice = req.tool_choice
         if choice == "required":
             body["tool_choice"] = {"type": "any"}
+        elif isinstance(choice, dict) and choice.get("type") == "tool":
+            # Already messages-shaped (round-trip): pass through verbatim.
+            body["tool_choice"] = choice
         elif isinstance(choice, dict) and "name" in choice:
             body["tool_choice"] = {"type": "tool", "name": choice["name"]}
         else:
             body["tool_choice"] = {"type": "auto"}
     params = req.params
     body["max_tokens"] = params.max_tokens if params.max_tokens is not None else 1024
+    if params.stop is not None:
+        # Responses has no stop parameter; the messages leg does.
+        body["stop_sequences"] = (
+            [params.stop] if isinstance(params.stop, str) else list(params.stop)
+        )
     if params.temperature is not None:
         body["temperature"] = params.temperature
     if params.top_p is not None:

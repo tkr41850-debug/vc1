@@ -257,3 +257,15 @@ def test_messages_thinking_and_server_blocks_convert():
     chat = messages_to_chat(payload, "m")
     assert chat["choices"][0]["message"]["reasoning_content"] == "hmm"
     assert chat["choices"][0]["message"]["content"] == "hi"
+
+
+def test_chat_content_filter_preserved_on_chat_egress():
+    import copy
+
+    from llms.proxy.translate_response import chat_to_responses, convert_response
+
+    payload = copy.deepcopy(CHAT_PAYLOAD)
+    payload["choices"][0]["finish_reason"] = "content_filter"
+    out = convert_response("chat", "chat", payload, "m")
+    assert out["choices"][0]["finish_reason"] == "content_filter"
+    assert chat_to_responses(payload, "m")["status"] == "failed"

@@ -398,6 +398,7 @@ class MessagesParser:
                     else "incomplete"
                     if self.stop == "max_tokens"
                     else "failed",
+                    has_tool_calls=bool(self.ids),
                     input_tokens=self.in_tok,
                     output_tokens=self.out_tok,
                     cached_tokens=self.cached_tok,
@@ -411,7 +412,7 @@ class MessagesParser:
         if self._done:
             return None
         self._done = True
-        return StreamDone("completed")
+        return StreamDone("completed", has_tool_calls=bool(self.ids))
 
 
 def parse_messages_sse(
@@ -476,6 +477,15 @@ class ChatEmitter:
         if isinstance(delta, TextDelta):
             return [
                 _chat_chunk(self.chat_id, self.model, {"content": delta.text}, None)
+            ]
+        if isinstance(delta, ReasoningDelta):
+            # OpenAI-style reasoning channel: parsers extract it and the
+            # non-streaming emitter writes reasoning_content, so the stream
+            # must carry it too instead of dropping the delta.
+            return [
+                _chat_chunk(
+                    self.chat_id, self.model, {"reasoning_content": delta.text}, None
+                )
             ]
         if isinstance(delta, ToolArgsDelta):
             out: list[bytes] = []
@@ -775,6 +785,19 @@ class ResponsesEmitter:
                 )
             in_tok = delta.input_tokens or 0
             out_tok = delta.output_tokens or 0
+            usage: dict = {
+                "input_tokens": in_tok,
+                "output_tokens": out_tok,
+                "total_tokens": in_tok + out_tok,
+            }
+            if delta.cached_tokens:
+                usage["input_tokens_details"] = {
+                    "cached_tokens": delta.cached_tokens
+                }
+            if delta.reasoning_tokens:
+                usage["output_tokens_details"] = {
+                    "reasoning_tokens": delta.reasoning_tokens
+                }
             out.append(
                 _resp_event(
                     {
@@ -783,11 +806,7 @@ class ResponsesEmitter:
                             "id": self.resp_id,
                             "status": delta.status,
                             "model": self.model,
-                            "usage": {
-                                "input_tokens": in_tok,
-                                "output_tokens": out_tok,
-                                "total_tokens": in_tok + out_tok,
-                            },
+                            "usage": usage,
                         },
                     }
                 )

@@ -38,3 +38,11 @@ def test_ok_on_client_errors():
 
 def test_bad_retry_after_header_tolerated():
     assert classify(429, {}, {"retry-after": "soon"}) == ("ratelimited", None)
+
+
+def test_ratelimited_on_detail_shaped_body():
+    assert classify(400, {"detail": "Rate limit exceeded"}) == ("ratelimited", None)
+    assert classify(400, {"error": {"detail": "quota exhausted"}}) == (
+        "ratelimited",
+        None,
+    )

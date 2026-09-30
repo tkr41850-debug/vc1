@@ -290,3 +290,46 @@ def test_responses_text_to_messages_events():
     assert kinds[-1] == "message_stop"
     stop = next(e for e in events if e["type"] == "message_delta")
     assert stop["delta"]["stop_reason"] == "end_turn"
+
+
+def test_messages_tool_stream_emits_tool_calls_finish():
+    from llms.proxy.stream_translate import messages_to_chat
+
+    events = collect(messages_to_chat(MSG_TOOL_STREAM, "t1", "m"))
+    assert events[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_messages_reasoning_flows_to_chat_reasoning_content():
+    from llms.proxy.stream_translate import messages_to_chat
+
+    lines = [
+        "event: content_block_start",
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}',
+        "",
+        "event: content_block_delta",
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}',
+        "",
+        "event: message_delta",
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}',
+        "",
+        "event: message_stop",
+        'data: {"type":"message_stop"}',
+        "",
+    ]
+    events = collect(messages_to_chat(lines, "t1", "m"))
+    deltas = [c["choices"][0]["delta"] for c in events if "choices" in c]
+    assert any(d.get("reasoning_content") == "hmm" for d in deltas)
+
+
+def test_usage_details_flow_messages_to_responses_stream():
+    lines = [
+        "event: message_delta",
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":7,"output_tokens":3,"cache_read_input_tokens":2}}',
+        "",
+        "event: message_stop",
+        'data: {"type":"message_stop"}',
+        "",
+    ]
+    events = collect(messages_to_responses(lines, "t1", "m"))
+    usage = events[-1]["response"]["usage"]
+    assert usage["input_tokens_details"] == {"cached_tokens": 2}

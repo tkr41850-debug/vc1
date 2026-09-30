@@ -15,11 +15,22 @@ def _payload_text(payload) -> str:
     if isinstance(payload, dict):
         error = payload.get("error", payload)
         if isinstance(error, dict):
-            return " ".join(
+            parts = [
                 str(v)
-                for v in (error.get("type"), error.get("message"), error.get("code"))
+                for v in (
+                    error.get("type"),
+                    error.get("message"),
+                    error.get("code"),
+                    # FastAPI-style error bodies carry the signal here
+                    # ({"detail": "Rate limit exceeded"}) rather than under
+                    # "error"; without it classify() misses them as "ok".
+                    error.get("detail", payload.get("detail")),
+                )
                 if v
-            )
+            ]
+            if parts:
+                return " ".join(parts)
+            return str(error)
         return str(error)
     return str(payload)
 

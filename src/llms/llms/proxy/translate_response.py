@@ -78,6 +78,10 @@ def parse_chat_response(payload: dict) -> ResponseIR:
         cached_tokens=cached,
         reasoning_tokens=reasoning,
         incomplete_reason="max_output_tokens" if finish == "length" else None,
+        # Preserve the upstream finish reason so emitters can re-emit
+        # in-vocabulary failure reasons (e.g. content_filter) instead of
+        # collapsing every failure to "stop".
+        finish_reason=finish if status == "failed" else None,
     )
 
 
@@ -163,6 +167,10 @@ def emit_chat_response(rir: ResponseIR, model: str) -> dict:
         finish = "stop"
     elif rir.status == "incomplete":
         finish = "length"
+    elif rir.finish_reason in ("content_filter", "function_call", "tool_calls"):
+        # Upstream named a real failure: re-emit it instead of collapsing
+        # to "stop" so downstream sees the filter/error, not a clean end.
+        finish = rir.finish_reason
     else:
         finish = "stop"
     message: dict = {
