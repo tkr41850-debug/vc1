@@ -110,6 +110,20 @@ class ProviderRuntime:
             self._subscribers.add(q)
         return q
 
+    async def subscribe_snapshot(self) -> tuple[asyncio.Queue, list[dict]]:
+        """Subscribe and snapshot atomically under one lock.
+
+        A record() landing around this call is either in the returned
+        snapshot or queued for the caller to drain — never both, never
+        neither (fixes the snapshot-then-subscribe window that dropped
+        in-window entries on the per-provider recent stream).
+        """
+        q: asyncio.Queue = asyncio.Queue(maxsize=100)
+        async with self._lock:
+            self._subscribers.add(q)
+            snap = self.recent_snapshot()
+        return q, snap
+
     async def unsubscribe(self, q: asyncio.Queue) -> None:
         async with self._lock:
             self._subscribers.discard(q)

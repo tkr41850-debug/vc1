@@ -417,9 +417,13 @@ async def provider_stream(
     rt = registry.runtime(provider_id)
 
     async def gen():
-        yield f"data: {json.dumps({'recent': rt.recent_snapshot()})}\n\n"
-        q = await rt.subscribe()
+        # Subscribe BEFORE the first snapshot (mirrors the collection
+        # streams). The snapshot is taken under the same lock, so a
+        # record() landing in between is either in the snapshot or in
+        # the queue — never both, never neither.
+        q, snap = await rt.subscribe_snapshot()
         try:
+            yield f"data: {json.dumps({'recent': snap})}\n\n"
             while True:
                 if await request.is_disconnected():
                     break

@@ -304,3 +304,28 @@ def test_provider_exits_capped(admin_client):
     assert r.status_code == 200
     providers = tc.get("/api/admin/providers").json()["providers"]
     assert next(p for p in providers if p["id"] == "big")["exits"] == 32
+
+
+def test_provider_stream_no_gap_between_snapshot_and_subscribe():
+    import asyncio
+    import json
+
+    from llms.proxy.providers import ProviderRuntime, RecentRequest
+
+    async def scenario():
+        rt = ProviderRuntime()
+        await rt.record(
+            RecentRequest(ts=1.0, model="m", status=200, ms=1.0, warp_idx=None)
+        )
+        q, snap = await rt.subscribe_snapshot()
+        # Record landing right after the atomic call: must be queued, and
+        # must NOT already be in the snapshot (no duplicates either).
+        await rt.record(
+            RecentRequest(ts=2.0, model="m", status=200, ms=1.0, warp_idx=None)
+        )
+        assert [r["ts"] for r in snap] == [1.0]
+        assert q.qsize() == 1
+        assert (await q.get()).ts == 2.0
+        await rt.unsubscribe(q)
+
+    asyncio.run(scenario())
