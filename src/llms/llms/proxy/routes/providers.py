@@ -19,6 +19,15 @@ router = APIRouter()
 
 operator_router = APIRouter()
 
+# Upper bound on warp exits per provider: each exit allocates a SOCKS
+# port, a slot, datadirs and a daemon, so an uncapped admin input fans
+# straight out to the pool (verified frontend finding).
+MAX_EXITS = 32
+
+
+def _clamp_exits(exits: int) -> int:
+    return max(1, min(MAX_EXITS, int(exits)))
+
 IP_ECHO_URL = "https://api.ipify.org?format=json"
 IP6_ECHO_URL = "https://api64.ipify.org?format=json"
 IP_TIMEOUT_S = 10.0
@@ -90,8 +99,10 @@ async def create_provider(
         raise HTTPException(status_code=400, detail="id is required")
     if body.kind not in ("noproxy", "warp"):
         raise HTTPException(status_code=400, detail="kind must be noproxy or warp")
-    if body.kind == "warp" and body.exits < 1:
-        raise HTTPException(status_code=400, detail="exits must be >= 1")
+    if body.kind == "warp" and (body.exits < 1 or body.exits > MAX_EXITS):
+        raise HTTPException(
+            status_code=400, detail=f"exits must be 1..{MAX_EXITS}"
+        )
     registry = _registry(request)
     _ = settings
     try:
@@ -106,7 +117,7 @@ async def create_provider(
         kind=body.kind,
         models=list(body.models),
         enabled=body.enabled,
-        exits=max(1, body.exits),
+        exits=_clamp_exits(body.exits),
     )
     providers.append(provider)
     registry.save(providers)
@@ -134,7 +145,7 @@ async def update_provider(
             if body.label is not None:
                 p.label = body.label
             if body.exits is not None:
-                p.exits = max(1, body.exits)
+                p.exits = _clamp_exits(body.exits)
             if body.models is not None:
                 p.models = list(body.models)
             if body.enabled is not None:

@@ -286,3 +286,21 @@ def test_warp_egress_socks_and_retry_tracking(monkeypatch):
     asyncio.run(registry.aclose())
     asyncio.run(zen_client.aclose())
     asyncio.run(upstream.aclose())
+
+
+def test_provider_exits_capped(admin_client):
+    tc, _ = admin_client
+    r = tc.post(
+        "/api/admin/providers",
+        json={"id": "big", "kind": "warp", "exits": 500, "models": ["gpt-*"]},
+    )
+    assert r.status_code == 400
+    r = tc.post(
+        "/api/admin/providers",
+        json={"id": "big", "kind": "warp", "exits": 4, "models": ["gpt-*"]},
+    )
+    assert r.status_code == 201
+    r = tc.put("/api/admin/providers/big", json={"exits": 500})
+    assert r.status_code == 200
+    providers = tc.get("/api/admin/providers").json()["providers"]
+    assert next(p for p in providers if p["id"] == "big")["exits"] == 32

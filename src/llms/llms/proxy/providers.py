@@ -282,9 +282,10 @@ class ProviderRegistry:
                     "datadirs in-process)"
                 )
             # `exits` sizes the local exit pool; `slots` is accepted as a
-            # legacy alias from the slots-named era.
+            # legacy alias from the slots-named era. Capped: each exit
+            # allocates a port, slot, dirs and daemon (see routes MAX_EXITS).
             try:
-                exits = max(1, int(item.get("exits", item.get("slots", 8))))
+                exits = max(1, min(32, int(item.get("exits", item.get("slots", 8)))))
             except (TypeError, ValueError):
                 raise StoreError(f"provider {item.get('id')}: exits must be an integer")
             out.append(
