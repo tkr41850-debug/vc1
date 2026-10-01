@@ -125,7 +125,9 @@ def test_chat_tool_deltas_become_function_call():
     added = [e for e in events if e["type"] == "response.output_item.added"]
     assert added[0]["item"]["name"] == "bash"
     done = [e for e in events if e["type"] == "response.function_call_arguments.done"]
-    assert done[0]["arguments"] == '{"x"'
+    # Truncated mid-args stream: terminal coerces the partial to valid
+    # JSON so downstream validation never sees a fragment.
+    assert done[0]["arguments"] == '{}'
     assert events[-1]["type"] == "response.completed"
 
 
@@ -277,8 +279,31 @@ def test_messages_tool_to_responses_function_call():
     added = [e for e in events if e["type"] == "response.output_item.added"]
     assert added[0]["item"]["name"] == "bash"
     done = [e for e in events if e["type"] == "response.function_call_arguments.done"]
-    assert done[0]["arguments"] == '{"c"}'
+    # Same truncated-stream coercion on the messages leg.
+    assert done[0]["arguments"] == '{}'
     assert events[-1]["type"] == "response.completed"
+
+
+def test_complete_tool_args_pass_through_terminal():
+    from llms.proxy.ir import StreamDone, ToolArgsDelta
+    from llms.proxy.stream_translate import ResponsesEmitter
+
+    emitter = ResponsesEmitter("t1", "m")
+    emitter.feed_delta(ToolArgsDelta("c1", "bash", '{"cmd":"ls"}'))
+    out = emitter.feed_delta(StreamDone("completed"))
+    done = [
+        e
+        for e in (
+            __import__("json").loads(
+                c.decode().split("data: ", 1)[1]
+            )
+            for c in out
+            if c.startswith(b"data: ")
+        )
+        if e.get("type") == "response.function_call_arguments.done"
+    ]
+    assert done[0]["arguments"] == '{"cmd":"ls"}'
+
 
 
 def test_responses_text_to_messages_events():

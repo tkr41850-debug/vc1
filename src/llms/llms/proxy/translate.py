@@ -488,7 +488,7 @@ def to_zen_chat(req: RequestIR) -> dict:
                     {
                         "id": b.call_id,
                         "type": "function",
-                        "function": {"name": b.name, "arguments": b.arguments},
+                        "function": {"name": b.name, "arguments": b.wire_arguments()},
                     }
                 )
             elif isinstance(b, ToolResultBlock):
@@ -694,7 +694,7 @@ def to_zen_responses(req: RequestIR) -> dict:
                         "type": "function_call",
                         "call_id": b.call_id,
                         "name": b.name,
-                        "arguments": b.arguments,
+                        "arguments": b.wire_arguments(),
                     }
                 )
             elif isinstance(b, ToolResultBlock):
@@ -881,7 +881,7 @@ def ir_messages_to_responses_output(messages: tuple) -> list:
                         "type": "function_call",
                         "call_id": b.call_id,
                         "name": b.name,
-                        "arguments": b.arguments,
+                        "arguments": b.wire_arguments(),
                     }
                 )
             elif isinstance(b, OpaqueBlock):

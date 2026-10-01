@@ -29,6 +29,26 @@ class ToolCallBlock:
     arguments: str
     cache: str | None = None
 
+    def wire_arguments(self) -> str:
+        """Arguments as they go onto the upstream wire (valid JSON).
+
+        Models (and echoing clients like Codex) emit empty-string
+        arguments for no-arg calls; the upstream validator 400s those
+        (`` `arguments` must be valid JSON ``), poisoning the session.
+        Coerce blank/non-JSON to "{}" at the single choke point so no
+        emitter can leak an invalid payload.
+        """
+        import json as _json
+
+        args = self.arguments
+        if isinstance(args, str) and args.strip():
+            try:
+                _json.loads(args)
+                return args
+            except Exception:
+                pass
+        return "{}"
+
 
 @dataclass(frozen=True)
 class ToolResultBlock:

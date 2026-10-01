@@ -7,6 +7,17 @@ from collections.abc import Iterable, Iterator
 from llms.proxy.ir import ReasoningDelta, StreamDone, TextDelta, ToolArgsDelta
 from llms.proxy.logging import setup_logging
 
+
+def _wire_args(args: str) -> str:
+    """Coerce streamed tool arguments to valid JSON (mirrors IR helper)."""
+    if isinstance(args, str) and args.strip():
+        try:
+            json.loads(args)
+            return args
+        except Exception:
+            pass
+    return "{}"
+
 logger = setup_logging()
 
 
@@ -759,13 +770,19 @@ class ResponsesEmitter:
                     )
                 )
             for call_id, index in self.tool_items.items():
+                # Terminal frames carry COMPLETE arguments only; a truncated
+                # stream (upstream cut mid-args) must not emit a partial
+                # object that fails JSON validation downstream. Coerce at
+                # the terminal boundary (mid-stream deltas pass through
+                # untouched so live clients keep incremental fidelity).
+                args = _wire_args(self.tool_args[call_id])
                 out.append(
                     _resp_event(
                         {
                             "type": "response.function_call_arguments.done",
                             "output_index": index,
                             "item_id": call_id,
-                            "arguments": self.tool_args[call_id],
+                            "arguments": args,
                         }
                     )
                 )
@@ -778,7 +795,7 @@ class ResponsesEmitter:
                                 "id": call_id,
                                 "type": "function_call",
                                 "name": self.tool_names[call_id],
-                                "arguments": self.tool_args[call_id],
+                                "arguments": args,
                             },
                         }
                     )
