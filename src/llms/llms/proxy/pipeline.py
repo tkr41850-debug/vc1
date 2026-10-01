@@ -122,7 +122,11 @@ def _inflight_release(request, provider_id: str | None) -> None:
         hub = getattr(request.app.state, "admin_hub", None)
         publish = getattr(hub, "publish_throttled", None)
         if callable(publish):
-            asyncio.create_task(publish("providers"))
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            loop.create_task(publish("providers"))
     except Exception:
         pass
 

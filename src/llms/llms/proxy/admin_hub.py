@@ -55,11 +55,23 @@ class AdminHub:
         self.publish_nowait(topic)
 
     async def publish_throttled(self, topic: str, delay_s: float = 2.0) -> None:
-        """Coalesced publish for high-frequency count-only updates.
+        """Fire-and-forget coalesced publish for count-only updates.
 
-        First call in a quiet window publishes immediately; calls inside
-        the window schedule exactly one trailing publish. Never raises.
+        Schedules the throttle state machine as a background task and
+        returns immediately: callers (in-flight release on the request
+        path) never wait out the cooldown window. First call in a quiet
+        window publishes at once; calls inside the window collapse to one
+        trailing publish. CancelledError on the trailing sleep closes the
+        window so the hub never wedges shut. Never raises.
         """
+        try:
+            asyncio.get_running_loop().create_task(
+                self._throttled_publish(topic, delay_s)
+            )
+        except Exception:
+            pass
+
+    async def _throttled_publish(self, topic: str, delay_s: float) -> None:
         immediate = False
         with self._lock:
             if not self._throttle_pending.get(topic, False):
@@ -71,12 +83,38 @@ class AdminHub:
                 return
         if immediate:
             self.publish_nowait(topic)
+            try:
+                await asyncio.sleep(delay_s)
+            except asyncio.CancelledError:
+                with self._lock:
+                    self._throttle_pending[topic] = False
+                    self._throttle_scheduled[topic] = False
+                raise
+            except Exception:
+                pass
+            with self._lock:
+                trailing = bool(self._throttle_scheduled.get(topic, False))
+                self._throttle_scheduled[topic] = False
+                self._throttle_pending[topic] = False
+            if trailing:
+                # Coalesced calls arrived mid-window: one trailing
+                # publish covers them, then the window closes.
+                self.publish_nowait(topic)
             return
         try:
             await asyncio.sleep(delay_s)
+        except asyncio.CancelledError:
+            with self._lock:
+                self._throttle_scheduled[topic] = False
+                self._throttle_pending[topic] = False
+            raise
         except Exception:
             pass
         with self._lock:
+            if not self._throttle_pending.get(topic, False):
+                # Window already closed by the immediate task (which
+                # emitted the trailing publish if one was due).
+                return
             self._throttle_scheduled[topic] = False
             self._throttle_pending[topic] = False
         self.publish_nowait(topic)

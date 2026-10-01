@@ -496,3 +496,59 @@ def test_generation_cancel_reenable_mid_drain(admin_client):
         await _asyncio.sleep(0.1)
 
     _asyncio.run(settle())
+
+
+def test_publish_throttled_never_blocks_caller():
+    import asyncio as _asyncio
+    import time as _time
+
+    from llms.proxy.admin_hub import AdminHub
+
+    async def scenario():
+        hub = AdminHub()
+        q = await hub.subscribe("providers")
+        for _ in range(3):
+            t0 = _time.monotonic()
+            await hub.publish_throttled("providers", delay_s=0.2)
+            assert _time.monotonic() - t0 < 0.1
+            await _asyncio.sleep(0.3)
+        # Each call landed in a closed window (0.3 > 0.2 cooldown), so
+        # each published immediately: 3 frames, no trailing.
+        got = 0
+        deadline = _time.monotonic() + 2.0
+        while _time.monotonic() < deadline:
+            try:
+                await _asyncio.wait_for(q.get(), 0.3)
+                got += 1
+            except TimeoutError:
+                break
+        assert got == 3, got
+
+
+def test_publish_throttled_coalesces_burst():
+    import asyncio as _asyncio
+    import time as _time
+
+    from llms.proxy.admin_hub import AdminHub
+
+    async def scenario():
+        hub = AdminHub()
+        q = await hub.subscribe("providers")
+        # Tight burst inside one window: immediate + one trailing.
+        for _ in range(5):
+            t0 = _time.monotonic()
+            await hub.publish_throttled("providers", delay_s=0.2)
+            assert _time.monotonic() - t0 < 0.1
+        got = 0
+        deadline = _time.monotonic() + 2.0
+        while _time.monotonic() < deadline:
+            try:
+                await _asyncio.wait_for(q.get(), 0.3)
+                got += 1
+            except TimeoutError:
+                break
+        assert got == 2, got
+
+    _asyncio.run(scenario())
+
+    _asyncio.run(scenario())
