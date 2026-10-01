@@ -552,3 +552,100 @@ def test_publish_throttled_coalesces_burst():
     _asyncio.run(scenario())
 
     _asyncio.run(scenario())
+
+
+def test_inflight_changes_push_providers_frame(admin_client):
+    """Data-plane in-flight moves push a providers frame (no CRUD needed).
+
+    Regression for Busy stuck / stale state: previously only the request
+    tail (success release) published, and the tail publish raced the
+    response send — hermetically the frame never arrived before the
+    response. Publishing at track time (before the upstream leg) plus at
+    release guarantees the Busy 1->0 transition is observable on SSE.
+    """
+    import asyncio as _asyncio
+    import json as _json
+    import threading as _threading
+    import time as _time
+
+    import httpx as _httpx
+
+    tc, _ = admin_client
+    hub = tc.app.state.admin_hub
+    registry = tc.app.state.providers
+    from llms.proxy.buckets import BucketTable
+    from llms.proxy.egress import ProviderEgress
+
+    # build_app_client wires a bare DirectEgress (no resolve/provider id,
+    # so the Busy tick attributes nowhere); wrap it as lifespan does.
+    _inner = tc.app.state.egress
+    tc.app.state.egress = ProviderEgress(_inner, registry=registry)
+    tc.app.state.bucket_table = BucketTable(num_buckets=1024, num_slots=1)
+
+    gate = _threading.Event()
+
+    async def _scenario():
+        q = await hub.subscribe("providers")
+        # Drain any pending frames so the test starts quiet.
+        while True:
+            try:
+                q.get_nowait()
+            except _asyncio.QueueEmpty:
+                break
+        # Hold the upstream leg open so in_flight is observable mid-flight.
+        import llms.proxy.pipeline as _pl
+
+        _orig_forward = _pl.forward
+
+        async def _gated_forward(*args, **kwargs):
+            gate.wait(10)
+            return await _orig_forward(*args, **kwargs)
+
+        _pl.forward = _gated_forward
+        try:
+            t = _threading.Thread(
+                target=lambda: tc.post(
+                    "/v1/responses",
+                    json={
+                        "model": "muse-spark-1.3-contributor-free",
+                        "input": "hi",
+                    },
+                    headers={
+                        "Authorization": "Bearer sk-test",
+                    },
+                ),
+                daemon=True,
+            )
+            t.start()
+            # Busy tick up: track-time publish fires before the gated leg.
+            saw_busy = False
+            deadline = _time.monotonic() + 10.0
+            while _time.monotonic() < deadline:
+                try:
+                    await _asyncio.wait_for(q.get(), 1.0)
+                except TimeoutError:
+                    continue
+                snap = registry.load()
+                rt = registry.runtime("noproxy")
+                if rt.in_flight >= 1:
+                    saw_busy = True
+                    break
+            assert saw_busy, "no track-time push while upstream held"
+            gate.set()
+            t.join(timeout=20)
+            # Busy back to zero: release-time publish after the response.
+            deadline = _time.monotonic() + 10.0
+            while _time.monotonic() < deadline:
+                try:
+                    await _asyncio.wait_for(q.get(), 1.0)
+                except TimeoutError:
+                    continue
+                if registry.runtime("noproxy").in_flight == 0:
+                    break
+            assert registry.runtime("noproxy").in_flight == 0
+            await hub.unsubscribe("providers", q)
+        finally:
+            _pl.forward = _orig_forward
+            gate.set()
+
+    _asyncio.run(_scenario())

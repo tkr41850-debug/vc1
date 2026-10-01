@@ -38,26 +38,47 @@ export default function App() {
   // stable no-op kept for the tab props.
   const reload = useCallback(() => {}, []);
 
-  const applyProviders = useCallback((list: ProviderEntry[]) => {
-    // Cheap merge: same order + same ids update in place so the table
-    // does not remount on every throttled Busy tick.
-    setProviders((prev) => {
-      if (
-        prev.length === list.length &&
-        prev.every((p, i) => p.id === list[i].id)
-      ) {
-        let same = true;
-        const merged = prev.map((p, i) => {
-          const n = list[i];
+  const applyProviders = useCallback(
+    (list: ProviderEntry[] | ((prev: ProviderEntry[]) => ProviderEntry[])) => {
+      // Cheap merge: same order + same ids update in place so the table
+      // does not remount on every throttled Busy tick. Accepts a functional
+      // updater so optimistic acks merge onto current state, never a stale
+      // closure over the render-time list.
+      const merge = (prev: ProviderEntry[], next: ProviderEntry[]) => {
+        if (
+          prev.length === next.length &&
+          prev.every((p, i) => p.id === next[i].id)
+        ) {
+          let same = true;
+          const merged = prev.map((p, i) => {
+            const n = next[i];
           if (
             p.lifecycle !== n.lifecycle ||
             p.in_flight !== n.in_flight ||
             p.enabled !== n.enabled ||
             p.retry_in !== n.retry_in ||
+            p.retry_reason !== n.retry_reason ||
+            p.cycling !== n.cycling ||
+            p.cycle_cooldown_remaining !== n.cycle_cooldown_remaining ||
+            p.label !== n.label ||
+            p.kind !== n.kind ||
+            p.deletable !== n.deletable ||
             p.exits !== n.exits ||
-            p.models.join() !== n.models.join() ||
+            p.models.join("\n") !== n.models.join("\n") ||
+            p.drain?.until_ms !== n.drain?.until_ms ||
+            p.drain?.forced !== n.drain?.forced ||
+            p.health.fetched_at !== n.health.fetched_at ||
+            p.health.error !== n.health.error ||
             p.health.exits.length !== n.health.exits.length ||
-            p.health.exits.some((w, j) => w.ready !== n.health.exits[j]?.ready)
+            p.health.exits.some(
+              (w, j) =>
+                w.ready !== n.health.exits[j]?.ready ||
+                w.status !== n.health.exits[j]?.status ||
+                w.reason !== n.health.exits[j]?.reason ||
+                w.socks !== n.health.exits[j]?.socks ||
+                w.registered !== n.health.exits[j]?.registered ||
+                w.error !== n.health.exits[j]?.error,
+            )
           ) {
             same = false;
             return n;
@@ -66,9 +87,13 @@ export default function App() {
         });
         return same ? prev : merged;
       }
-      return list;
-    });
-  }, []);
+      return next;
+      };
+      if (typeof list === "function") setProviders((prev) => merge(prev, list(prev)));
+      else setProviders((prev) => merge(prev, list));
+    },
+    [],
+  );
 
   const logout = useCallback(async () => {
     try {

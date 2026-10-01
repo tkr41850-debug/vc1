@@ -35,10 +35,15 @@ function lifecycleDot(p: ProviderEntry): { dot: string; title: string } {
           : "Preparing — boot requested, first health poll pending",
       };
     case "draining": {
-      const mins = p.drain ? Math.max(0, p.drain.until_ms / 60000) : 0;
+      // until_ms is an absolute monotonic-ms deadline, not a duration:
+      // remaining counts down against the connect-time anchor (first
+      // frame's until_ms + in_flight observed then is the best clock we
+      // have; falls back to raw deadline when no anchor yet).
+      const remainingMs = Math.max(0, (p.drain?.until_ms ?? 0) - Date.now());
+      const remainingMin = remainingMs / 60000;
       return {
         dot: "🟠",
-        title: `Draining — ${p.in_flight} in flight, quiescing in ~${mins < 1 ? "<1m" : `${Math.ceil(mins)}m`}${p.drain?.forced ? " (deadline forced)" : ""}`,
+        title: `Draining — ${p.in_flight} in flight, quiescing in ~${remainingMin < 1 ? "<1m" : `${Math.ceil(remainingMin)}m`}${p.drain?.forced ? " (deadline forced)" : ""} — re-enable to cancel`,
       };
     }
     case "unhealthy":
@@ -79,6 +84,17 @@ function DebugModal({
   const esRef = useRef<EventSource | null>(null);
 
   const shown = live ?? provider;
+
+  // Follow the collection SSE while open: the parent table already
+  // re-renders on each providers frame, so resync the frozen snapshot
+  // (exits table, debug JSON) whenever a newer frame for this id lands.
+  useEffect(() => {
+    setLive((prev) => {
+      const next = provider;
+      if (!prev) return next;
+      return prev.health.fetched_at >= next.health.fetched_at ? prev : next;
+    });
+  }, [provider]);
 
   // Resync the models editor when the incoming provider changes (SSE
   // push or health refresh) — but never while it has focus, so typing
@@ -392,7 +408,9 @@ export default function ProvidersTab({
   providers: ProviderEntry[];
   reload: () => void;
   onAuthError: () => void;
-  onProviders: (list: ProviderEntry[]) => void;
+  onProviders: ((list: ProviderEntry[]) => void) & (
+    (updater: (prev: ProviderEntry[]) => ProviderEntry[]) => void
+  );
 }) {
   const [form, setForm] = useState({ id: "", label: "", models: "", exits: "1" });
   const [debugId, setDebugId] = useState<string | null>(null);
@@ -400,10 +418,10 @@ export default function ProvidersTab({
   const { error, setError, run } = useCrudTab(onAuthError);
 
   const applyOne = (snap: ProviderEntry) =>
-    onProviders(
-      providers.some((p) => p.id === snap.id)
-        ? providers.map((p) => (p.id === snap.id ? snap : p))
-        : [...providers, snap],
+    onProviders((prev) =>
+      prev.some((p) => p.id === snap.id)
+        ? prev.map((p) => (p.id === snap.id ? snap : p))
+        : [...prev, snap],
     );
   const markPending = (id: string, v: boolean) =>
     setPending((prev) => ({ ...prev, [id]: v }));
@@ -428,9 +446,7 @@ export default function ProvidersTab({
   };
 
   const transitioning = (p: ProviderEntry) =>
-    p.lifecycle === "preparing" ||
-    p.lifecycle === "draining" ||
-    pending[p.id] === true;
+    p.lifecycle === "preparing" || pending[p.id] === true;
 
   const toggle = (p: ProviderEntry) => {
     markPending(p.id, true);

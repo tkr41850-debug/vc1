@@ -463,6 +463,22 @@ def _dedup_background_finish(task, **kwargs) -> None:
         logger.debug("dedup background finish failed: %r", exc)
 
 
+async def _publish_providers(request) -> None:
+    """Best-effort immediate providers push (track-time/refetch changes).
+
+    Release paths use throttled publish (high-frequency coalescing);
+    track-time and health-change pushes bypass the throttle so the UI
+    converges without polling.
+    """
+    try:
+        hub = getattr(request.app.state, "admin_hub", None)
+        publish = getattr(hub, "publish", None)
+        if callable(publish):
+            await publish("providers")
+    except Exception:
+        pass
+
+
 def _record_conversation(
     response: Response,
     session_tracker,
@@ -629,7 +645,13 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                         provider = p
                         break
             if registry is not None and provider is not None:
+                _before = registry.runtime(provider.id).health.fetched_at
                 await registry.refresh_health(provider)
+                if registry.runtime(provider.id).health.fetched_at != _before:
+                    # The refresh actually moved health (not a TTL no-op):
+                    # push so admin viewers converge without polling or a
+                    # debug click (stale red-until-debug regression).
+                    await _publish_providers(request)
                 # Re-resolve after the refresh: a slot that flipped ready
                 # during this very poll must seed the egress's SOCKS ports
                 # before client_for runs, or the request fails open despite
@@ -672,10 +694,13 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             client = egress_provider.client_for(bucket, slot)
     else:
         client = egress_provider.client_for(bucket, slot)
-    # In-flight accounting starts once resolve() assigns a provider: the
-    # shed/dedup/fast-fail paths below return before the upstream leg, so
-    # they never increment — and their returns never decrement.
+    # In-flight accounting starts once resolve() assigns a provider, and
+    # the count change pushes immediately: the per-request refresh below
+    # is TTL-gated (usually a no-op), so without this the Busy tick would
+    # only surface on the release publish after the response — or never,
+    # if release coalesces into the cooldown window.
     _inflight_track(request, provider_id)
+    await _publish_providers(request)
     if registry is not None:
         # Pool-dry shed: direct also ratelimited and a warp bounce in
         # flight. Otherwise fall through to normal routing — resolve()
@@ -683,6 +708,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         # (fail open to direct as usual).
         shed, shed_provider = _shed_if_pool_dry(registry, req.model, trace_id)
         if shed is not None:
+            _inflight_release(request, provider_id)
             _record_usage(request, ingress, req.model, shed)
             await registry.runtime(shed_provider or "").record(
                 RecentRequest(
@@ -845,7 +871,9 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         and response.headers.get(dedup.DEDUP_HEADER) is not None
     ):
         # Synthetic dedup response (inflight 429): skip every tail
-        # side-effect so it can never read as provider congestion.
+        # side-effect so it can never read as provider congestion — but
+        # release the track() slot first (no upstream leg ran for it).
+        _inflight_release(request, provider_id)
         return response
     _note_free_tier_error(response, settings, trace_id)
     stream_id = None

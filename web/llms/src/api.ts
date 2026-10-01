@@ -54,6 +54,8 @@ export interface ProviderEntry {
   drain: { until_ms: number; forced: boolean } | null;
   retry_in: number;
   retry_reason: string;
+  cycling: boolean;
+  cycle_cooldown_remaining: number;
   health: {
     fetched_at: number;
     error: string;
