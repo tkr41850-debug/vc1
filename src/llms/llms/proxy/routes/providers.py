@@ -565,18 +565,44 @@ async def provider_stream(
         # streams). The snapshot is taken under the same lock, so a
         # record() landing in between is either in the snapshot or in
         # the queue — never both, never neither.
-        q, snap = await rt.subscribe_snapshot()
         try:
-            yield f"data: {json.dumps({'recent': snap})}\n\n"
+            q, snap = await rt.subscribe_snapshot()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            yield ": ping\n\n"
+            return
+        try:
+            try:
+                yield f"data: {json.dumps({'recent': snap})}\n\n"
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                yield ": ping\n\n"
             while True:
-                if await request.is_disconnected():
+                try:
+                    if await request.is_disconnected():
+                        break
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
                     break
                 try:
                     entry = await asyncio.wait_for(q.get(), timeout=15.0)
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     yield ": ping\n\n"
                     continue
-                yield f"data: {json.dumps({'request': {'ts': entry.ts, 'model': entry.model, 'status': entry.status, 'ms': round(entry.ms, 1), 'warp_idx': entry.warp_idx, 'error': entry.error}})}\n\n"
+                except asyncio.CancelledError:
+                    raise
+                except BaseException:
+                    yield ": ping\n\n"
+                    continue
+                try:
+                    yield f"data: {json.dumps({'request': {'ts': entry.ts, 'model': entry.model, 'status': entry.status, 'ms': round(entry.ms, 1), 'warp_idx': entry.warp_idx, 'error': entry.error}})}\n\n"
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    yield ": ping\n\n"
         finally:
             await rt.unsubscribe(q)
 

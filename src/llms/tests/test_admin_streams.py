@@ -427,3 +427,17 @@ async def test_streams_live_beside_spa_routes(live_server):
         r = await c.get("/api/admin/keys/sse")
         assert r.status_code == 401
         assert r.json() == {"error": {"message": "admin login required"}}
+
+
+def test_heartbeat_cadences_under_half_cf_budget():
+    """All SSE heartbeat cadences stay under 60s (half the CF 120s budget).
+
+    Worst case single miss still delivers at 2x cadence, well under 120s.
+    """
+    from llms.proxy import forward
+    from llms.proxy.routes import admin_streams
+
+    assert admin_streams.HEARTBEAT_S < 60
+    assert forward.STREAM_HEARTBEAT_S < 60
+    assert admin_streams.HEARTBEAT_S == 15.0
+    assert forward.STREAM_HEARTBEAT_S == 30.0
