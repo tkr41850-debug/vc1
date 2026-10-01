@@ -97,6 +97,58 @@ def _synthesize_for(ingress: str, egress: str, model: str):
 STEER_MAX_ITERS = int(os.getenv("ZEN_STEER_MAX_ITERS", "3"))
 
 
+def _inflight_track(request, provider_id: str | None) -> None:
+    """Increment the provider's in-flight count (§3, event loop only)."""
+    if not provider_id:
+        return
+    try:
+        registry = getattr(request.app.state, "providers", None)
+        if registry is not None:
+            registry.runtime(provider_id).in_flight += 1
+    except Exception:
+        pass
+
+
+def _inflight_release(request, provider_id: str | None) -> None:
+    """Decrement with a max(0, …) guard; schedules a throttled push."""
+    if not provider_id:
+        return
+    try:
+        registry = getattr(request.app.state, "providers", None)
+        if registry is None:
+            return
+        rt = registry.runtime(provider_id)
+        rt.in_flight = max(0, rt.in_flight - 1)
+        hub = getattr(request.app.state, "admin_hub", None)
+        publish = getattr(hub, "publish_throttled", None)
+        if callable(publish):
+            asyncio.create_task(publish("providers"))
+    except Exception:
+        pass
+
+
+def _wrap_inflight(request, response, provider_id: str | None):
+    """Wrap a StreamingResponse so body completion releases in-flight.
+
+    Covers all four stream generators in forward.py at once; `finally`
+    covers abrupt disconnect. JSON/synthesize legs decrement via
+    _inflight_release after _record_usage instead.
+    """
+    if provider_id is None or not isinstance(response, StreamingResponse):
+        return response
+    iterator = response.body_iterator
+
+    async def _tracking_iterator():
+        try:
+            async for chunk in iterator:
+                yield chunk
+        finally:
+            _inflight_release(request, provider_id)
+
+    response.body_iterator = _tracking_iterator()
+    return response
+
+
 def _genuine_calls_in(response: Response, client_names: set[str]) -> list[dict]:
     """Assistant function_calls the client did NOT declare (steer candidates).
 
@@ -633,6 +685,10 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             client = egress_provider.client_for(bucket, slot)
     else:
         client = egress_provider.client_for(bucket, slot)
+    # In-flight accounting starts once resolve() assigns a provider: the
+    # shed/dedup/fast-fail paths below return before the upstream leg, so
+    # they never increment — and their returns never decrement.
+    _inflight_track(request, provider_id)
     if registry is not None:
         # Pool-dry shed: direct also ratelimited and a warp bounce in
         # flight. Otherwise fall through to normal routing — resolve()
@@ -883,6 +939,9 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                     hint,
                 )
     _record_usage(request, ingress, req.model, response)
+    if isinstance(response, StreamingResponse):
+        return _wrap_inflight(request, response, provider_id)
+    _inflight_release(request, provider_id)
     if registry is not None and provider_id:
         status = response.status_code if hasattr(response, "status_code") else 0
         error = ""

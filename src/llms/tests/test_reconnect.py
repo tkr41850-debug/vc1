@@ -64,14 +64,14 @@ def test_reconnect_bounces_pool_and_resyncs(admin_client, tmp_path, monkeypatch)
     )
     assert r.status_code == 200
     body = r.json()
-    assert body["ok"] is True
-    assert body["before"]["ready"] == 0
-    assert body["after"]["ready"] == 2
-    assert pool.reconnects == 1
-    assert table.num_slots == 2
-    assert json.loads((tmp_path / "warps" / "pool1" / "status.json").read_text())[
-        "exits"
-    ]
+    # Ack (§2): the transition snapshot returns at once; the bounce
+    # settles in the background and publishes over SSE.
+    assert body["id"] == "pool1"
+    assert body["reconnect"] == {
+        "started": True,
+        "before": {"ready": 0, "exits": 0, "error": ""},
+    }
+    assert body["lifecycle"] in ("preparing", "ready", "unhealthy", "ratelimited")
 
 
 def test_reconnect_rejects_noproxy(admin_client):
@@ -114,10 +114,8 @@ def test_local_reconnect_pool_uses_secret_key(app_client, tmp_path, monkeypatch)
     assert r.status_code == 200
     body = r.json()
     assert body["id"] == "pool1"
-    assert body["ok"] is True
-    assert pool.reconnects == 1
-    assert body["exits"][0]["status"] == "Connected"
-    assert "reason" in body["exits"][0]
+    assert body["reconnect"]["started"] is True
+    assert body["lifecycle"] in ("preparing", "ready", "unhealthy", "ratelimited")
 
 
 def test_local_reconnect_pool_requires_key(app_client):

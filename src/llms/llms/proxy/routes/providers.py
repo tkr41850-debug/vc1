@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import logging
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -12,8 +13,11 @@ from pydantic import BaseModel
 from llms.proxy.admin_hub import get_hub
 from llms.proxy.auth import require_admin
 from llms.proxy.config import Settings, settings_from_app
-from llms.proxy.providers import Provider, ProviderRegistry, snapshot_all
+from llms.proxy.forward import STREAM_TIMEOUT_S
+from llms.proxy.providers import Provider, ProviderRegistry, provider_snapshot, snapshot_all
 from llms.proxy.store import StoreError
+
+logger = logging.getLogger("zen_proxy")
 
 router = APIRouter()
 
@@ -148,13 +152,130 @@ async def update_provider(
                 p.exits = _clamp_exits(body.exits)
             if body.models is not None:
                 p.models = list(body.models)
+            enabled_changed = body.enabled is not None and body.enabled != p.enabled
             if body.enabled is not None:
                 p.enabled = body.enabled
             registry.save(providers)
             _sync_slots(request)
+            if enabled_changed:
+                # Ack (section 2): persist intent, stamp epochs, publish the
+                # transition frame, return it at once - warp-cli work
+                # happens in a background task, never in this request.
+                return await _ack_intent_change(request, registry, p)
             await get_hub(request).publish("providers")
             return {"id": p.id, "enabled": p.enabled}
     raise HTTPException(status_code=404, detail="provider not found")
+
+
+def _transition_snapshot(registry: ProviderRegistry, provider: Provider) -> dict:
+    settings = getattr(registry, "_settings", None)
+    cooldown = float(
+        getattr(settings, "warp_auto_cycle_cooldown_s", 300) or 300
+    )
+    return provider_snapshot(
+        provider, registry.runtime(provider.id), cooldown, registry
+    )
+
+
+async def _ack_intent_change(
+    request: Request, registry: ProviderRegistry, provider: Provider
+) -> dict:
+    """Ack an enable/disable in ms with the transition snapshot (§2).
+
+    Persists intent (already saved by the caller), stamps epoch fields,
+    bumps the intent generation, publishes one transition frame, and
+    returns the full snapshot. Warp-cli work runs in a background task
+    that exits silently on generation mismatch.
+    """
+    import time as _time
+
+    rt = registry.runtime(provider.id)
+    rt.gen += 1
+    gen = rt.gen
+    if provider.enabled:
+        rt.boot_epoch = _time.monotonic()
+        rt.drain_until = 0.0
+    else:
+        # Cordon is immediate (resolve() skips disabled); the drain
+        # deadline shares the single upstream-read-budget knob.
+        rt.drain_until = _time.monotonic() + STREAM_TIMEOUT_S
+    _sync_slots(request)
+    await get_hub(request).publish("providers")
+    snap = _transition_snapshot(registry, provider)
+    hub = get_hub(request)
+
+    async def _settle() -> None:
+        try:
+            if provider.enabled:
+                await _settle_enabled(registry, provider, gen, hub)
+            else:
+                await _settle_disabled(registry, provider, gen, hub)
+        except Exception as exc:
+            logger.warning(
+                "provider %s settle task failed: %r", provider.id, exc
+            )
+        finally:
+            try:
+                await hub.publish("providers")
+            except Exception:
+                pass
+
+    asyncio.create_task(_settle())
+    return snap
+
+
+async def _settle_enabled(registry, provider, gen: int, hub) -> None:
+    """Boot the pool and force a health refresh, then publish (§2)."""
+    rt = registry.runtime(provider.id)
+    try:
+        await registry.ensure_pool(provider)
+    except Exception as exc:
+        logger.warning("provider %s boot failed: %r", provider.id, exc)
+    if rt.gen != gen:
+        return
+    try:
+        await registry.refresh_health(provider, force=True)
+    except Exception as exc:
+        logger.warning("provider %s boot refresh failed: %r", provider.id, exc)
+    if rt.gen != gen:
+        return
+    await hub.publish("providers")
+
+
+async def _settle_disabled(registry, provider, gen: int, hub) -> None:
+    """Drain in-flight, then drop daemons + egress + IPs (§2).
+
+    Datadirs are never touched: Cloudflare re-registration is heavily
+    rate-limited. Deadline expiry settles anyway with drain.forced.
+    """
+    import time as _time
+
+    rt = registry.runtime(provider.id)
+    while rt.in_flight > 0:
+        if rt.gen != gen:
+            return
+        if rt.drain_until > 0 and _time.monotonic() >= rt.drain_until:
+            break
+        await asyncio.sleep(2.0)
+    if rt.gen != gen:
+        return
+    supervisor = getattr(registry, "_supervisor", None)
+    if supervisor is not None:
+        try:
+            await supervisor.drop(provider.id)
+        except Exception as exc:
+            logger.warning(
+                "provider %s daemon drop failed: %r", provider.id, exc
+            )
+    try:
+        await registry.drop_egress(provider.id)
+    except Exception as exc:
+        logger.warning("provider %s egress drop failed: %r", provider.id, exc)
+    try:
+        invalidate_ips(provider.id)
+    except Exception as exc:
+        logger.warning("provider %s ip invalidate failed: %r", provider.id, exc)
+    await hub.publish("providers")
 
 
 @router.delete("/api/admin/providers/{provider_id:path}")
@@ -215,13 +336,35 @@ async def _do_reconnect(request: Request, provider_id: str) -> dict:
     provider = _find(registry, provider_id)
     if provider.kind != "warp":
         raise HTTPException(status_code=400, detail="only warp providers reconnect")
-    result = await registry.reconnect(provider)
-    invalidate_ips(provider_id)
+    # Ack: clear backoff now, stamp the intent generation, publish the
+    # transition frame and return it at once. The bounce + refresh run
+    # in a background task. Fixes the tens-of-seconds HTTP block.
+    rt = registry.runtime(provider_id)
+    rt.gen += 1
+    gen = rt.gen
+    rt.retry_until = 0.0
+    rt.retry_reason = ""
     _sync_slots(request)
-    # Reconnect changes health/retry state in the snapshot; push it so SSE
-    # clients (no polling) see the new state without refetching.
     await get_hub(request).publish("providers")
-    return {"id": provider_id, **result}
+    snap = _transition_snapshot(registry, provider)
+    before = registry._health_summary(rt.health)
+    hub = get_hub(request)
+
+    async def _bounce() -> None:
+        try:
+            await registry.reconnect(provider)
+        except Exception as exc:
+            logger.warning(
+                "provider %s reconnect failed: %r", provider_id, exc
+            )
+        if rt.gen != gen:
+            return
+        invalidate_ips(provider_id)
+        await hub.publish("providers")
+
+    asyncio.create_task(_bounce())
+    snap["reconnect"] = {"started": True, "before": before}
+    return snap
 
 
 @router.post("/api/admin/providers/{provider_id:path}/reconnect")

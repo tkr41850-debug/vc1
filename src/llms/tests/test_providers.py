@@ -402,3 +402,95 @@ def test_lifecycle_precedence_matrix():
         rt(),
         now=now + 200.0,
     )[0] == "off"
+
+
+def test_inflight_wrap_releases_on_full_consume():
+    import asyncio
+
+    from fastapi.responses import StreamingResponse
+
+    from llms.proxy.pipeline import _inflight_release, _inflight_track, _wrap_inflight
+    from llms.proxy.providers import ProviderRegistry
+
+    class _State:
+        pass
+
+    async def scenario(tmp_path):
+        from llms.proxy.config import Settings
+
+        settings = Settings(data_dir=str(tmp_path))
+        registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
+        state = _State()
+        state.app = _State()
+        state.app.state = _State()
+        state.app.state.providers = registry
+        state.app.state.admin_hub = None
+        req = _State()
+        req.app = state.app
+
+        async def body():
+            yield b"hello"
+
+        _inflight_track(req, "w1")
+        assert registry.runtime("w1").in_flight == 1
+        resp = _wrap_inflight(req, StreamingResponse(body()), "w1")
+        chunks = [c async for c in resp.body_iterator]
+        assert b"".join(chunks) == b"hello"
+        assert registry.runtime("w1").in_flight == 0
+        # Guard never goes negative on double release.
+        _inflight_release(req, "w1")
+        assert registry.runtime("w1").in_flight == 0
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        asyncio.run(scenario(tmp_path=__import__("pathlib").Path(tmp)))
+
+
+def test_toggle_returns_transition_snapshot_fast(admin_client):
+    import time as _time
+
+    tc, _ = admin_client
+    tc.post(
+        "/api/admin/providers",
+        json={"id": "flip", "kind": "warp", "exits": 1, "models": ["gpt-*"]},
+    )
+    start = _time.monotonic()
+    r = tc.put("/api/admin/providers/flip", json={"enabled": False})
+    elapsed = _time.monotonic() - start
+    assert r.status_code == 200
+    # Ack timing (§2): no warp-cli await in the request path.
+    assert elapsed < 1.0
+    body = r.json()
+    assert body["enabled"] is False
+    # No pool exists in this hermetic client (lifespan skipped), so the
+    # derived state is off; with a live pool it would read draining.
+    assert body["lifecycle"] in ("draining", "off")
+    assert body["drain"] is None or body["drain"]["forced"] is False
+    r = tc.put("/api/admin/providers/flip", json={"enabled": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["enabled"] is True
+    assert body["lifecycle"] == "preparing"
+
+
+def test_generation_cancel_reenable_mid_drain(admin_client):
+    import asyncio as _asyncio
+
+    tc, _ = admin_client
+    tc.post(
+        "/api/admin/providers",
+        json={"id": "flip2", "kind": "warp", "exits": 1, "models": ["gpt-*"]},
+    )
+    registry = tc.app.state.providers
+    tc.put("/api/admin/providers/flip2", json={"enabled": False})
+    rt = registry.runtime("flip2")
+    rt.in_flight = 5
+    first_gen = rt.gen
+    tc.put("/api/admin/providers/flip2", json={"enabled": True})
+    assert rt.gen == first_gen + 1
+
+    async def settle():
+        await _asyncio.sleep(0.1)
+
+    _asyncio.run(settle())
