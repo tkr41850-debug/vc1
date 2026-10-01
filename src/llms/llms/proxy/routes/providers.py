@@ -203,6 +203,7 @@ async def provider_health(
         provider,
         rt,
         float(getattr(settings, "warp_auto_cycle_cooldown_s", 300) or 300),
+        registry,
     )
     snap["debug"] = debug
     snap["health"]["fetched_at"] = health.fetched_at

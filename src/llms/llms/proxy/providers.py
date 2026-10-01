@@ -65,6 +65,12 @@ class RecentRequest:
     error: str = ""
 
 
+# Boot grace: an enabled warp with zero ready exits stays `preparing`
+# (not `unhealthy`) for this long after boot_epoch. Matches the pool's
+# own 45s bring-up window.
+BOOT_GRACE_S = 45.0
+
+
 class ProviderRuntime:
     """Live per-provider state: health snapshot, RetryIn, recent requests, SSE."""
 
@@ -75,6 +81,13 @@ class ProviderRuntime:
         self.recent: deque[RecentRequest] = deque(maxlen=RECENT_CAP)
         self._subscribers: set[asyncio.Queue] = set()
         self._lock = asyncio.Lock()
+        # Lifecycle (§1-§3): in-flight request count (event loop only),
+        # monotonic drain deadline (0 = not draining), monotonic boot
+        # epoch (0 = unknown), intent generation for task cancel (§2).
+        self.in_flight: int = 0
+        self.drain_until: float = 0.0
+        self.boot_epoch: float = 0.0
+        self.gen: int = 0
         # Auto-cycle state: background bounce of a ratelimited warp exit.
         self.last_auto_cycle: float = 0.0
         self.cycling: bool = False
@@ -469,11 +482,79 @@ class ProviderRegistry:
             self._supervisor = None
 
 
+def pool_alive(registry, provider_id: str) -> bool:
+    """Read-only pool liveness: supervisor has the pool (no spawn)."""
+    try:
+        sup = getattr(registry, "_supervisor", None)
+        get = getattr(sup, "get", None)
+        pool = get(provider_id) if callable(get) else None
+        return pool is not None
+    except Exception:
+        return False
+
+
+def derive_lifecycle(
+    provider: Provider,
+    rt: ProviderRuntime,
+    registry=None,
+    now: float | None = None,
+    boot_grace_s: float = BOOT_GRACE_S,
+) -> tuple[str, dict | None]:
+    """Derived lifecycle state (pure, never raises, no I/O).
+
+    Precedence: draining > ratelimited > preparing > ready > unhealthy
+    > off. Unexpected shapes fall back to preparing (enabled) / off
+    (disabled). Returns (lifecycle, drain_detail).
+    """
+    try:
+        current = time.monotonic() if now is None else now
+        in_flight = max(0, int(getattr(rt, "in_flight", 0) or 0))
+        drain_until = float(getattr(rt, "drain_until", 0.0) or 0.0)
+        boot_epoch = float(getattr(rt, "boot_epoch", 0.0) or 0.0)
+        enabled = bool(getattr(provider, "enabled", False))
+        kind = str(getattr(provider, "kind", "warp"))
+        health = getattr(rt, "health", None)
+        exits = list(getattr(health, "exits", None) or [])
+        fetched_at = float(getattr(health, "fetched_at", 0.0) or 0.0)
+        retry = 0.0
+        try:
+            retry = float(rt.retry_in())
+        except Exception:
+            retry = 0.0
+        ready = sum(1 for w in exits if bool(getattr(w, "ready", False)))
+        alive = pool_alive(registry, provider.id) if registry is not None else False
+        if not enabled and (alive or in_flight > 0):
+            forced = drain_until > 0 and current >= drain_until and in_flight > 0
+            return "draining", {
+                "until_ms": max(0, int(drain_until * 1000)),
+                "forced": bool(forced),
+            }
+        if enabled and retry > 0:
+            return "ratelimited", None
+        if enabled and kind == "warp" and (
+            fetched_at <= 0
+            or (ready == 0 and (boot_epoch <= 0 or current - boot_epoch < boot_grace_s))
+        ):
+            return "preparing", None
+        if enabled and (kind == "noproxy" or ready > 0):
+            return "ready", None
+        if enabled and kind == "warp" and ready == 0:
+            return "unhealthy", None
+        return "off", None
+    except Exception:
+        try:
+            return ("preparing", None) if provider.enabled else ("off", None)
+        except Exception:
+            return ("off", None)
+
+
 def provider_snapshot(
     provider: Provider,
     rt: ProviderRuntime,
     auto_cycle_cooldown_s: float = 300.0,
+    registry=None,
 ) -> dict:
+    lifecycle, drain = derive_lifecycle(provider, rt, registry)
     return {
         "id": provider.id,
         "label": provider.label,
@@ -482,6 +563,9 @@ def provider_snapshot(
         "enabled": provider.enabled,
         "exits": provider.exits,
         "deletable": provider.id != "noproxy",
+        "lifecycle": lifecycle,
+        "in_flight": max(0, int(getattr(rt, "in_flight", 0) or 0)),
+        "drain": drain,
         "retry_in": round(rt.retry_in(), 1),
         "retry_reason": rt.retry_reason,
         "cycling": rt.cycling,
@@ -514,7 +598,8 @@ def snapshot_all(registry: ProviderRegistry) -> list[dict]:
         or 300
     )
     return [
-        provider_snapshot(p, registry.runtime(p.id), cooldown) for p in registry.load()
+        provider_snapshot(p, registry.runtime(p.id), cooldown, registry)
+        for p in registry.load()
     ]
 
 

@@ -329,3 +329,76 @@ def test_provider_stream_no_gap_between_snapshot_and_subscribe():
         await rt.unsubscribe(q)
 
     asyncio.run(scenario())
+
+
+def test_lifecycle_precedence_matrix():
+    import time as _time
+
+    from llms.proxy.providers import (
+        Provider,
+        ProviderHealth,
+        ProviderRuntime,
+        WarpExit,
+        derive_lifecycle,
+    )
+
+    # retry_until is a monotonic deadline: anchor "now" to the real clock
+    # so retry_in() > 0 actually holds during the ratelimited cases.
+    now = _time.monotonic()
+
+    def rt(**kw):
+        r = ProviderRuntime()
+        for k, v in kw.items():
+            setattr(r, k, v)
+        return r
+
+    def warp(enabled=True, ready=0, total=2, fetched=100.0, error=""):
+        return Provider(
+            id="w1", kind="warp", models=["gpt-*"], enabled=enabled, exits=total
+        ), rt(
+            health=ProviderHealth(
+                exits=[
+                    WarpExit(idx=i, ready=i < ready, status="ok") for i in range(total)
+                ],
+                fetched_at=fetched,
+                error=error,
+            )
+        )
+
+    # off: disabled, no pool, no in-flight
+    p, r = warp(enabled=False)
+    assert derive_lifecycle(p, r, now=now)[0] == "off"
+    # draining: disabled + in-flight
+    p, r = warp(enabled=False)
+    r.in_flight = 3
+    r.drain_until = now + 300.0
+    lc, drain = derive_lifecycle(p, r, now=now)
+    assert lc == "draining"
+    assert drain == {"until_ms": int((now + 300.0) * 1000), "forced": False}
+    # draining beats ratelimited
+    r.retry_until = now + 300.0
+    assert derive_lifecycle(p, r, now=now)[0] == "draining"
+    # ratelimited overlay on enabled
+    p, r = warp(enabled=True, ready=1)
+    r.retry_until = now + 300.0
+    assert derive_lifecycle(p, r, now=now)[0] == "ratelimited"
+    # preparing: never fetched
+    p, r = warp(enabled=True, fetched=0.0)
+    assert derive_lifecycle(p, r, now=now)[0] == "preparing"
+    # preparing: within boot grace
+    p, r = warp(enabled=True)
+    r.boot_epoch = now - 10.0
+    assert derive_lifecycle(p, r, now=now)[0] == "preparing"
+    # unhealthy: past grace, still zero ready
+    assert derive_lifecycle(p, r, now=now + 200.0)[0] == "unhealthy"
+    # ready: enabled with a ready exit
+    p, r = warp(enabled=True, ready=1)
+    assert derive_lifecycle(p, r, now=now + 200.0)[0] == "ready"
+    # ready: noproxy always serves when enabled
+    n = Provider(id="noproxy", kind="noproxy", models=["*"], enabled=True)
+    assert derive_lifecycle(n, rt(), now=now + 200.0)[0] == "ready"
+    assert derive_lifecycle(
+        Provider(id="noproxy", kind="noproxy", models=["*"], enabled=False),
+        rt(),
+        now=now + 200.0,
+    )[0] == "off"
