@@ -229,7 +229,7 @@ def test_warp_429_publishes_providers(cycle_world):
     so admin viewers converge without polling."""
     import asyncio
 
-    tc, registry, _pool, _calls = cycle_world
+    tc, _registry, _pool, _calls = cycle_world
     hub = tc.app.state.admin_hub
     q = asyncio.run(hub.subscribe("providers"))
     try:

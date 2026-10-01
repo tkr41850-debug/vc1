@@ -12,7 +12,7 @@ from llms.proxy.admin_hub import get_hub
 from llms.proxy.auth import require_admin
 from llms.proxy.config import Settings, settings_from_app
 from llms.proxy.routes.admin import keys_snapshot, models_snapshot
-from llms.proxy.routes.providers import _registry, providers_snapshot
+from llms.proxy.routes.providers import providers_snapshot
 from llms.proxy.store import Store
 
 logger = logging.getLogger("zen_proxy")
@@ -106,7 +106,7 @@ async def _collection_stream(
                     break
                 try:
                     await asyncio.wait_for(q.get(), timeout=HEARTBEAT_S)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     try:
                         if watch is not None:
                             now = _mtimes(watch)

@@ -162,7 +162,12 @@ def test_ring_spreads_buckets_across_warps(tmp_path):
     """Ring routing (§7): buckets partition across warp providers."""
     from llms.proxy.config import Settings
     from llms.proxy.egress import ProviderEgress
-    from llms.proxy.providers import Provider, ProviderHealth, ProviderRegistry, WarpExit
+    from llms.proxy.providers import (
+        Provider,
+        ProviderHealth,
+        ProviderRegistry,
+        WarpExit,
+    )
 
     settings = Settings(data_dir=str(tmp_path))
     registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
@@ -186,11 +191,15 @@ def test_ring_spreads_buckets_across_warps(tmp_path):
 
 
 def test_ring_skips_ratelimited_unless_all_limited(tmp_path):
-    import time as _time
 
     from llms.proxy.config import Settings
     from llms.proxy.egress import ProviderEgress
-    from llms.proxy.providers import Provider, ProviderHealth, ProviderRegistry, WarpExit
+    from llms.proxy.providers import (
+        Provider,
+        ProviderHealth,
+        ProviderRegistry,
+        WarpExit,
+    )
 
     settings = Settings(data_dir=str(tmp_path))
     registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
@@ -219,13 +228,20 @@ def test_ring_skips_ratelimited_unless_all_limited(tmp_path):
 def test_ring_skips_draining_provider(tmp_path):
     from llms.proxy.config import Settings
     from llms.proxy.egress import ProviderEgress
-    from llms.proxy.providers import Provider, ProviderHealth, ProviderRegistry, WarpExit
+    from llms.proxy.providers import (
+        Provider,
+        ProviderHealth,
+        ProviderRegistry,
+        WarpExit,
+    )
 
     settings = Settings(data_dir=str(tmp_path))
     registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
     registry.save(
         [
-            Provider(id="warp-1", kind="warp", models=["gpt-*"], exits=1, enabled=False),
+            Provider(
+                id="warp-1", kind="warp", models=["gpt-*"], exits=1, enabled=False
+            ),
             Provider(id="warp-2", kind="warp", models=["gpt-*"], exits=1),
         ]
     )

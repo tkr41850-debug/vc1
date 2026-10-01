@@ -308,7 +308,6 @@ def test_provider_exits_capped(admin_client):
 
 def test_provider_stream_no_gap_between_snapshot_and_subscribe():
     import asyncio
-    import json
 
     from llms.proxy.providers import ProviderRuntime, RecentRequest
 
@@ -397,11 +396,14 @@ def test_lifecycle_precedence_matrix():
     # ready: noproxy always serves when enabled
     n = Provider(id="noproxy", kind="noproxy", models=["*"], enabled=True)
     assert derive_lifecycle(n, rt(), now=now + 200.0)[0] == "ready"
-    assert derive_lifecycle(
-        Provider(id="noproxy", kind="noproxy", models=["*"], enabled=False),
-        rt(),
-        now=now + 200.0,
-    )[0] == "off"
+    assert (
+        derive_lifecycle(
+            Provider(id="noproxy", kind="noproxy", models=["*"], enabled=False),
+            rt(),
+            now=now + 200.0,
+        )[0]
+        == "off"
+    )
 
 
 def test_inflight_wrap_releases_on_full_consume():

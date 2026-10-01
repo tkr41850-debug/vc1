@@ -38,8 +38,6 @@ class FakePool:
 
 
 def test_reconnect_bounces_pool_and_resyncs(admin_client, tmp_path, monkeypatch):
-    import json
-
     from llms.proxy.egress import ProviderEgress
     from llms.proxy.providers import Provider, ProviderRegistry
 

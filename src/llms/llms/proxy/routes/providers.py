@@ -14,7 +14,12 @@ from llms.proxy.admin_hub import get_hub
 from llms.proxy.auth import require_admin
 from llms.proxy.config import Settings, settings_from_app
 from llms.proxy.forward import STREAM_TIMEOUT_S
-from llms.proxy.providers import Provider, ProviderRegistry, provider_snapshot, snapshot_all
+from llms.proxy.providers import (
+    Provider,
+    ProviderRegistry,
+    provider_snapshot,
+    snapshot_all,
+)
 from llms.proxy.store import StoreError
 
 logger = logging.getLogger("zen_proxy")
@@ -31,6 +36,7 @@ MAX_EXITS = 32
 
 def _clamp_exits(exits: int) -> int:
     return max(1, min(MAX_EXITS, int(exits)))
+
 
 IP_ECHO_URL = "https://api.ipify.org?format=json"
 IP6_ECHO_URL = "https://api64.ipify.org?format=json"
@@ -104,9 +110,7 @@ async def create_provider(
     if body.kind not in ("noproxy", "warp"):
         raise HTTPException(status_code=400, detail="kind must be noproxy or warp")
     if body.kind == "warp" and (body.exits < 1 or body.exits > MAX_EXITS):
-        raise HTTPException(
-            status_code=400, detail=f"exits must be 1..{MAX_EXITS}"
-        )
+        raise HTTPException(status_code=400, detail=f"exits must be 1..{MAX_EXITS}")
     registry = _registry(request)
     _ = settings
     try:
@@ -169,9 +173,7 @@ async def update_provider(
 
 def _transition_snapshot(registry: ProviderRegistry, provider: Provider) -> dict:
     settings = getattr(registry, "_settings", None)
-    cooldown = float(
-        getattr(settings, "warp_auto_cycle_cooldown_s", 300) or 300
-    )
+    cooldown = float(getattr(settings, "warp_auto_cycle_cooldown_s", 300) or 300)
     return provider_snapshot(
         provider, registry.runtime(provider.id), cooldown, registry
     )
@@ -211,9 +213,7 @@ async def _ack_intent_change(
             else:
                 await _settle_disabled(registry, provider, gen, hub)
         except Exception as exc:
-            logger.warning(
-                "provider %s settle task failed: %r", provider.id, exc
-            )
+            logger.warning("provider %s settle task failed: %r", provider.id, exc)
         finally:
             try:
                 await hub.publish("providers")
@@ -264,9 +264,7 @@ async def _settle_disabled(registry, provider, gen: int, hub) -> None:
         try:
             await supervisor.drop(provider.id)
         except Exception as exc:
-            logger.warning(
-                "provider %s daemon drop failed: %r", provider.id, exc
-            )
+            logger.warning("provider %s daemon drop failed: %r", provider.id, exc)
     try:
         await registry.drop_egress(provider.id)
     except Exception as exc:
@@ -354,9 +352,7 @@ async def _do_reconnect(request: Request, provider_id: str) -> dict:
         try:
             await registry.reconnect(provider)
         except Exception as exc:
-            logger.warning(
-                "provider %s reconnect failed: %r", provider_id, exc
-            )
+            logger.warning("provider %s reconnect failed: %r", provider_id, exc)
         if rt.gen != gen:
             return
         invalidate_ips(provider_id)
@@ -589,7 +585,7 @@ async def provider_stream(
                     break
                 try:
                     entry = await asyncio.wait_for(q.get(), timeout=15.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield ": ping\n\n"
                     continue
                 except asyncio.CancelledError:

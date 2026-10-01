@@ -371,7 +371,7 @@ async def test_providers_stream_sends_known_first_frame(live_server):
                 # the next frame arrives only on a CRUD/health/429 push or
                 # the heartbeat ping (HEARTBEAT_S cadence).
                 frame2, buf = await asyncio.wait_for(_read_frame(it, buf), 20)
-                assert frame2.startswith("data: ") or frame2.startswith(": ping")
+                assert frame2.startswith(("data: ", ": ping"))
         finally:
             await c.delete("/api/admin/providers/sse-stream-refresh")
 

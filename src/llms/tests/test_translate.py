@@ -952,7 +952,12 @@ def test_responses_additional_tools_dissolve():
 
 
 def test_tool_choice_canonicalized_across_dialects():
-    from llms.proxy.translate import from_chat, from_messages, to_zen_chat, to_zen_messages
+    from llms.proxy.translate import (
+        from_chat,
+        from_messages,
+        to_zen_chat,
+        to_zen_messages,
+    )
 
     # messages-shaped choice arriving on chat ingress normalizes to IR name form
     req = from_chat(
