@@ -974,15 +974,22 @@ class MessagesEmitter:
                 stop = "max_tokens"
             else:
                 stop = "end_turn"
+            # Full Anthropic usage shape: cache_read_input_tokens feeds
+            # statusline cache-hit math; cache_creation_input_tokens stays 0
+            # (upstream never reports it separately) but its presence keeps
+            # the key stable for clients summing all three input fields.
+            usage_msg: dict = {
+                "input_tokens": delta.input_tokens or 0,
+                "output_tokens": delta.output_tokens or 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": delta.cached_tokens or 0,
+            }
             out.append(
                 _msg_event(
                     "message_delta",
                     {
                         "delta": {"stop_reason": stop},
-                        "usage": {
-                            "input_tokens": delta.input_tokens or 0,
-                            "output_tokens": delta.output_tokens or 0,
-                        },
+                        "usage": usage_msg,
                     },
                 )
             )

@@ -146,7 +146,15 @@ def test_usage_flows_responses_to_messages_stream():
     ]
     events = collect(responses_to_messages(lines, "t1", "m"))
     delta = next(e for e in events if e["type"] == "message_delta")
-    assert delta["usage"] == {"input_tokens": 7, "output_tokens": 3}
+    # Full Anthropic shape: cache fields present (0 when upstream omits
+    # them) so statusline-style clients summing all three input fields
+    # keep working after compaction handoffs.
+    assert delta["usage"] == {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+    }
 
 
 def test_usage_flows_messages_to_responses_stream():
@@ -358,3 +366,36 @@ def test_usage_details_flow_messages_to_responses_stream():
     events = collect(messages_to_responses(lines, "t1", "m"))
     usage = events[-1]["response"]["usage"]
     assert usage["input_tokens_details"] == {"cached_tokens": 2}
+
+
+def test_messages_terminal_carries_cache_read_tokens():
+    """Terminal message_delta exposes cache_read_input_tokens downstream.
+
+    Regression: the emitter dropped the cached count, so statusline-style
+    clients summing input + cache_read + cache_creation under-reported
+    context after prompt-cache warmup (reads as 0 tokens post-compaction).
+    """
+    from llms.proxy.stream_translate import MessagesEmitter
+
+    emitter = MessagesEmitter("t-cache", "m")
+    from llms.proxy.ir import StreamDone
+
+    out = emitter.feed_delta(
+        StreamDone(
+            "completed",
+            has_tool_calls=False,
+            input_tokens=100,
+            output_tokens=5,
+            cached_tokens=80,
+        )
+    )
+    import json as _json
+
+    delta = next(
+        _json.loads(b.decode().split("data: ", 1)[1])
+        for b in out
+        if b.startswith(b"event: message_delta")
+    )
+    assert delta["usage"]["input_tokens"] == 100
+    assert delta["usage"]["cache_read_input_tokens"] == 80
+    assert delta["usage"]["cache_creation_input_tokens"] == 0
