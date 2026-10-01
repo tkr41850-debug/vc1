@@ -267,39 +267,22 @@ def is_genuine_opencode(headers) -> bool:
 def _with_genuine_tools(outbound: dict) -> None:
     """Prepend the genuine tool set ahead of client extras (no duplicates).
 
-    The free-tier gate fuzzy-matches the set: full genuine + extras
-    passes, bare/renamed 403s. A client tool reusing a genuine name keeps
-    the CLIENT's definition in that slot (so the model calls the client's
-    shape and the call passes back for the client to resolve); genuine
-    names the client didn't touch keep their genuine definition, and true
-    extras append after. All genuine names stay present at least once.
+    The free-tier gate fuzzy-matches the set: the 12 genuine definitions
+    must go out byte-identical, in order, ahead of any extras — bare or
+    renamed sets 403. A client tool reusing a genuine name in the SAME
+    case keeps the CLIENT's definition in that slot (so the model calls
+    the client's shape and the call passes back for the client to
+    resolve); case-variant collisions ("Read" vs genuine "read") keep
+    the genuine definition untouched (renaming it breaks the gate) and
+    the client tool appends after as an extra. All 12 genuine names stay
+    present at least once, always with their genuine definition.
     Mutates outbound in place.
     """
-    # Case-insensitive to match _genuine_calls_in: a client tool "Read"
-    # colliding with genuine "read" in a different case keeps the CLIENT
-    # definition in that slot (never duplicated), and the call passes
-    # back for the client to resolve. Exact-case matching here would
-    # keep genuine "read" AND append "Read", showing the model two tools
-    # differing only by case.
-    by_lower = {}
-    for t in outbound.get("tools", []) or []:
-        name = t.get("name")
-        if isinstance(name, str):
-            by_lower.setdefault(name.lower(), t)
-    genuine_lowers = set()
-    head = []
-    for g in GENUINE_TOOLS:
-        gname = g.get("name", "")
-        genuine_lowers.add(gname.lower() if isinstance(gname, str) else gname)
-        client_def = by_lower.get(gname.lower()) if isinstance(gname, str) else None
-        head.append(client_def if client_def is not None else g)
+    genuine_names = {t.get("name") for t in GENUINE_TOOLS}
+    by_name = {t.get("name"): t for t in outbound.get("tools", []) or []}
+    head = [by_name.get(g.get("name"), g) for g in GENUINE_TOOLS]
     extras = [
-        t
-        for t in outbound.get("tools", []) or []
-        if not (
-            isinstance(t.get("name"), str)
-            and t.get("name", "").lower() in genuine_lowers
-        )
+        t for t in outbound.get("tools", []) or [] if t.get("name") not in genuine_names
     ]
     outbound["tools"] = [*head, *extras]
 

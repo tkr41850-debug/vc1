@@ -611,11 +611,14 @@ def test_messages_rebuild_is_byte_stable_across_turns(app_client):
     assert third_items[: len(first_items)] == first_items
 
 
-def test_case_variant_client_tool_not_duplicated(app_client):
-    # Client "Read" vs genuine "read": injection keeps the client
-    # definition once (no case-variant duplicate), matching the
-    # case-insensitive steer rule in _genuine_calls_in.
-    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+def test_case_variant_client_tool_appends_beside_genuine(app_client):
+    # Client "Read" vs genuine "read": the gate needs the 12 genuine
+    # definitions byte-identical, so genuine "read" stays untouched and
+    # the client tool appends after as an extra (never replaces, never
+    # dedups). Steering still treats them as the same name (see
+    # _genuine_calls_in case-insensitive rule), so the call passes
+    # back for the client to resolve.
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES, GENUINE_TOOLS
 
     tc, seen = app_client
     r = tc.post(
@@ -637,7 +640,42 @@ def test_case_variant_client_tool_not_duplicated(app_client):
     assert r.status_code == 200
     tools = seen["json"]["tools"]
     names = [t.get("name") for t in tools]
-    assert len(names) == len({n.lower() for n in names})
-    assert GENUINE_TOOL_NAMES <= {t.get("name", "").lower() for t in tools}
-    sent = next(t for t in tools if t.get("name") == "Read")
-    assert sent["description"] == "mine"
+    # All 12 genuine names present with genuine definitions, in order...
+    assert names[:12] == [t["name"] for t in GENUINE_TOOLS]
+    assert GENUINE_TOOL_NAMES <= set(names)
+    genuine_read = next(t for t in tools if t.get("name") == "read")
+    assert genuine_read["description"] != "mine"
+    # ...and the client variant rides after as an extra.
+    assert names[12:] == ["Read"]
+
+
+def test_genuine_tool_order_and_identity_preserved(app_client):
+    """The 12 genuine definitions go out byte-identical, in order, first.
+
+    Fingerprint contract: Zen's free-tier gate fuzzy-matches the set, so
+    no reorder, no rename, no client definition in a genuine slot unless
+    the client used the EXACT same name.
+    """
+    from llms.proxy.zen_tools import GENUINE_TOOLS
+
+    tc, seen = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={
+            "model": "muse-spark-1.3-contributor-free",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "mine",
+                    "description": "extra",
+                    "parameters": {},
+                },
+            ],
+        },
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 200
+    tools = seen["json"]["tools"]
+    assert tools[:12] == GENUINE_TOOLS
+    assert [t.get("name") for t in tools][12:] == ["mine"]
