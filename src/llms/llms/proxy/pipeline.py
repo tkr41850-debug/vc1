@@ -1117,6 +1117,7 @@ def _maybe_auto_cycle(
         rt.last_auto_cycle = now
         rt.cycling = True
         rt.cycle_hits = 0
+        bounce_epoch = rt.retry_epoch
         logger.info(
             "[%s] warp provider %s exit %s (port %s) ratelimited, cycling",
             trace_id,
@@ -1157,11 +1158,13 @@ def _maybe_auto_cycle(
                         provider_id,
                         exc,
                     )
-                if bounced_ok:
+                if bounced_ok and rt.retry_epoch == bounce_epoch:
                     # Fresh circuits: drop the 429 backoff so the provider
                     # rejoins immediately instead of sitting out max(60s,
-                    # retry-after). A still-bad exit keeps its backoff and
-                    # the cooldown gates the next bounce.
+                    # retry-after). Guarded by epoch: a sibling 429 that
+                    # landed mid-bounce bumped the epoch and must survive.
+                    # A still-bad exit keeps its backoff and the cooldown
+                    # gates the next bounce.
                     rt.retry_until = 0.0
                     rt.retry_reason = ""
                     logger.info(

@@ -342,6 +342,7 @@ async def _do_reconnect(request: Request, provider_id: str) -> dict:
     gen = rt.gen
     rt.retry_until = 0.0
     rt.retry_reason = ""
+    rt.retry_epoch += 1
     _sync_slots(request)
     await get_hub(request).publish("providers")
     snap = _transition_snapshot(registry, provider)

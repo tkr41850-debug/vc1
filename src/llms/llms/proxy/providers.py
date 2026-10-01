@@ -78,6 +78,10 @@ class ProviderRuntime:
         self.health = ProviderHealth()
         self.retry_until: float = 0.0
         self.retry_reason: str = ""
+        # Bumped on every note_ratelimited: lets the auto-cycle bounce-ok
+        # clear verify the backoff it observed is still current before
+        # clearing (a sibling 429 mid-bounce must survive).
+        self.retry_epoch: int = 0
         self.recent: deque[RecentRequest] = deque(maxlen=RECENT_CAP)
         self._subscribers: set[asyncio.Queue] = set()
         self._lock = asyncio.Lock()
@@ -102,6 +106,7 @@ class ProviderRuntime:
         if retry_after is not None:
             wait = max(wait, retry_after)
         self.retry_until = time.monotonic() + wait
+        self.retry_epoch += 1
         if reason:
             self.retry_reason = reason[:200]
 
@@ -388,6 +393,7 @@ class ProviderRegistry:
             result = {"ok": False, "error": str(exc)[:300]}
         self.runtime(provider.id).retry_until = 0.0
         self.runtime(provider.id).retry_reason = ""
+        self.runtime(provider.id).retry_epoch += 1
         health = await self.refresh_health(provider, force=True)
         return {
             "ok": result.get("ok", False),
