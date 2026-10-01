@@ -66,38 +66,85 @@ async def _collection_stream(
         # so no write in that window is ever lost.
         q = await get_hub(request).subscribe(topic)
         try:
-            last = _frame(snapshot())
-            yield last
+            try:
+                last = _frame(snapshot())
+            except Exception as exc:
+                # Snapshot work must never kill heartbeats: degrade to a
+                # ping so the stream survives past the tunnel idle timeout.
+                logger.debug("sse %s snapshot failed: %r", topic, exc)
+                yield ": ping\n\n"
+                last = None
+            if last is not None:
+                yield last
             if refresh is not None:
                 try:
-                    await refresh()
+                    # Providers refresh is bounded below the heartbeat
+                    # cadence so a hung poll can never silence pings.
+                    await asyncio.wait_for(refresh(), timeout=10.0)
                 except Exception as exc:
                     logger.debug("sse %s refresh failed: %r", topic, exc)
                 else:
-                    fresh = _frame(snapshot())
-                    if fresh != last:
-                        last = fresh
-                        yield fresh
+                    try:
+                        fresh = _frame(snapshot())
+                    except Exception as exc:
+                        logger.debug("sse %s snapshot failed: %r", topic, exc)
+                    else:
+                        if fresh != last:
+                            last = fresh
+                            yield fresh
             # Out-of-band edits (keygen CLI, hand-edited YAML) bypass the
             # CRUD routes and their publishes; the heartbeat re-stats the
             # files and pushes a fresh snapshot when they moved.
             seen = _mtimes(watch or [])
             while True:
-                if await request.is_disconnected():
+                try:
+                    if await request.is_disconnected():
+                        break
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
                     break
                 try:
                     await asyncio.wait_for(q.get(), timeout=HEARTBEAT_S)
-                except TimeoutError:
-                    if watch is not None:
-                        now = _mtimes(watch)
-                        if now > seen:
-                            seen = now
-                            last = _frame(snapshot())
-                            yield last
-                            continue
+                except asyncio.TimeoutError:
+                    try:
+                        if watch is not None:
+                            now = _mtimes(watch)
+                            if now > seen:
+                                seen = now
+                                try:
+                                    last = _frame(snapshot())
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception as exc:
+                                    logger.debug(
+                                        "sse %s snapshot failed: %r", topic, exc
+                                    )
+                                    yield ": ping\n\n"
+                                    continue
+                                yield last
+                                continue
+                        yield ": ping\n\n"
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        yield b": ping\n\n"
+                    continue
+                except asyncio.CancelledError:
+                    raise
+                except BaseException:
+                    # Cancellation-adjacent noise degrades to a ping, never
+                    # stream death.
                     yield ": ping\n\n"
                     continue
-                last = _frame(snapshot())
+                try:
+                    last = _frame(snapshot())
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.debug("sse %s snapshot failed: %r", topic, exc)
+                    yield ": ping\n\n"
+                    continue
                 yield last
         finally:
             await get_hub(request).unsubscribe(topic, q)
@@ -148,14 +195,10 @@ async def providers_stream(
     watch = [Path(settings.data_dir) / "providers.yaml"]
 
     async def _refresh() -> None:
-        # TTL-gated (no force): a no-op when health is fresh, a background
-        # warp status poll otherwise. Never delays the first frame.
-        registry = _registry(request)
-        for p in registry.load():
-            try:
-                await registry.refresh_health(p)
-            except Exception as exc:
-                logger.debug("sse providers refresh %s failed: %r", p.id, exc)
+        # Push-only: no timer refresh. Health refreshes are event-driven
+        # (enable/boot task, reconnect task, post-cycle, 429, explicit GET
+        # health). Kept as a no-op hook so the first-frame staging stays.
+        return None
 
     return await _collection_stream(
         request, "providers", lambda: providers_snapshot(request), watch, _refresh

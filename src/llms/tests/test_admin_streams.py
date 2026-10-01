@@ -343,9 +343,8 @@ async def test_keys_stream_pushes_out_of_band_file_edits(live_server, monkeypatc
             store.save_keys([k for k in store.load_keys() if k.key != "sk-oob-edit"])
 
 
-async def test_providers_stream_sends_stale_then_refreshed(live_server):
-    """First frame is what is known (never waits on refresh); the refresh
-    pass follows with a second frame only when the payload changed."""
+async def test_providers_stream_sends_known_first_frame(live_server):
+    """First frame is what is known (never waits on refresh)."""
     base, _ = live_server
     async with _authed(base) as c:
         rc = await c.post(
@@ -368,15 +367,11 @@ async def test_providers_stream_sends_stale_then_refreshed(live_server):
                 frame1, buf = await _read_frame(it, buf)
                 d1 = _data(frame1)
                 assert "sse-stream-refresh" in [p["id"] for p in d1["providers"]]
-                # The refresh pass re-polls health (fetched_at moves), so a
-                # changed second frame follows without any CRUD write.
-                frame2, buf = await asyncio.wait_for(_read_frame(it, buf), 10)
-                assert frame2.startswith("data: ")
-                d2 = _data(frame2)
-                assert [p["id"] for p in d2["providers"]] == [
-                    p["id"] for p in d1["providers"]
-                ]
-                assert frame2 != frame1
+                # Push-only: no timer refresh pass follows on its own —
+                # the next frame arrives only on a CRUD/health/429 push or
+                # the heartbeat ping (HEARTBEAT_S cadence).
+                frame2, buf = await asyncio.wait_for(_read_frame(it, buf), 20)
+                assert frame2.startswith("data: ") or frame2.startswith(": ping")
         finally:
             await c.delete("/api/admin/providers/sse-stream-refresh")
 
