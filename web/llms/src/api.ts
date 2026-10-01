@@ -33,6 +33,14 @@ export interface WarpExitEntry {
   error: string;
 }
 
+export type ProviderLifecycle =
+  | "off"
+  | "preparing"
+  | "ready"
+  | "ratelimited"
+  | "draining"
+  | "unhealthy";
+
 export interface ProviderEntry {
   id: string;
   label: string;
@@ -41,6 +49,9 @@ export interface ProviderEntry {
   enabled: boolean;
   exits: number;
   deletable: boolean;
+  lifecycle: ProviderLifecycle;
+  in_flight: number;
+  drain: { until_ms: number; forced: boolean } | null;
   retry_in: number;
   retry_reason: string;
   health: {
@@ -50,11 +61,8 @@ export interface ProviderEntry {
   };
 }
 
-export interface ReconnectResult {
-  id: string;
-  ok: boolean;
-  before: { ready: number; exits: number; error: string };
-  after: { ready: number; exits: number; error: string };
+export interface ReconnectResult extends ProviderEntry {
+  reconnect: { started: boolean; before: { ready: number; exits: number; error: string } };
 }
 
 export interface RecentEntry {

@@ -14,14 +14,46 @@ function fmtRetry(sec: number): string {
   return `${Math.floor(sec / 60)}m ${Math.ceil(sec % 60)}s`;
 }
 
-function HealthDot({ p }: { p: ProviderEntry }) {
-  if (!p.enabled) return <span title="disabled">⚪</span>;
-  if (p.kind === "noproxy") return <span title="direct">🟢</span>;
-  if (p.retry_in > 0) return <span title={`rate limited: ${p.retry_reason}`}>🟡</span>;
+function lifecycleDot(p: ProviderEntry): { dot: string; title: string } {
+  const lc = p.lifecycle ?? (p.enabled ? "ready" : "off");
   const ready = p.health.exits.filter((w) => w.ready).length;
-  if (p.health.error) return <span title={p.health.error}>🔴</span>;
-  if (ready === 0) return <span title="no ready exits">🔴</span>;
-  return <span title={`${ready} ready exits`}>🟢</span>;
+  switch (lc) {
+    case "ready":
+      return p.kind === "noproxy"
+        ? { dot: "🟢", title: "Ready — direct egress serving" }
+        : { dot: "🟢", title: `Ready — ${ready} ready exit(s) serving` };
+    case "ratelimited":
+      return {
+        dot: "🟡",
+        title: `Ratelimited — retry in ${fmtRetry(p.retry_in)}${p.retry_reason ? `: ${p.retry_reason}` : ""}`,
+      };
+    case "preparing":
+      return {
+        dot: "🔵",
+        title: p.health.fetched_at
+          ? `Preparing — 0 ready exits, booting (${p.health.error || "waiting on warp-cli"})`
+          : "Preparing — boot requested, first health poll pending",
+      };
+    case "draining": {
+      const mins = p.drain ? Math.max(0, p.drain.until_ms / 60000) : 0;
+      return {
+        dot: "🟠",
+        title: `Draining — ${p.in_flight} in flight, quiescing in ~${mins < 1 ? "<1m" : `${Math.ceil(mins)}m`}${p.drain?.forced ? " (deadline forced)" : ""}`,
+      };
+    }
+    case "unhealthy":
+      return {
+        dot: "🔴",
+        title: `Unhealthy — 0 ready past boot grace${p.health.error ? `: ${p.health.error}` : ""}`,
+      };
+    default:
+      return { dot: "⚪", title: "Off — disabled, daemons down" };
+  }
+}
+
+function HealthDot({ p }: { p: ProviderEntry }) {
+  const { dot, title } = lifecycleDot(p);
+  return <span title={title}>{dot}</span>;
 }
 
 function DebugModal({
@@ -48,6 +80,16 @@ function DebugModal({
 
   const shown = live ?? provider;
 
+  // Resync the models editor when the incoming provider changes (SSE
+  // push or health refresh) — but never while it has focus, so typing
+  // is never clobbered by a background update.
+  const modelsRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    if (modelsRef.current && document.activeElement === modelsRef.current) return;
+    setModelsText(shown.models.join("\n"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider.id, shown.models.join("\n")]);
+
   const refresh = () => {
     api
       .providerHealth(provider.id)
@@ -67,8 +109,11 @@ function DebugModal({
     api
       .reconnectProvider(provider.id)
       .then((r) => {
+        // Ack snapshot applies at once (preparing spinner); the bounce
+        // settles over SSE.
+        if (r.lifecycle) setLive((prev) => (prev ? { ...prev, ...r } : prev));
         setNotice(
-          `reconnected: ${r.after.ready}/${r.after.exits} exits ready (was ${r.before.ready}/${r.before.exits})`,
+          `reconnect started (was ${r.reconnect.before.ready}/${r.reconnect.before.exits} ready) — settling over SSE…`,
         );
         refresh();
       })
@@ -275,6 +320,7 @@ function DebugModal({
             Models (one pattern per line, * = prefix)
           </h3>
           <textarea
+            ref={modelsRef}
             className="mb-2 w-full rounded border px-2 py-1 font-mono text-xs"
             rows={Math.min(8, Math.max(2, shown.models.length + 1))}
             value={modelsText}
@@ -341,21 +387,33 @@ export default function ProvidersTab({
   providers,
   reload,
   onAuthError,
+  onProviders,
 }: {
   providers: ProviderEntry[];
   reload: () => void;
   onAuthError: () => void;
+  onProviders: (list: ProviderEntry[]) => void;
 }) {
   const [form, setForm] = useState({ id: "", label: "", models: "", exits: "1" });
   const [debugId, setDebugId] = useState<string | null>(null);
+  const [pending, setPending] = useState<Record<string, boolean>>({});
   const { error, setError, run } = useCrudTab(onAuthError);
+
+  const applyOne = (snap: ProviderEntry) =>
+    onProviders(
+      providers.some((p) => p.id === snap.id)
+        ? providers.map((p) => (p.id === snap.id ? snap : p))
+        : [...providers, snap],
+    );
+  const markPending = (id: string, v: boolean) =>
+    setPending((prev) => ({ ...prev, [id]: v }));
 
   const add = async () => {
     if (!form.id.trim()) {
       setError("id is required");
       return;
     }
-    const exits = Math.max(1, parseInt(form.exits, 10) || 1);
+    const exits = Math.max(1, Math.min(32, parseInt(form.exits, 10) || 1));
     await run(async () => {
       await api.createProvider({
         id: form.id.trim(),
@@ -369,8 +427,24 @@ export default function ProvidersTab({
     }, reload);
   };
 
-  const toggle = (p: ProviderEntry) =>
-    run(() => api.updateProvider(p.id, { enabled: !p.enabled }), reload);
+  const transitioning = (p: ProviderEntry) =>
+    p.lifecycle === "preparing" ||
+    p.lifecycle === "draining" ||
+    pending[p.id] === true;
+
+  const toggle = (p: ProviderEntry) => {
+    markPending(p.id, true);
+    run(
+      () =>
+        api
+          .updateProvider(p.id, { enabled: !p.enabled })
+          .then((snap) => {
+            applyOne(snap as unknown as ProviderEntry);
+          })
+          .finally(() => markPending(p.id, false)),
+      reload,
+    );
+  };
 
   const remove = (p: ProviderEntry) => {
     if (!window.confirm(`Delete provider ${p.id}?`)) return;
@@ -434,6 +508,12 @@ export default function ProvidersTab({
             <th className="py-2 pr-4">Kind</th>
             <th className="py-2 pr-4">Exits</th>
             <th className="py-2 pr-4">Models</th>
+            <th
+              className="py-2 pr-4 text-right"
+              title="In-flight proxied requests per provider, live over SSE — watch survivors tick up when a sibling goes yellow"
+            >
+              Busy
+            </th>
             <th className="py-2 pr-4">Enabled</th>
             <th className="py-2 pr-4 text-right">RetryIn</th>
             <th className="py-2"></th>
@@ -460,13 +540,26 @@ export default function ProvidersTab({
               <td className="max-w-xs truncate py-2 pr-4 font-mono text-xs" title={p.models.join(", ")}>
                 {p.models.join(", ") || "—"}
               </td>
+              <td
+                className="py-2 pr-4 text-right font-mono text-xs"
+                title={`In-flight requests on ${p.id}, live over SSE`}
+              >
+                {p.in_flight ?? 0}
+              </td>
               <td className="py-2 pr-4">
                 <button
                   className={`rounded px-2 py-0.5 text-xs ${
                     p.enabled ? "bg-green-100 text-green-800" : "bg-gray-200 text-gray-600"
                   }`}
                   onClick={() => toggle(p)}
-                  title="Toggle enabled"
+                  disabled={transitioning(p)}
+                  title={
+                    p.lifecycle === "draining"
+                      ? "Draining in-flight requests — re-enable to cancel"
+                      : p.lifecycle === "preparing"
+                        ? "Boot in progress — toggle disabled until settled"
+                        : "Toggle enabled"
+                  }
                 >
                   {p.enabled ? "on" : "off"}
                 </button>

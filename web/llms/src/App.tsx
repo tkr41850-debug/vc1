@@ -34,8 +34,41 @@ export default function App() {
 
   // Collection data flows ONLY over SSE (/api/admin/*/sse): snapshot on
   // connect, then pushes on every CRUD write. No GET polling — mutations
-  // rely on the hub push, so this is a stable no-op kept for the tab props.
+  // apply the returned transition snapshot locally; reload stays a
+  // stable no-op kept for the tab props.
   const reload = useCallback(() => {}, []);
+
+  const applyProviders = useCallback((list: ProviderEntry[]) => {
+    // Cheap merge: same order + same ids update in place so the table
+    // does not remount on every throttled Busy tick.
+    setProviders((prev) => {
+      if (
+        prev.length === list.length &&
+        prev.every((p, i) => p.id === list[i].id)
+      ) {
+        let same = true;
+        const merged = prev.map((p, i) => {
+          const n = list[i];
+          if (
+            p.lifecycle !== n.lifecycle ||
+            p.in_flight !== n.in_flight ||
+            p.enabled !== n.enabled ||
+            p.retry_in !== n.retry_in ||
+            p.exits !== n.exits ||
+            p.models.join() !== n.models.join() ||
+            p.health.exits.length !== n.health.exits.length ||
+            p.health.exits.some((w, j) => w.ready !== n.health.exits[j]?.ready)
+          ) {
+            same = false;
+            return n;
+          }
+          return p;
+        });
+        return same ? prev : merged;
+      }
+      return list;
+    });
+  }, []);
 
   const logout = useCallback(async () => {
     try {
@@ -151,7 +184,7 @@ export default function App() {
       if (msg.models) setModels(msg.models);
     });
     watch("/api/admin/providers/sse", (msg) => {
-      if (msg.providers) setProviders(msg.providers);
+      if (msg.providers) applyProviders(msg.providers);
     });
     // Fallback so one hung stream can't hold the spinner forever; the
     // arrived slices render with the reconnecting banner until it lands.
@@ -217,7 +250,12 @@ export default function App() {
       ) : tab === "models" ? (
         <ModelsTab models={models} reload={reload} onAuthError={onAuthError} />
       ) : (
-        <ProvidersTab providers={providers} reload={reload} onAuthError={onAuthError} />
+        <ProvidersTab
+          providers={providers}
+          reload={reload}
+          onAuthError={onAuthError}
+          onProviders={applyProviders}
+        />
       )}
     </div>
   );
