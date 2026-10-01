@@ -633,7 +633,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     registry = getattr(request.app.state, "providers", None)
     resolve = getattr(egress_provider, "resolve", None)
     if callable(resolve):
-        provider_id, kind, warp_egress = resolve(req.model)
+        provider_id, kind, warp_egress = resolve(req.model, bucket)
         if kind == "warp" and warp_egress is not None:
             provider = None
             if registry is not None:
@@ -648,7 +648,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 # before client_for runs, or the request fails open despite
                 # a connected tunnel (live finding: final status.json showed
                 # ready=true while the request went direct).
-                provider_id, kind, warp_egress = resolve(req.model)
+                provider_id, kind, warp_egress = resolve(req.model, bucket)
                 if kind != "warp" or warp_egress is None:
                     provider_id, via_warp = None, None
                 sync = getattr(egress_provider, "sync_bucket_slots", None)

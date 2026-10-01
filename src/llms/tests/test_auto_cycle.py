@@ -81,7 +81,7 @@ class Warp429Egress:
     def client_for(self, bucket: int, slot: int):
         return self._direct_client
 
-    def resolve(self, model: str):
+    def resolve(self, model: str, bucket: int = 0):
         # Mirror ProviderEgress: skip a cycling warp so traffic fails over.
         if self._is_cycling is not None and self._is_cycling():
             return "noproxy", "noproxy", None

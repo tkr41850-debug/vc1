@@ -156,3 +156,87 @@ def test_stream_ratelimit_rebalances_next_request(fake_world):
     )
     assert second.status_code == 200
     assert calls == [0, 1]
+
+
+def test_ring_spreads_buckets_across_warps(tmp_path):
+    """Ring routing (§7): buckets partition across warp providers."""
+    from llms.proxy.config import Settings
+    from llms.proxy.egress import ProviderEgress
+    from llms.proxy.providers import Provider, ProviderHealth, ProviderRegistry, WarpExit
+
+    settings = Settings(data_dir=str(tmp_path))
+    registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
+    registry.save(
+        [
+            Provider(id="warp-1", kind="warp", models=["gpt-*"], exits=1),
+            Provider(id="warp-2", kind="warp", models=["gpt-*"], exits=1),
+            Provider(id="warp-3", kind="warp", models=["gpt-*"], exits=1),
+        ]
+    )
+    for pid in ("warp-1", "warp-2", "warp-3"):
+        rt = registry.runtime(pid)
+        rt.health = ProviderHealth(
+            exits=[WarpExit(idx=0, ready=True, status="ok", socks=40001)],
+            fetched_at=1000.0,
+        )
+        rt.boot_epoch = 1.0
+    egress = ProviderEgress(None, registry=registry)
+    seen = {egress.resolve("gpt-5", bucket=b)[0] for b in range(60)}
+    assert seen == {"warp-1", "warp-2", "warp-3"}
+
+
+def test_ring_skips_ratelimited_unless_all_limited(tmp_path):
+    import time as _time
+
+    from llms.proxy.config import Settings
+    from llms.proxy.egress import ProviderEgress
+    from llms.proxy.providers import Provider, ProviderHealth, ProviderRegistry, WarpExit
+
+    settings = Settings(data_dir=str(tmp_path))
+    registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
+    registry.save(
+        [
+            Provider(id="warp-1", kind="warp", models=["gpt-*"], exits=1),
+            Provider(id="warp-2", kind="warp", models=["gpt-*"], exits=1),
+        ]
+    )
+    for pid in ("warp-1", "warp-2"):
+        rt = registry.runtime(pid)
+        rt.health = ProviderHealth(
+            exits=[WarpExit(idx=0, ready=True, status="ok", socks=40001)],
+            fetched_at=1000.0,
+        )
+        rt.boot_epoch = 1.0
+    egress = ProviderEgress(None, registry=registry)
+    registry.runtime("warp-1").note_ratelimited(120.0, "slow")
+    # warp-1 limited: every bucket lands on warp-2.
+    assert {egress.resolve("gpt-5", bucket=b)[0] for b in range(20)} == {"warp-2"}
+    # Both limited: least-wait wins instead of failing open.
+    registry.runtime("warp-2").note_ratelimited(300.0, "slower")
+    assert egress.resolve("gpt-5", bucket=7)[0] == "warp-1"
+
+
+def test_ring_skips_draining_provider(tmp_path):
+    from llms.proxy.config import Settings
+    from llms.proxy.egress import ProviderEgress
+    from llms.proxy.providers import Provider, ProviderHealth, ProviderRegistry, WarpExit
+
+    settings = Settings(data_dir=str(tmp_path))
+    registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
+    registry.save(
+        [
+            Provider(id="warp-1", kind="warp", models=["gpt-*"], exits=1, enabled=False),
+            Provider(id="warp-2", kind="warp", models=["gpt-*"], exits=1),
+        ]
+    )
+    for pid in ("warp-1", "warp-2"):
+        rt = registry.runtime(pid)
+        rt.health = ProviderHealth(
+            exits=[WarpExit(idx=0, ready=True, status="ok", socks=40001)],
+            fetched_at=1000.0,
+        )
+        rt.boot_epoch = 1.0
+    # Disabled with in-flight work reads draining: cordoned from the ring.
+    registry.runtime("warp-1").in_flight = 2
+    egress = ProviderEgress(None, registry=registry)
+    assert {egress.resolve("gpt-5", bucket=b)[0] for b in range(20)} == {"warp-2"}

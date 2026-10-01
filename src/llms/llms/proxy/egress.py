@@ -100,7 +100,7 @@ def _pool_may_recover(registry, provider) -> bool:
     """True when a zero-ready warp pool should stay eligible for traffic.
 
     Request-driven health refreshes are what promote a late-connecting slot
-    to ready — but resolve() skips pools with known-zero ready exits, so a
+    to ready  -  but resolve() skips pools with known-zero ready exits, so a
     pool whose first poll landed mid-boot (daemon handshaking, proxy mode
     just applied) would pin all traffic to direct until some unrelated
     refresh happens. Skip only when every slot's last cached status is
@@ -135,13 +135,20 @@ class ProviderEgress:
     def num_slots(self) -> int:
         return self._direct.num_slots()
 
-    def resolve(self, model: str):
+    def resolve(self, model: str, bucket: int = 0):
         """(provider_id|None, kind, WarpSocksEgress|None) for a model.
 
+        Ring routing: enabled warp providers serving the model split
+        traffic by candidates[bucket % len] instead of first-match-wins
+        (which pinned everything to warp-1). Skipped at pick time:
+        draining (cordoned), cycling, ratelimited - unless every candidate
+        is limited, in which case least-wait wins. noproxy stays the
+        fallback (fail-open preserved).
+
         Warp providers take precedence over noproxy when both serve the
-        model — noproxy is the default fallback, not the first match.
+        model - noproxy is the default fallback, not the first match.
         A warp pool with known-zero ready exits is skipped so traffic
-        fails open to direct — unless the pool may still come up (see
+        fails open to direct - unless the pool may still come up (see
         _pool_may_recover); unknown health is treated as eligible so the
         first request triggers a poll.
         A provider with an auto-cycle bounce in flight is skipped outright:
@@ -154,11 +161,34 @@ class ProviderEgress:
         if registry is None:
             return None, "noproxy", None
         providers = registry.load()
+        # Ring candidates: enabled warp serving the model; cycling and
+        # draining (lifecycle-derived cordon) providers excluded up front.
+        # Retry-excluded at pick time below.
+        ring = []
         for p in providers:
             if not p.enabled or p.kind != "warp" or not p.serves(model):
                 continue
-            if registry.runtime(p.id).cycling:
+            rt = registry.runtime(p.id)
+            if rt.cycling:
                 continue
+            try:
+                from llms.proxy.providers import derive_lifecycle
+
+                lc, _ = derive_lifecycle(p, rt, registry)
+            except Exception:
+                lc = "ready"
+            if lc == "draining":
+                continue
+            ring.append(p)
+        if ring:
+            fresh = [p for p in ring if registry.runtime(p.id).retry_in() <= 0]
+            pool = fresh or sorted(
+                ring, key=lambda p: registry.runtime(p.id).retry_in()
+            )
+            # Least-wait-first when all limited: rotate so the bucket
+            # still spreads instead of pinning to file order.
+            pick = pool[bucket % len(pool)] if fresh else pool[0]
+            p = pick
             egress = self._warp.get(p.id)
             if egress is None:
                 egress = WarpSocksEgress(p.id)
@@ -171,15 +201,16 @@ class ProviderEgress:
                 and not ready
                 and not _pool_may_recover(registry, p)
             ):
-                continue
-            if ready:
-                egress.set_num_slots(len(ready))
-                egress.set_socks_ports(sorted(w.socks for w in ready))
-            elif rt.health.fetched_at <= 0:
-                saved = registry.ready_exits(p.id)
-                if saved is not None:
-                    egress.set_num_slots(saved)
-            return p.id, "warp", egress
+                pass
+            else:
+                if ready:
+                    egress.set_num_slots(len(ready))
+                    egress.set_socks_ports(sorted(w.socks for w in ready))
+                elif rt.health.fetched_at <= 0:
+                    saved = registry.ready_exits(p.id)
+                    if saved is not None:
+                        egress.set_num_slots(saved)
+                return p.id, "warp", egress
         for p in providers:
             if p.enabled and p.serves(model):
                 return p.id, "noproxy", None
