@@ -813,58 +813,77 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     # the held response (evicting it) or 429s again while running.
     dedup_table = getattr(request.app.state, "dedup", None)
     dedup_key = None
-    if dedup_table is not None and not req.stream:
-        dedup_key = dedup.request_hash(
-            secret_key, affinity, ingress, req.model, body, session_id
-        )
-        _entry = dedup_table.lookup(dedup_key)
-        if _entry is not None:
-            if _entry.done:
-                response = dedup.replay_response(
-                    _entry.status, _entry.body, _entry.headers
-                )
-                dedup_table.drop(dedup_key)
-            else:
-                response = dedup.inflight_response()
-            elapsed_ms = (time.monotonic() - started) * 1000.0
-            return response
-        _timeout = float(settings.max_timeout_s)
-        if _timeout > 0:
-            _task = asyncio.create_task(_do_forward())
-            _entry = dedup_table.track(dedup_key, _task)
-            _task.add_done_callback(
-                lambda t: _dedup_background_finish(
-                    t,
-                    table=dedup_table,
-                    key=dedup_key,
-                    entry=_entry,
-                    request=request,
-                    ingress=ingress,
-                    model=req.model,
-                    session_tracker=session_tracker,
-                    secret_key=secret_key,
-                    session_id=session_id,
-                    is_new_conversation=is_new_conversation,
-                    egress=egress,
-                    client=client,
-                    url=url,
-                    headers=headers,
-                    trace_id=trace_id,
-                )
+    # Any exception escaping the forward/dedup await region below
+    # (CancelledError on client disconnect, upstream errors) must release
+    # the track() slot: the tail release is then unreachable. The handler
+    # covers only this region and re-raises — a blanket post-track
+    # try/finally would release the streaming path immediately and defeat
+    # the deferred _wrap_inflight release.
+    try:
+        if dedup_table is not None and not req.stream:
+            dedup_key = dedup.request_hash(
+                secret_key, affinity, ingress, req.model, body, session_id
             )
-            try:
-                response = await asyncio.wait_for(
-                    asyncio.shield(_task), timeout=_timeout
-                )
-            except TimeoutError:
-                _entry.timed_out = True
-                response = dedup.inflight_response()
+            _entry = dedup_table.lookup(dedup_key)
+            if _entry is not None:
+                if _entry.done:
+                    response = dedup.replay_response(
+                        _entry.status, _entry.body, _entry.headers
+                    )
+                    dedup_table.drop(dedup_key)
+                else:
+                    response = dedup.inflight_response()
+                # No upstream leg ran for this waiter: release the track()
+                # slot before returning (same rationale as the shed and
+                # synthetic-dedup returns).
+                _inflight_release(request, provider_id)
                 elapsed_ms = (time.monotonic() - started) * 1000.0
                 return response
+            _timeout = float(settings.max_timeout_s)
+            if _timeout > 0:
+                _task = asyncio.create_task(_do_forward())
+                _entry = dedup_table.track(dedup_key, _task)
+                _task.add_done_callback(
+                    lambda t: _dedup_background_finish(
+                        t,
+                        table=dedup_table,
+                        key=dedup_key,
+                        entry=_entry,
+                        request=request,
+                        ingress=ingress,
+                        model=req.model,
+                        session_tracker=session_tracker,
+                        secret_key=secret_key,
+                        session_id=session_id,
+                        is_new_conversation=is_new_conversation,
+                        egress=egress,
+                        client=client,
+                        url=url,
+                        headers=headers,
+                        trace_id=trace_id,
+                    )
+                )
+                try:
+                    response = await asyncio.wait_for(
+                        asyncio.shield(_task), timeout=_timeout
+                    )
+                except TimeoutError:
+                    _entry.timed_out = True
+                    # The upstream leg keeps running detached (shielded);
+                    # the background finish never owns the slot (it would
+                    # pin Busy for the full upstream duration), so the
+                    # foreground releases here.
+                    _inflight_release(request, provider_id)
+                    response = dedup.inflight_response()
+                    elapsed_ms = (time.monotonic() - started) * 1000.0
+                    return response
+            else:
+                response = await _do_forward()
         else:
             response = await _do_forward()
-    else:
-        response = await _do_forward()
+    except BaseException:
+        _inflight_release(request, provider_id)
+        raise
     elapsed_ms = (time.monotonic() - started) * 1000.0
     if (
         isinstance(response, JSONResponse)
@@ -958,6 +977,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         return _wrap_inflight(request, response, provider_id)
     _inflight_release(request, provider_id)
     if registry is not None and provider_id:
+        _settle_probation(request, registry, provider_id, response)
         status = response.status_code if hasattr(response, "status_code") else 0
         error = ""
         if isinstance(response, JSONResponse) and status >= 400:
@@ -980,6 +1000,28 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             )
         )
     return response
+
+
+def _settle_probation(request, registry, provider_id: str, response) -> None:
+    """Promote or demote a probation provider on its probe outcome.
+
+    Success (2xx) promotes probation -> ready (unbounded). Probe 429
+    returns to ratelimited: note_ratelimited already applied the 60s
+    default / retry-after value in the outcome block above, so only the
+    flag clears here. Non-429 errors leave probation armed: the single
+    flight stays the test, and the next request re-probes.
+    """
+    try:
+        rt = registry.runtime(provider_id)
+        if not bool(getattr(rt, "probation", False)):
+            return
+        status = response.status_code if hasattr(response, "status_code") else 0
+        if 200 <= status < 300:
+            rt.probation = False
+        elif status == 429:
+            rt.probation = False
+    except Exception:
+        pass
 
 
 def _providers_serving(registry, model: str) -> list:
