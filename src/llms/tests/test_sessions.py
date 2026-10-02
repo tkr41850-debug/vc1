@@ -204,3 +204,31 @@ def test_warming_fires_for_new_conversation(mock_upstream, tmp_path, monkeypatch
         assert warm_session == main_session
         assert warm_body["prompt_cache_key"] == main_session
         assert warm_body["instructions"].startswith(TITLE_PREFIX)
+
+
+def test_claude_session_header_maps_to_conversation_ref():
+    """X-Claude-Code-Session-Id is a stable per-conversation signal.
+
+    Wire-verified 2026-10-02 (/tmp/claude-flow.jsonl): main-agent and
+    Task-delegated subagent turns carry distinct session ids on every
+    messages-leg request, so the header separates conversations the
+    same way codex thread-id does on the responses leg.
+    """
+    main = {"X-Claude-Code-Session-Id": "98ec1b78-15f9-49f1-bb54-e5fff7a46a37"}
+    sub = {"X-Claude-Code-Session-Id": "b0c8fd8e-ead1-48c1-92fe-5a0c5edcafba"}
+
+    def _headers(d: dict):
+        from starlette.datastructures import Headers
+
+        return Headers(d)
+
+    body: dict = {"model": "m"}
+    assert conversation_ref("responses", body, _headers(main)) == (
+        "claude-session:98ec1b78-15f9-49f1-bb54-e5fff7a46a37"
+    )
+    assert conversation_ref("responses", body, _headers(sub)) == (
+        "claude-session:b0c8fd8e-ead1-48c1-92fe-5a0c5edcafba"
+    )
+    assert conversation_ref("responses", body, _headers(main)) != conversation_ref(
+        "responses", body, _headers(sub)
+    )

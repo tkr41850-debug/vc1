@@ -6,7 +6,12 @@ each client conversation looks like a normal session:
 
 - responses ingress: ``previous_response_id`` chains continuations; Codex
   sends stable ``thread-id``/``session-id`` headers instead (verified on
-  the wire — it never sends previous_response_id).
+  the wire — it never sends previous_response_id). Claude Code sends a
+  stable ``X-Claude-Code-Session-Id`` per conversation on every leg
+  (verified on the wire 2026-10-02: main-agent and Task-delegated
+  subagent turns carry distinct ids); it maps the same way so subagent
+  traffic spreads apart from main-agent traffic instead of sharing one
+  per-key session.
 - chat/messages ingress: no conversation signal exists, so those share
   the stable per-key session (previous behavior).
 
@@ -52,6 +57,9 @@ def conversation_ref(ingress: str, body: dict, headers) -> str | None:
         thread = get("thread-id") or get("session-id")
         if thread:
             return "codex-thread:" + str(thread).strip()
+    claude_sid = get("x-claude-code-session-id")
+    if claude_sid:
+        return "claude-session:" + str(claude_sid).strip()
     return None
 
 
