@@ -163,13 +163,17 @@ class ProviderEgress:
         providers = registry.load()
         # Ring candidates: enabled warp serving the model; cycling and
         # draining (lifecycle-derived cordon) providers excluded up front.
-        # Retry-excluded at pick time below.
+        # Retry-excluded at pick time below. Probation providers at quota
+        # (in_flight >= 1) are skipped so the single probe flight is never
+        # joined — overflow waits on the main queue instead.
         ring = []
         for p in providers:
             if not p.enabled or p.kind != "warp" or not p.serves(model):
                 continue
             rt = registry.runtime(p.id)
             if rt.cycling:
+                continue
+            if bool(getattr(rt, "probation", False)) and rt.in_flight >= 1:
                 continue
             try:
                 from llms.proxy.providers import derive_lifecycle

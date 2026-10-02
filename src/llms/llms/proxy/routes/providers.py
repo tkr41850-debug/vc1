@@ -197,6 +197,9 @@ async def _ack_intent_change(
     if provider.enabled:
         rt.boot_epoch = _time.monotonic()
         rt.drain_until = 0.0
+        # Re-enable is a becoming-ready path: arm probation so the next
+        # request probes at concurrency 1 (see refresh_health arm).
+        rt.probation = True
     else:
         # Cordon is immediate (resolve() skips disabled); the drain
         # deadline shares the single upstream-read-budget knob.
@@ -343,6 +346,9 @@ async def _do_reconnect(request: Request, provider_id: str) -> dict:
     rt.retry_until = 0.0
     rt.retry_reason = ""
     rt.retry_epoch += 1
+    # Reconnect is a becoming-ready path: arm probation so the next
+    # request probes at concurrency 1 instead of riding straight in.
+    rt.probation = True
     _sync_slots(request)
     await get_hub(request).publish("providers")
     snap = _transition_snapshot(registry, provider)

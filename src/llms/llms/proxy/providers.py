@@ -97,6 +97,11 @@ class ProviderRuntime:
         self.cycling: bool = False
         self.cycle_hits: int = 0
         self.cycle_task: asyncio.Task | None = None
+        # Ready-probation (§ready-probation): a provider entering ready
+        # (post-startup or after a retry_in cooldown) serves at most one
+        # in-flight request until the first success promotes it. Probe 429
+        # returns it to ratelimited (60s default / retry-after value).
+        self.probation: bool = False
 
     def retry_in(self) -> float:
         return max(0.0, self.retry_until - time.monotonic())
@@ -394,6 +399,9 @@ class ProviderRegistry:
         self.runtime(provider.id).retry_until = 0.0
         self.runtime(provider.id).retry_reason = ""
         self.runtime(provider.id).retry_epoch += 1
+        # Reconnect is a becoming-ready path: arm probation so the next
+        # request probes at concurrency 1 instead of riding straight in.
+        self.runtime(provider.id).probation = True
         health = await self.refresh_health(provider, force=True)
         return {
             "ok": result.get("ok", False),
@@ -422,6 +430,7 @@ class ProviderRegistry:
     ) -> ProviderHealth:
         rt = self.runtime(provider.id)
         now = time.monotonic()
+        prev_exits = list(getattr(getattr(rt, "health", None), "exits", None) or [])
         if (
             not force
             and now - rt.health.fetched_at < HEALTH_TTL_S
@@ -453,6 +462,23 @@ class ProviderRegistry:
         except Exception as exc:
             health.error = str(exc)[:300]
         rt.health = health
+        # Becoming-ready (post-startup or post-outage): the first ready
+        # snapshot enters ready-probation (concurrency 1) instead of
+        # riding straight to ready. Promotion happens on first success
+        # (pipeline _settle_probation); probe 429 returns to ratelimited.
+        # Refresh path placement is deliberate: boot and recovery both
+        # funnel through here with a live pool snapshot (lifespan boot
+        # itself has empty health, and the TTL early-return above means
+        # steady-state refreshes never touch the flag).
+        if provider.enabled and provider.kind == "warp":
+            was_ready = any(bool(getattr(w, "ready", False)) for w in prev_exits)
+            now_ready = any(bool(getattr(w, "ready", False)) for w in health.exits)
+            if (
+                now_ready
+                and not was_ready
+                and not bool(getattr(rt, "probation", False))
+            ):
+                rt.probation = True
         # Keep the egress slot spread in sync with ready exits (0 until any).
         # The egress object is created by ProviderEgress.resolve() from the
         # pool snapshot, so after a late promotion (slot flips ready during
@@ -508,9 +534,9 @@ def derive_lifecycle(
 ) -> tuple[str, dict | None]:
     """Derived lifecycle state (pure, never raises, no I/O).
 
-    Precedence: draining > ratelimited > preparing > ready > unhealthy
-    > off. Unexpected shapes fall back to preparing (enabled) / off
-    (disabled). Returns (lifecycle, drain_detail).
+    Precedence: draining > ratelimited > ready-probation > preparing >
+    ready > unhealthy > off. Unexpected shapes fall back to preparing
+    (enabled) / off (disabled). Returns (lifecycle, drain_detail).
     """
     try:
         current = time.monotonic() if now is None else now
@@ -537,9 +563,19 @@ def derive_lifecycle(
             }
         if enabled and retry > 0:
             return "ratelimited", None
-        if enabled and kind == "warp" and (
-            fetched_at <= 0
-            or (ready == 0 and (boot_epoch <= 0 or current - boot_epoch < boot_grace_s))
+        probation = bool(getattr(rt, "probation", False))
+        if enabled and probation and (kind == "noproxy" or ready > 0):
+            return "ready-probation", None
+        if (
+            enabled
+            and kind == "warp"
+            and (
+                fetched_at <= 0
+                or (
+                    ready == 0
+                    and (boot_epoch <= 0 or current - boot_epoch < boot_grace_s)
+                )
+            )
         ):
             return "preparing", None
         if enabled and (kind == "noproxy" or ready > 0):

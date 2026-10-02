@@ -84,10 +84,16 @@ async def lifespan(app: FastAPI):
             app.state.providers._supervisor = app.state.warp
     # Boot supervised pools for enabled warp providers so registrations
     # persist and heal across restarts (state dirs live under DATA_DIR).
+    # Stamp boot_epoch: without it a restarted enabled warp with down
+    # tunnels reads `preparing` forever instead of aging into `unhealthy`
+    # past the boot grace (derive short-circuits on boot_epoch <= 0).
     try:
+        import time as _time
+
         for provider in app.state.providers.load():
             if provider.kind == "warp" and provider.enabled:
                 await app.state.providers.ensure_pool(provider)
+                app.state.providers.runtime(provider.id).boot_epoch = _time.monotonic()
     except Exception as exc:
         logger.warning("warp supervisor boot failed: %s", exc)
     async with httpx.AsyncClient(

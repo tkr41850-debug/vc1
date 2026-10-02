@@ -143,11 +143,25 @@ def _wrap_inflight(request, response, provider_id: str | None):
     iterator = response.body_iterator
 
     async def _tracking_iterator():
+        completed = False
         try:
             async for chunk in iterator:
                 yield chunk
+            completed = True
         finally:
             _inflight_release(request, provider_id)
+            # Stream probes settle at body exhaustion: a fully-consumed
+            # probe promotes probation -> ready (the outcome-429 path ran
+            # at headers time, so settle only needs the success arm here).
+            # Disconnects (CancelledError / early close) stay armed — the
+            # next request re-probes instead of riding an unverified exit.
+            if completed:
+                try:
+                    registry = getattr(request.app.state, "providers", None)
+                    if registry is not None:
+                        _settle_probation(request, registry, provider_id, response)
+                except Exception:
+                    pass
 
     response.body_iterator = _tracking_iterator()
     return response
@@ -699,6 +713,12 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     # is TTL-gated (usually a no-op), so without this the Busy tick would
     # only surface on the release publish after the response — or never,
     # if release coalesces into the cooldown window.
+    # Cooldown-expiry observation: a leftover retry_until whose window
+    # lapsed enters ready-probation here (concurrency 1) instead of
+    # slipping straight to ready (derive stays pure, so this gate is the
+    # only live observer of expiry).
+    if registry is not None and provider_id:
+        _arm_probation_on_expiry(registry, provider_id)
     _inflight_track(request, provider_id)
     await _publish_providers(request)
     if registry is not None:
@@ -1002,6 +1022,37 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     return response
 
 
+def _arm_probation_on_expiry(registry, provider_id: str | None) -> bool:
+    """Enter ready-probation when a recorded cooldown just expired.
+
+    The only live observer of retry expiry (derive_lifecycle stays pure,
+    so direct `retry_until = 0.0` test manipulation keeps working): a
+    leftover non-zero `retry_until` whose `retry_in()` reached 0 means the
+    cooldown lapsed without a request noticing — zero it and arm
+    probation so the next flight probes at concurrency 1 instead of
+    slipping straight to ready. Active backoffs (retry_in > 0) and
+    never-limited providers (retry_until == 0) are untouched, preserving
+    the Task 4 discipline that only 429/reconnect/expiry mutates
+    retry_until. Never raises; returns True when it armed.
+    """
+    try:
+        if registry is None or not provider_id:
+            return False
+        rt = registry.runtime(provider_id)
+        if float(getattr(rt, "retry_until", 0.0) or 0.0) == 0.0:
+            return False
+        if rt.retry_in() > 0:
+            return False
+        if bool(getattr(rt, "probation", False)):
+            return False
+        rt.retry_until = 0.0
+        rt.retry_reason = ""
+        rt.probation = True
+        return True
+    except Exception:
+        return False
+
+
 def _settle_probation(request, registry, provider_id: str, response) -> None:
     """Promote or demote a probation provider on its probe outcome.
 
@@ -1016,9 +1067,7 @@ def _settle_probation(request, registry, provider_id: str, response) -> None:
         if not bool(getattr(rt, "probation", False)):
             return
         status = response.status_code if hasattr(response, "status_code") else 0
-        if 200 <= status < 300:
-            rt.probation = False
-        elif status == 429:
+        if 200 <= status < 300 or status == 429:
             rt.probation = False
     except Exception:
         pass
@@ -1209,6 +1258,10 @@ def _maybe_auto_cycle(
                     # gates the next bounce.
                     rt.retry_until = 0.0
                     rt.retry_reason = ""
+                    # Bounce-ok is a becoming-ready path: arm probation so
+                    # the next request probes at concurrency 1 (promotion
+                    # happens on first success).
+                    rt.probation = True
                     logger.info(
                         "[%s] warp provider %s exit %s backoff cleared",
                         trace_id,
