@@ -18,6 +18,7 @@ def _wire_args(args: str) -> str:
             pass
     return "{}"
 
+
 logger = setup_logging()
 
 
@@ -215,7 +216,10 @@ class ChatParser:
         elif self.pending_finish is not None:
             status, calls = "failed", self.saw_calls
         else:
-            status, calls = "completed", self.saw_calls
+            # EOF with no terminal frame: the upstream stream was cut, not
+            # completed. Synthesizing "completed" here would bill and log
+            # a truncation as success (audit: truncated/chat-parser rows).
+            status, calls = "incomplete", self.saw_calls
         return StreamDone(
             status,
             has_tool_calls=calls,
@@ -319,8 +323,10 @@ class ResponsesParser:
         if self._done:
             return None
         self._done = True
+        # EOF without response.completed/failed/incomplete: cut stream,
+        # never a clean completion (same truncation rule as ChatParser).
         return StreamDone(
-            "completed", has_tool_calls=self.saw_calls or bool(self.names)
+            "incomplete", has_tool_calls=self.saw_calls or bool(self.names)
         )
 
 
@@ -423,7 +429,8 @@ class MessagesParser:
         if self._done:
             return None
         self._done = True
-        return StreamDone("completed", has_tool_calls=bool(self.ids))
+        # EOF without message_stop: cut stream, never clean (same rule).
+        return StreamDone("incomplete", has_tool_calls=bool(self.ids))
 
 
 def parse_messages_sse(
@@ -546,7 +553,24 @@ class ChatEmitter:
             elif delta.status == "incomplete":
                 finish = "length"
             else:
-                finish = "stop"
+                # Upstream failure: "stop" would read as success to an
+                # OpenAI SDK client, so emit an error chunk instead (the
+                # non-streaming leg preserves the raw reason; streams
+                # carry no reason field, hence the typed error object).
+                return [
+                    b"data: "
+                    + json.dumps(
+                        {
+                            "object": "error",
+                            "error": {
+                                "type": "upstream_failed",
+                                "message": "upstream stream failed",
+                            },
+                        }
+                    ).encode()
+                    + b"\n\n",
+                    b"data: [DONE]\n\n",
+                ]
             return [
                 _chat_chunk(self.chat_id, self.model, {}, finish),
                 b"data: [DONE]\n\n",
@@ -808,9 +832,7 @@ class ResponsesEmitter:
                 "total_tokens": in_tok + out_tok,
             }
             if delta.cached_tokens:
-                usage["input_tokens_details"] = {
-                    "cached_tokens": delta.cached_tokens
-                }
+                usage["input_tokens_details"] = {"cached_tokens": delta.cached_tokens}
             if delta.reasoning_tokens:
                 usage["output_tokens_details"] = {
                     "reasoning_tokens": delta.reasoning_tokens
@@ -973,7 +995,11 @@ class MessagesEmitter:
             elif delta.status == "incomplete":
                 stop = "max_tokens"
             else:
-                stop = "end_turn"
+                # Upstream failure: end_turn would read as a clean turn
+                # end to an Anthropic SDK client. Anthropic has no stream
+                # error frame, so surface the failure as error stop
+                # reason (the non-streaming leg maps the same way).
+                stop = "error"
             # Full Anthropic usage shape: cache_read_input_tokens feeds
             # statusline cache-hit math; cache_creation_input_tokens stays 0
             # (upstream never reports it separately) but its presence keeps

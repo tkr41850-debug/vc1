@@ -196,16 +196,21 @@ def test_warp_egress_socks_and_retry_tracking(monkeypatch):
 
     def _zen_handler(request: _httpx.Request) -> _httpx.Response:
         assert str(request.url).endswith("/responses")
+        # Anonymous responses leg requires stream:true upstream: the
+        # synthesize path folds SSE, not a JSON body, so the mock must
+        # speak realistic SSE (a bare JSON body parses as zero deltas
+        # and the truncation rule now reads that as incomplete, not
+        # completed).
         return _httpx.Response(
             200,
-            json={
-                "id": "resp_1",
-                "object": "response",
-                "status": "completed",
-                "model": "muse-spark-1.3-contributor-free",
-                "output": [],
-                "usage": {"input_tokens": 1, "output_tokens": 1},
-            },
+            content=(
+                b'data: {"type": "response.created",'
+                b' "response": {"id": "resp_1"}}\n\n'
+                b'data: {"type": "response.completed",'
+                b' "response": {"id": "resp_1", "status": "completed",'
+                b' "usage": {"input_tokens": 1, "output_tokens": 1}}}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
         )
 
     zen_client = _httpx.AsyncClient(transport=_httpx.MockTransport(_zen_handler))
@@ -564,11 +569,8 @@ def test_inflight_changes_push_providers_frame(admin_client):
     release guarantees the Busy 1->0 transition is observable on SSE.
     """
     import asyncio as _asyncio
-    import json as _json
     import threading as _threading
     import time as _time
-
-    import httpx as _httpx
 
     tc, _ = admin_client
     hub = tc.app.state.admin_hub
@@ -625,7 +627,6 @@ def test_inflight_changes_push_providers_frame(admin_client):
                     await _asyncio.wait_for(q.get(), 1.0)
                 except TimeoutError:
                     continue
-                snap = registry.load()
                 rt = registry.runtime("noproxy")
                 if rt.in_flight >= 1:
                     saw_busy = True

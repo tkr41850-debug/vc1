@@ -171,6 +171,11 @@ def emit_chat_response(rir: ResponseIR, model: str) -> dict:
         # Upstream named a real failure: re-emit it instead of collapsing
         # to "stop" so downstream sees the filter/error, not a clean end.
         finish = rir.finish_reason
+    elif rir.finish_reason:
+        # Unknown failure reason (e.g. "error"): preserve verbatim rather
+        # than collapsing to "stop" — downstream retry/policy logic keys
+        # off non-stop reasons, and "stop" would read as success.
+        finish = rir.finish_reason
     else:
         finish = "stop"
     message: dict = {
@@ -227,8 +232,13 @@ def emit_messages_response(rir: ResponseIR, model: str) -> dict:
         stop = "end_turn"
     elif rir.status == "incomplete":
         stop = "max_tokens"
+    elif rir.finish_reason == "content_filter":
+        # Only content_filter has an Anthropic stop_reason vocabulary
+        # match; every other failure surfaces as "error" instead of the
+        # clean-turn "end_turn" (same rule as the streaming emitter).
+        stop = "content_filter"
     else:
-        stop = "end_turn"
+        stop = "error"
     return {
         "id": f"msg_{rir.raw_id}",
         "type": "message",

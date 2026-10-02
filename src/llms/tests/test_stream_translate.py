@@ -99,14 +99,19 @@ def test_responses_tool_deltas_become_tool_calls():
 
 
 def test_responses_failed_still_terminates():
-    events = collect(
-        responses_to_chat(['data: {"type":"response.failed"}', ""], "t1", "m")
-    )
-    assert events[-1]["choices"][0]["finish_reason"] == "stop"
     raw = b"".join(
         responses_to_chat(['data: {"type":"response.failed"}', ""], "t1", "m")
     ).decode()
+    # Upstream failure must surface as an error, never finish_reason stop
+    # (which an OpenAI SDK client reads as success). The stream still
+    # terminates with [DONE] so clients don't hang on a failed leg.
+    assert '"object": "error"' in raw
+    assert '"type": "upstream_failed"' in raw
     assert "data: [DONE]" in raw
+    events = collect(
+        responses_to_chat(['data: {"type":"response.failed"}', ""], "t1", "m")
+    )
+    assert all("choices" not in e for e in events)
 
 
 def test_chat_text_to_responses_events():
@@ -127,14 +132,16 @@ def test_chat_tool_deltas_become_function_call():
     done = [e for e in events if e["type"] == "response.function_call_arguments.done"]
     # Truncated mid-args stream: terminal coerces the partial to valid
     # JSON so downstream validation never sees a fragment.
-    assert done[0]["arguments"] == '{}'
+    assert done[0]["arguments"] == "{}"
     assert events[-1]["type"] == "response.completed"
 
 
 def test_chat_stream_without_done_still_completes():
     lines = ['data: {"choices":[{"delta":{"content":"hi"}}]}', ""]
     events = collect(chat_to_responses(lines, "t1", "m"))
-    assert events[-1]["type"] == "response.completed"
+    # EOF with no terminal frame is a cut stream, not a clean completion:
+    # the terminal reads incomplete so truncation never bills as success.
+    assert events[-1]["type"] == "response.incomplete"
 
 
 def test_usage_flows_responses_to_messages_stream():
@@ -288,7 +295,7 @@ def test_messages_tool_to_responses_function_call():
     assert added[0]["item"]["name"] == "bash"
     done = [e for e in events if e["type"] == "response.function_call_arguments.done"]
     # Same truncated-stream coercion on the messages leg.
-    assert done[0]["arguments"] == '{}'
+    assert done[0]["arguments"] == "{}"
     assert events[-1]["type"] == "response.completed"
 
 
@@ -302,16 +309,13 @@ def test_complete_tool_args_pass_through_terminal():
     done = [
         e
         for e in (
-            __import__("json").loads(
-                c.decode().split("data: ", 1)[1]
-            )
+            __import__("json").loads(c.decode().split("data: ", 1)[1])
             for c in out
             if c.startswith(b"data: ")
         )
         if e.get("type") == "response.function_call_arguments.done"
     ]
     assert done[0]["arguments"] == '{"cmd":"ls"}'
-
 
 
 def test_responses_text_to_messages_events():
@@ -399,3 +403,85 @@ def test_messages_terminal_carries_cache_read_tokens():
     assert delta["usage"]["input_tokens"] == 100
     assert delta["usage"]["cache_read_input_tokens"] == 80
     assert delta["usage"]["cache_creation_input_tokens"] == 0
+
+
+def test_truncated_chat_stream_is_incomplete_not_completed():
+    """EOF with no finish_reason must not synthesize a clean completion."""
+    from llms.proxy.stream_translate import ChatParser
+
+    p = ChatParser()
+    for payload in [
+        '{"choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}'
+    ]:
+        p.feed_payload(payload)
+    done = p.finish()
+    assert done.status == "incomplete"
+
+
+def test_truncated_responses_stream_is_incomplete():
+    from llms.proxy.stream_translate import ResponsesParser
+
+    p = ResponsesParser()
+    p.feed_payload('{"type":"response.output_text.delta","delta":"hi"}')
+    assert p.finish().status == "incomplete"
+
+
+def test_truncated_messages_stream_is_incomplete():
+    from llms.proxy.stream_translate import MessagesParser
+
+    p = MessagesParser()
+    p.feed_payload(
+        '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}'
+    )
+    assert p.finish().status == "incomplete"
+
+
+def test_failed_chat_terminal_surfaces_error_not_stop():
+    """response.failed through the chat emitter: error object, never stop."""
+    raw = b"".join(
+        responses_to_chat(['data: {"type":"response.failed"}', ""], "t1", "m")
+    ).decode()
+    assert '"type": "upstream_failed"' in raw
+    assert '"finish_reason": "stop"' not in raw
+
+
+def test_failed_messages_terminal_surfaces_error_stop():
+    """response.failed through the messages emitter: error, never end_turn."""
+    from llms.proxy.stream_translate import responses_to_messages
+
+    raw = b"".join(
+        responses_to_messages(['data: {"type":"response.failed"}', ""], "t1", "m")
+    ).decode()
+    assert '"stop_reason": "error"' in raw
+    assert '"stop_reason": "end_turn"' not in raw
+
+
+def test_unknown_failure_reason_preserved_on_chat_response():
+    """Non-streaming chat leg preserves e.g. finish_reason error verbatim."""
+    from llms.proxy.translate_response import convert_response
+
+    payload = {
+        "id": "chatcmpl-x",
+        "model": "m",
+        "choices": [
+            {"index": 0, "message": {"role": "assistant"}, "finish_reason": "error"}
+        ],
+        "usage": {},
+    }
+    out = convert_response("chat", "chat", payload, "m")
+    assert out["choices"][0]["finish_reason"] == "error"
+
+
+def test_unknown_failure_reason_surfaces_error_on_messages_response():
+    from llms.proxy.translate_response import convert_response
+
+    payload = {
+        "id": "chatcmpl-x",
+        "model": "m",
+        "choices": [
+            {"index": 0, "message": {"role": "assistant"}, "finish_reason": "error"}
+        ],
+        "usage": {},
+    }
+    out = convert_response("chat", "messages", payload, "m")
+    assert out["stop_reason"] == "error"
