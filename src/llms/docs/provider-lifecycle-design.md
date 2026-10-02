@@ -24,6 +24,10 @@ Wire value `lifecycle` in `provider_snapshot()`, one of:
 - `off` — disabled, quiesced: no pool, `in_flight == 0`
 - `preparing` — enabled warp, not yet serving (turning on)
 - `ready` — enabled and serving (noproxy, or ≥1 ready exit)
+- `ready-probation` — enabled and serving, but the first flight is still
+  probing at concurrency 1 (post-startup, cooldown expiry, reconnect, or
+  re-enable; promotes to `ready` on first success, returns to `ratelimited`
+  on probe 429). Overlay between `ratelimited` and `preparing` in precedence.
 - `ratelimited` — enabled and `retry_in > 0` (overlay, except over draining)
 - `draining` — disabled but not quiesced (turning off), carries drain detail
 - `unhealthy` — enabled warp, 0 ready past the boot grace, with error detail
@@ -39,11 +43,19 @@ Precedence (top wins, pure function, no I/O):
 
 1. `draining` if `not enabled and (pool alive or in_flight > 0)`
 2. `ratelimited` if `enabled and retry_in() > 0`
-3. `preparing` if `enabled and kind == warp and (fetched_at == 0 or (0 ready
+3. `ready-probation` if `enabled and probation and (kind == noproxy or any
+   ready)` — the becoming-ready overlay: post-startup / post-outage /
+   cooldown-expiry / reconnect / re-enable all arm `rt.probation` (the first
+   ready snapshot, the pipeline expiry gate, the bounce-ok path), so the
+   next flight probes at concurrency 1 instead of riding straight to ready.
+   Moving *from* `retry_in` always lands here first, never straight to
+   `ready`. Success promotes (`probation = False`, unbounded); probe 429
+   returns to `ratelimited` (60s default or the given retry-after).
+4. `preparing` if `enabled and kind == warp and (fetched_at == 0 or (0 ready
    and now - boot_epoch < boot_grace))`
-4. `ready` if `enabled and (kind == noproxy or any ready)`
-5. `unhealthy` if `enabled and kind == warp and 0 ready past grace`
-6. `off` otherwise
+5. `ready` if `enabled and (kind == noproxy or any ready)`
+6. `unhealthy` if `enabled and kind == warp and 0 ready past grace`
+7. `off` otherwise
 
 Safety properties: the function never raises (unexpected shape falls back to
 `preparing` when enabled / `off` when disabled); restart-safe (after restart
@@ -140,7 +152,8 @@ derives from them).
 UI (`ProvidersTab.tsx`, `App.tsx`, `api.ts`; maybe a tiny `lifecycle.ts`):
 
 - Dots: `ready` 🟢, `ratelimited` 🟡, `off` ⚪, `unhealthy` 🔴, `preparing` 🔵
-  (new), `draining` 🟠 (new). Every dot, the Busy header + cells,
+  (new), `draining` 🟠 (new), `ready-probation` 🟣 (Task 6 overlay: first
+  flight probing at concurrency 1). Every dot, the Busy header + cells,
   transition-disabled buttons, and the debug-modal lifecycle/drain line carry
   `title=` hover tooltips (established file pattern) with live detail
   (`Draining — 3 in flight, quiescing in ~4m`, `Ratelimited — retry in 42s`).
@@ -178,7 +191,14 @@ to the user before implementation.
 
 ## Test plan
 
-Hermetic (`tests/`): lifecycle precedence matrix; ack-timing (toggle returns
+Hermetic (`tests/`): lifecycle precedence matrix (incl. the ready-probation
+overlay: beats preparing/ready/unhealthy, loses to draining/ratelimited);
+probation entry points (boot, cooldown expiry, reconnect, enable,
+bounce-ok, refresh 0→ready); single-flight quota (at-quota skip +
+`queued` signal, failover to next warp, fail-open when no warp serves the
+model); queue hold (served on probe release, 10m degrade to 429
+retry-after 600); settle on probe outcome (success promotes, probe 429
+backoffs, disconnect stays armed); ack-timing (toggle returns
 < 1s with transition snapshot); generation-cancel (re-enable mid-drain kills
 no daemons); drain force path (deadline → Offline forced); in-flight
 increment/decrement incl. abrupt disconnect; throttle coalescing; ring spread

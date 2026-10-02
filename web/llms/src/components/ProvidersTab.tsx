@@ -27,6 +27,11 @@ function lifecycleDot(p: ProviderEntry): { dot: string; title: string } {
         dot: "🟡",
         title: `Ratelimited — retry in ${fmtRetry(p.retry_in)}${p.retry_reason ? `: ${p.retry_reason}` : ""}`,
       };
+    case "ready-probation":
+      return {
+        dot: "🟣",
+        title: `Ready-probation — first flight probing at concurrency 1${p.kind === "noproxy" ? " (direct egress)" : ` (${ready} ready exit(s))`}`,
+      };
     case "preparing":
       return {
         dot: "🔵",

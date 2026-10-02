@@ -37,6 +37,7 @@ export type ProviderLifecycle =
   | "off"
   | "preparing"
   | "ready"
+  | "ready-probation"
   | "ratelimited"
   | "draining"
   | "unhealthy";
