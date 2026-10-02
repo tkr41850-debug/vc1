@@ -87,6 +87,12 @@ async def lifespan(app: FastAPI):
     # Stamp boot_epoch: without it a restarted enabled warp with down
     # tunnels reads `preparing` forever instead of aging into `unhealthy`
     # past the boot grace (derive short-circuits on boot_epoch <= 0).
+    # Force the first health poll here (not lazily on first traffic): the
+    # snapshot backing the admin UI starts at fetched_at 0, and the
+    # providers SSE is push-only (no timer refresh) — without this the
+    # row sits on boot state until first traffic or a manual Debug
+    # forced-refresh. Pool boot itself is best-effort; a failed poll
+    # surfaces as the health error, never a boot failure.
     try:
         import time as _time
 
@@ -94,6 +100,10 @@ async def lifespan(app: FastAPI):
             if provider.kind == "warp" and provider.enabled:
                 await app.state.providers.ensure_pool(provider)
                 app.state.providers.runtime(provider.id).boot_epoch = _time.monotonic()
+                try:
+                    await app.state.providers.refresh_health(provider, force=True)
+                except Exception as exc:
+                    logger.warning("provider %s boot poll failed: %r", provider.id, exc)
     except Exception as exc:
         logger.warning("warp supervisor boot failed: %s", exc)
     async with httpx.AsyncClient(

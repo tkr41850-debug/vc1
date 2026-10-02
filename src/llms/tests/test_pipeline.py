@@ -679,3 +679,80 @@ def test_genuine_tool_order_and_identity_preserved(app_client):
     tools = seen["json"]["tools"]
     assert tools[:12] == GENUINE_TOOLS
     assert [t.get("name") for t in tools][12:] == ["mine"]
+
+
+def test_overlay_skips_genuine_twin_of_declared_name(app_client):
+    """A client-declared 'shell' sees one shell slot: its own definition.
+
+    Regression (live codex wire capture): the overlay prepended genuine
+    'shell' ahead of codex's declared extras; the model called the
+    overlay twin and codex failed the turn ('unsupported call: shell').
+    Now the genuine twin is skipped and the client's definition rides
+    in the slot position — exactly one shell, client-owned.
+    """
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+
+    tc, seen = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={
+            "model": "muse-spark-1.3-contributor-free",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell",
+                    "description": "codex shell",
+                    "parameters": {"type": "object"},
+                },
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "description": "codex exec",
+                    "parameters": {"type": "object"},
+                },
+            ],
+        },
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 200
+    tools = seen["json"]["tools"]
+    assert [t.get("name") for t in tools].count("shell") == 1
+    sent_shell = next(t for t in tools if t.get("name") == "shell")
+    assert sent_shell["description"] == "codex shell"
+    # Gate safety: every other genuine name still rides at least once,
+    # and declared extras keep their slot-ahead-of-extras position.
+    assert (GENUINE_TOOL_NAMES - {"shell"}) <= {t.get("name") for t in tools}
+    assert tools.index(sent_shell) < tools.index(
+        next(t for t in tools if t.get("name") == "exec_command")
+    )
+
+
+def test_overlay_case_variant_keeps_genuine_and_appends_client(app_client):
+    """Client 'Read' vs genuine 'read': genuine untouched, client appends.
+
+    Case-insensitive skip must not collapse the variant: renaming the
+    genuine definition breaks the gate, so both ride (existing contract).
+    """
+    tc, seen = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={
+            "model": "muse-spark-1.3-contributor-free",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "Read",
+                    "description": "mine",
+                    "parameters": {},
+                },
+            ],
+        },
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 200
+    tools = seen["json"]["tools"]
+    sent_read = next(t for t in tools if t.get("name") == "read")
+    assert sent_read["description"] != "mine"
+    assert next(t for t in tools if t.get("name") == "Read")["description"] == "mine"

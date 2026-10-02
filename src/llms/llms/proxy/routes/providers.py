@@ -158,7 +158,35 @@ async def create_provider(
     if body.kind == "warp":
         registry.ensure_warp_dir(body.id)
     _sync_slots(request)
-    await get_hub(request).publish("providers")
+    if provider.kind == "warp" and provider.enabled:
+        # Spec §7: a new provider boots + polls in the background (ack in
+        # ms, settle over SSE) so it serves its ring share within seconds.
+        # Same task shape as the enable ack: boot_epoch stamps aging,
+        # _settle_enabled forces refresh_health (moves fetched_at) and
+        # publishes; gen guard exits silently on supersede (delete).
+        import time as _time
+
+        rt = registry.runtime(provider.id)
+        rt.gen += 1
+        gen = rt.gen
+        rt.boot_epoch = _time.monotonic()
+        hub = get_hub(request)
+        await hub.publish("providers")
+
+        async def _settle_create() -> None:
+            try:
+                await _settle_enabled(registry, provider, gen, hub)
+            except Exception as exc:
+                logger.warning("provider %s create-boot failed: %r", provider.id, exc)
+            finally:
+                try:
+                    await hub.publish("providers")
+                except Exception:
+                    pass
+
+        asyncio.create_task(_settle_create())
+    else:
+        await get_hub(request).publish("providers")
     return {"id": body.id}
 
 

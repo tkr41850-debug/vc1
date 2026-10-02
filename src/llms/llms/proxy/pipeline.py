@@ -154,12 +154,26 @@ def _inflight_release(request, provider_id: str | None) -> None:
         pass
 
 
-def _wrap_inflight(request, response, provider_id: str | None):
+def _wrap_inflight(
+    request,
+    response,
+    provider_id: str | None,
+    *,
+    model: str | None = None,
+    warp_idx: int | None = None,
+    started: float | None = None,
+):
     """Wrap a StreamingResponse so body completion releases in-flight.
 
     Covers all four stream generators in forward.py at once; `finally`
     covers abrupt disconnect. JSON/synthesize legs decrement via
     _inflight_release after _record_usage instead.
+
+    A fully-consumed stream also records the recent-request ring entry
+    (model/warp_idx/started supplied by the call site): without this only
+    JSON legs ever appear in Last requests (live), so a successful
+    streaming probe promotes probation -> ready yet stays invisible.
+    Disconnects record nothing — the request never completed.
     """
     if provider_id is None or not isinstance(response, StreamingResponse):
         return response
@@ -183,6 +197,36 @@ def _wrap_inflight(request, response, provider_id: str | None):
                     registry = getattr(request.app.state, "providers", None)
                     if registry is not None:
                         _settle_probation(request, registry, provider_id, response)
+                        if model is not None:
+                            outcome = getattr(
+                                getattr(request, "state", None),
+                                "stream_outcome",
+                                None,
+                            )
+                            error = (
+                                ""
+                                if outcome in (None, "completed")
+                                else f"stream {outcome}"
+                            )
+                            elapsed_ms = (
+                                (time.monotonic() - started) * 1000.0
+                                if started is not None
+                                else 0.0
+                            )
+                            await registry.runtime(provider_id).record(
+                                RecentRequest(
+                                    ts=time.time(),
+                                    model=model,
+                                    status=(
+                                        response.status_code
+                                        if hasattr(response, "status_code")
+                                        else 0
+                                    ),
+                                    ms=elapsed_ms,
+                                    warp_idx=warp_idx,
+                                    error=str(error)[:200],
+                                )
+                            )
                 except Exception:
                     pass
 
@@ -305,7 +349,7 @@ def is_genuine_opencode(headers) -> bool:
     return ua.startswith("opencode/") or bool(headers.get("x-opencode-client"))
 
 
-def _with_genuine_tools(outbound: dict) -> None:
+def _with_genuine_tools(outbound: dict, client_names: set[str] | None = None) -> None:
     """Prepend the genuine tool set ahead of client extras (no duplicates).
 
     The free-tier gate fuzzy-matches the set: the 12 genuine definitions
@@ -318,14 +362,41 @@ def _with_genuine_tools(outbound: dict) -> None:
     the client tool appends after as an extra. All 12 genuine names stay
     present at least once, always with their genuine definition.
     Mutates outbound in place.
+
+    Scoped overlay: when the caller supplies the client's own tool names,
+    a genuine tool the client ALSO declares under the exact same name is
+    skipped from the head — the client's definition already occupies the
+    slot, so prepending the genuine twin only dangles an unexecutable
+    same-name double in front of the model (live codex finding: model
+    called overlay 'shell' instead of declared 'exec_command', and codex
+    failed the turn with 'unsupported call: shell'). Skipped names still
+    satisfy the gate: the slot carries the client's definition under the
+    genuine name. Case-variant collisions ('Read' vs 'read') keep the
+    genuine definition untouched (renaming it breaks the gate) with the
+    client tool appended after. Without client_names every genuine tool
+    prepends (legacy behavior for callers that don't track declarations).
     """
     genuine_names = {t.get("name") for t in GENUINE_TOOLS}
     by_name = {t.get("name"): t for t in outbound.get("tools", []) or []}
-    head = [by_name.get(g.get("name"), g) for g in GENUINE_TOOLS]
+    head = []
+    for g in GENUINE_TOOLS:
+        gname = g.get("name", "")
+        if gname in by_name:
+            # Client declares this exact name: its own definition
+            # occupies the slot — skip the genuine twin so the model
+            # never sees an unexecutable same-name double (live codex
+            # finding: model called overlay 'shell' instead of the
+            # declared tool, failing the turn 'unsupported call').
+            continue
+        head.append(by_name.get(gname, g))
     extras = [
         t for t in outbound.get("tools", []) or [] if t.get("name") not in genuine_names
     ]
-    outbound["tools"] = [*head, *extras]
+    # Declared-name client tools whose name collides with a genuine
+    # tool ride in their overlay slot position, ahead of extras — the
+    # slot keeps the client's definition.
+    slots = [by_name[gname] for gname in genuine_names if gname in by_name]
+    outbound["tools"] = [*head, *slots, *extras]
 
 
 def _ensure_chat_system(outbound: dict) -> None:
@@ -632,7 +703,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         # Keyed operators keep exact fidelity. Genuine opencode
         # already carries the exact wire identity: passthrough.
         if not settings.zen_api_key and not genuine:
-            _with_genuine_tools(outbound)
+            _with_genuine_tools(outbound, {t.name for t in req.tools if t.name})
     elif egress == "chat" and not settings.zen_api_key and not genuine:
         _ensure_chat_system(outbound)
     bucket = bucket_for(
@@ -1143,7 +1214,14 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 )
     _record_usage(request, ingress, req.model, response)
     if isinstance(response, StreamingResponse):
-        return _wrap_inflight(request, response, provider_id)
+        return _wrap_inflight(
+            request,
+            response,
+            provider_id,
+            model=req.model,
+            warp_idx=warp_idx,
+            started=started,
+        )
     _inflight_release(request, provider_id)
     if registry is not None and provider_id:
         _settle_probation(request, registry, provider_id, response)

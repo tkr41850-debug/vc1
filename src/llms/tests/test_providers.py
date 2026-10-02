@@ -684,3 +684,31 @@ def test_provider_id_routes_reject_traversal(admin_client):
         assert tc.post(f"/api/admin/providers/{bad}/reconnect").status_code == 400
         r = tc.delete(f"/api/admin/providers/{bad}")
         assert r.status_code == 400, (bad, r.status_code)
+
+
+def test_create_warp_boots_and_polls_in_background(admin_client, monkeypatch):
+    """POST create triggers background boot+poll: health moves without traffic."""
+    import time as _time
+
+    class _FakePool:
+        async def refresh_statuses(self):
+            return None
+
+        def snapshot(self):
+            return {"error": "", "exits": []}
+
+    async def _ensure_pool(provider):
+        return _FakePool()
+
+    tc, _ = admin_client
+    registry = tc.app.state.providers
+    monkeypatch.setattr(registry, "ensure_pool", _ensure_pool)
+    r = tc.post(
+        "/api/admin/providers",
+        json={"id": "bootcreate", "kind": "warp", "exits": 1, "models": ["gpt-*"]},
+    )
+    assert r.status_code == 201
+    deadline = _time.monotonic() + 5.0
+    while registry.runtime("bootcreate").health.fetched_at <= 0:
+        assert _time.monotonic() < deadline, "background boot poll never ran"
+        _time.sleep(0.05)

@@ -241,13 +241,18 @@ def test_reconnect_route_arms_probation(admin_client, monkeypatch):
         return _Pool()
 
     tc, _ = admin_client
+    registry = tc.app.state.providers
+    # Patch BEFORE create: POST create now boots + polls in the background
+    # (spec §7), and refresh_health treats the pool snapshot as truth — a
+    # real-pool refresh landing after the seed below would wipe the seeded
+    # ready exit to zero-ready (preparing). The stub models this 1-exit
+    # pool's ready exit, so any interleaving stays self-consistent.
+    monkeypatch.setattr(registry, "ensure_pool", _ensure_pool)
     r = tc.post(
         "/api/admin/providers",
         json={"id": "rc1", "kind": "warp", "exits": 1, "models": ["gpt-*"]},
     )
     assert r.status_code == 201
-    registry = tc.app.state.providers
-    monkeypatch.setattr(registry, "ensure_pool", _ensure_pool)
     rt = registry.runtime("rc1")
     rt.health = ProviderHealth(
         exits=[WarpExit(idx=0, ready=True, status="ok", socks=40001)],
@@ -918,3 +923,144 @@ def test_stream_settle_stays_armed_on_parser_failure():
     registry.runtime = lambda _pid, _rt=rt: _rt
     _settle_probation(req, registry, "w1", StreamingResponse(body()))
     assert rt.probation is False
+
+
+def test_lifespan_boot_forces_first_poll(tmp_path, monkeypatch):
+    """Boot performs the first health poll: fetched_at moves without traffic."""
+    from fastapi.testclient import TestClient
+
+    from llms.proxy.main import create_app
+    from llms.proxy.providers import Provider, ProviderRegistry
+    from tests.conftest import make_settings
+
+    class _Pool:
+        async def refresh_statuses(self):
+            return None
+
+        def snapshot(self):
+            return {
+                "error": "",
+                "exits": [
+                    {
+                        "idx": 0,
+                        "ready": True,
+                        "status": "ok",
+                        "socks": 40001,
+                        "registered": True,
+                        "error": "",
+                    },
+                ],
+            }
+
+    async def _ensure_pool(self, provider):
+        return _Pool()
+
+    settings = make_settings(data_dir=str(tmp_path))
+    seed = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
+    seed.save([Provider(id="bootpoll", kind="warp", models=["gpt-*"], exits=1)])
+    monkeypatch.setattr(ProviderRegistry, "ensure_pool", _ensure_pool)
+    app = create_app(settings)
+    with TestClient(app):
+        rt = app.state.providers.runtime("bootpoll")
+        assert rt.health.fetched_at > 0
+        assert rt.probation is True
+
+
+def test_stream_wrap_records_recent_on_exhaustion():
+    """A fully-consumed stream probe lands in Last requests (live)."""
+    import asyncio as _asyncio
+    import tempfile as _tf
+    import time as _time
+
+    from fastapi.responses import StreamingResponse
+
+    from llms.proxy.config import Settings
+    from llms.proxy.pipeline import _inflight_track, _wrap_inflight
+    from llms.proxy.providers import ProviderRegistry
+
+    class _State:
+        pass
+
+    async def scenario(tmp):
+        settings = Settings(data_dir=str(tmp))
+        registry = ProviderRegistry(data_dir=str(tmp), settings=settings)
+        state = _State()
+        state.app = _State()
+        state.app.state = _State()
+        state.app.state.providers = registry
+        state.app.state.admin_hub = None
+        req = _State()
+        req.app = state.app
+        req.state = _State()
+
+        async def body():
+            yield b"hello"
+
+        _inflight_track(req, "w1")
+        resp = _wrap_inflight(
+            req,
+            StreamingResponse(body()),
+            "w1",
+            model="gpt-5",
+            warp_idx=3,
+            started=_time.monotonic(),
+        )
+        chunks = [c async for c in resp.body_iterator]
+        assert b"".join(chunks) == b"hello"
+        snap = registry.runtime("w1").recent_snapshot()
+        assert len(snap) == 1
+        assert snap[0]["model"] == "gpt-5"
+        assert snap[0]["status"] == 200
+        assert snap[0]["warp_idx"] == 3
+
+    with _tf.TemporaryDirectory() as tmp:
+        _asyncio.run(scenario(tmp))
+
+
+def test_stream_wrap_disconnect_records_nothing():
+    """A disconnected stream leaves no Last-requests entry (never completed)."""
+    import asyncio as _asyncio
+    import tempfile as _tf
+    import time as _time
+
+    from fastapi.responses import StreamingResponse
+
+    from llms.proxy.config import Settings
+    from llms.proxy.pipeline import _inflight_track, _wrap_inflight
+    from llms.proxy.providers import ProviderRegistry
+
+    class _State:
+        pass
+
+    async def scenario(tmp):
+        settings = Settings(data_dir=str(tmp))
+        registry = ProviderRegistry(data_dir=str(tmp), settings=settings)
+        state = _State()
+        state.app = _State()
+        state.app.state = _State()
+        state.app.state.providers = registry
+        state.app.state.admin_hub = None
+        req = _State()
+        req.app = state.app
+        req.state = _State()
+
+        async def body():
+            yield b"part1"
+            yield b"part2"
+
+        _inflight_track(req, "w1")
+        resp = _wrap_inflight(
+            req,
+            StreamingResponse(body()),
+            "w1",
+            model="gpt-5",
+            warp_idx=3,
+            started=_time.monotonic(),
+        )
+        first = await resp.body_iterator.__anext__()
+        assert first == b"part1"
+        await resp.body_iterator.aclose()
+        assert registry.runtime("w1").recent_snapshot() == []
+
+    with _tf.TemporaryDirectory() as tmp:
+        _asyncio.run(scenario(tmp))
