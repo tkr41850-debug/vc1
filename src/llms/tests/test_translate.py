@@ -968,7 +968,12 @@ def test_tool_choice_canonicalized_across_dialects():
         }
     )
     assert req.tool_choice == {"name": "bash"}
-    assert to_zen_chat(req)["tool_choice"] == {"name": "bash"}
+    # Chat wire shape only: the IR name pin re-wraps to function form,
+    # never leaks verbatim (upstream 400s on {"name": ...} alone).
+    assert to_zen_chat(req)["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "bash"},
+    }
     assert to_zen_messages(req)["tool_choice"] == {"type": "tool", "name": "bash"}
 
     # chat function-form choice degrades to auto no longer: it maps by name
@@ -1068,3 +1073,59 @@ def test_valid_tool_arguments_preserved_verbatim():
     body = to_zen_responses(req)
     call = next(i for i in body["input"] if i["type"] == "function_call")
     assert call["arguments"] == '{"path":"/home/node"}'
+
+
+def test_none_tool_choice_survives_round_trip():
+    """A client tool ban must never invert to auto on any leg."""
+    from llms.proxy.translate import (
+        _canonical_tool_choice,
+        from_chat,
+        to_zen_chat,
+        to_zen_messages,
+        to_zen_responses,
+    )
+
+    assert _canonical_tool_choice({"type": "none"}) == "none"
+    req = from_chat(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_choice": {"type": "none"},
+        }
+    )
+    assert req.tool_choice == "none"
+    assert to_zen_chat(req)["tool_choice"] == "none"
+    assert to_zen_responses(req)["tool_choice"] == "none"
+    assert to_zen_messages(req)["tool_choice"] == {"type": "none"}
+
+
+def test_named_tool_choice_rewraps_on_chat_egress():
+    """IR name-form must not leak verbatim onto the chat wire."""
+    from llms.proxy.translate import from_chat, to_zen_chat
+
+    req = from_chat(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_choice": {"type": "function", "function": {"name": "foo"}},
+        }
+    )
+    assert req.tool_choice == {"name": "foo"}
+    out = to_zen_chat(req)["tool_choice"]
+    assert out == {"type": "function", "function": {"name": "foo"}}
+
+
+def test_stop_sequences_preserved_on_responses_egress():
+    """Chat stop sequences must reach the responses leg, not vanish."""
+    from llms.proxy.translate import from_chat, to_zen_responses
+
+    req = from_chat(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop": ["END"],
+        }
+    )
+    out = to_zen_responses(req)
+    stops = out.get("stop") or out.get("stop_sequences") or []
+    assert "END" in (stops if isinstance(stops, list) else [stops])

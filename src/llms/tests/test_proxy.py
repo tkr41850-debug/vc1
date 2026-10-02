@@ -27,7 +27,9 @@ def test_healthz_reports_degraded_store(app_client, tmp_path):
         r = tc.get("/healthz")
         assert r.status_code == 200
         assert r.json()["status"] == "degraded"
-        assert "unparsable keys.yaml" in r.json()["store_error"]
+        # Unauthenticated path: fixed degraded signal, never raw parser
+        # text (YAML errors echo the offending line, a key/config leak).
+        assert r.json()["store_error"] == "key store unavailable"
     finally:
         reset_cache()
 
@@ -755,3 +757,43 @@ def test_tool_call_arguments_survive_synthesize(tmp_path):
         calls = r.json()["choices"][0]["message"]["tool_calls"]
         assert len(calls) == 1
         assert calls[0]["function"]["arguments"] == args
+
+
+def test_redact_headers_drops_secrets():
+    from llms.proxy.logging import redact_headers
+
+    out = redact_headers(
+        {
+            "Authorization": "Bearer operator-secret-xyz",
+            "x-api-key": "sk-live-abc123",
+            "x-opencode-session": "ses_keep",
+            "content-type": "application/json",
+        }
+    )
+    assert out["Authorization"] == "<redacted>"
+    assert out["x-api-key"] == "<redacted>"
+    assert out["x-opencode-session"] == "ses_keep"
+    assert out["content-type"] == "application/json"
+
+
+def test_sk_guessing_earns_cooldown(app_client):
+    """20 auth failures in a minute earn a 429 + retry-after, not a 401."""
+    from llms.proxy import middleware as _mw
+
+    tc, _ = app_client
+    _mw._auth_failures.clear()
+    _mw._auth_blocked_until.clear()
+    try:
+        last = None
+        for i in range(25):
+            last = tc.post(
+                "/v1/responses",
+                json={"input": "hi"},
+                headers={"Authorization": f"Bearer sk-guess-{i:04d}"},
+            )
+            assert last.status_code in (401, 429), last.status_code
+        assert last.status_code == 429
+        assert last.headers.get("retry-after") == "60"
+    finally:
+        _mw._auth_failures.clear()
+        _mw._auth_blocked_until.clear()

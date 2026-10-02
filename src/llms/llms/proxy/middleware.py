@@ -18,6 +18,53 @@ OPEN_ADMIN_PREFIXES = (
     "/api/admin/logout",
 )
 
+# sk- guessing brake: per-source-IP leaky bucket on auth failures only
+# (successes and open paths never count). N failures inside WINDOW_S
+# earn a COOLDOWN_S 429 instead of the 401, so online enumeration pays
+# one cooldown per guess instead of guessing at request cost. Memory-only
+# (single process, no persistence): worst case on restart is the brake
+# starts empty, never a lockout that survives one.
+_AUTH_FAIL_WINDOW_S = 60.0
+_AUTH_FAIL_THRESHOLD = 20
+_AUTH_FAIL_COOLDOWN_S = 60.0
+_auth_failures: dict[str, list[float]] = {}
+_auth_blocked_until: dict[str, float] = {}
+
+
+def _auth_source(request: Request) -> str:
+    try:
+        client = request.client
+        if client is not None and getattr(client, "host", None):
+            return str(client.host)
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _auth_failed(source: str, now: float) -> bool:
+    """Record an auth failure; True when the source is now rate-limited."""
+    hits = _auth_failures.get(source)
+    if hits is None:
+        hits = _auth_failures[source] = []
+    cutoff = now - _AUTH_FAIL_WINDOW_S
+    while hits and hits[0] < cutoff:
+        hits.pop(0)
+    hits.append(now)
+    if len(hits) >= _AUTH_FAIL_THRESHOLD:
+        _auth_blocked_until[source] = now + _AUTH_FAIL_COOLDOWN_S
+        return True
+    return False
+
+
+def _auth_limited(source: str, now: float) -> bool:
+    until = _auth_blocked_until.get(source, 0.0)
+    if until and now < until:
+        return True
+    if until and now >= until:
+        _auth_blocked_until.pop(source, None)
+        _auth_failures.pop(source, None)
+    return False
+
 
 def is_open_path(path: str) -> bool:
     return path in OPEN_PATHS
@@ -92,6 +139,16 @@ class GateMiddleware(BaseHTTPMiddleware):
 
         # sk- secret keys live on the Authorization header. The ak- affinity
         # prefix (when present) is unauthenticated bucket routing only.
+        import time as _time
+
+        _now = _time.monotonic()
+        _source = _auth_source(request)
+        if _auth_limited(_source, _now):
+            return JSONResponse(
+                status_code=429,
+                content={"error": {"message": "too many auth failures"}},
+                headers={"retry-after": str(int(_AUTH_FAIL_COOLDOWN_S))},
+            )
         try:
             secret_key = resolve_secret_key(request, settings)
         except StoreError as exc:
@@ -103,6 +160,12 @@ class GateMiddleware(BaseHTTPMiddleware):
         else:
             request.app.state.store_error = None
         if secret_key is None:
+            if _auth_failed(_source, _now):
+                return JSONResponse(
+                    status_code=429,
+                    content={"error": {"message": "too many auth failures"}},
+                    headers={"retry-after": str(int(_AUTH_FAIL_COOLDOWN_S))},
+                )
             return JSONResponse(
                 status_code=401,
                 content={"error": {"message": "missing or invalid secret key"}},

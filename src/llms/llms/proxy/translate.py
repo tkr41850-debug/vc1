@@ -168,6 +168,11 @@ def _canonical_tool_choice(choice) -> str | dict | None:
         return "required"
     if kind == "auto":
         return "auto"
+    if kind == "none":
+        # A client tool ban must survive canonicalization verbatim:
+        # falling through to the trailing "auto" would silently invert
+        # the ban into permission to call tools.
+        return "none"
     fn = choice.get("function")
     if isinstance(fn, dict) and fn.get("name"):
         return {"name": fn["name"]}
@@ -539,7 +544,13 @@ def to_zen_chat(req: RequestIR) -> dict:
                 for t in function_tools
             ]
     if req.tool_choice is not None:
-        body["tool_choice"] = req.tool_choice
+        # Chat wire shape only: "auto"/"none"/"required" or function
+        # form. A canonicalized {"name": ...} (messages-shaped pin)
+        # would 400/misread verbatim, so re-wrap by name.
+        choice = req.tool_choice
+        if isinstance(choice, dict) and "name" in choice:
+            choice = {"type": "function", "function": {"name": choice["name"]}}
+        body["tool_choice"] = choice
     params = req.params
     if params.temperature is not None:
         body["temperature"] = params.temperature
@@ -729,6 +740,12 @@ def to_zen_responses(req: RequestIR) -> dict:
         body["top_p"] = req.params.top_p
     if req.params.max_tokens is not None:
         body["max_output_tokens"] = req.params.max_tokens
+    if req.params.stop is not None:
+        # Responses has no stop parameter; without this the stop
+        # sequence silently never reaches upstream (siblings carry it:
+        # chat body["stop"], messages stop_sequences).
+        stop = req.params.stop
+        body["stop"] = [stop] if isinstance(stop, str) else list(stop)
     if req.params.reasoning_effort is not None:
         body["reasoning"] = {"effort": req.params.reasoning_effort}
     if req.params.parallel_tool_calls is not None:
@@ -1220,6 +1237,10 @@ def to_zen_messages(req: RequestIR) -> dict:
             body["tool_choice"] = choice
         elif isinstance(choice, dict) and "name" in choice:
             body["tool_choice"] = {"type": "tool", "name": choice["name"]}
+        elif choice == "none":
+            # Messages has no bare "none": type none is the ban shape.
+            # The trailing else would emit {"type": "auto"} and invert it.
+            body["tool_choice"] = {"type": "none"}
         else:
             body["tool_choice"] = {"type": "auto"}
     params = req.params

@@ -34,6 +34,16 @@ operator_router = APIRouter()
 MAX_EXITS = 32
 
 
+# Provider ids become filesystem path segments (data_dir/warps/<id>,
+# /run/llms-warp-<id>-*, /var/log/llms-warp-<id>-*) and socket names:
+# anything outside alphanumerics + dash/underscore escapes the sandbox
+# (../.. traversal, absolute paths, /run hijack via embedded separators).
+def _valid_provider_id(pid: str) -> bool:
+    import re as _re
+
+    return bool(_re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", pid or ""))
+
+
 def _clamp_exits(exits: int) -> int:
     return max(1, min(MAX_EXITS, int(exits)))
 
@@ -107,6 +117,11 @@ async def create_provider(
 ):
     if not body.id:
         raise HTTPException(status_code=400, detail="id is required")
+    if not _valid_provider_id(body.id):
+        raise HTTPException(
+            status_code=400,
+            detail="id must be 1-64 chars of letters, digits, dash, underscore",
+        )
     if body.kind not in ("noproxy", "warp"):
         raise HTTPException(status_code=400, detail="kind must be noproxy or warp")
     if body.kind == "warp" and (body.exits < 1 or body.exits > MAX_EXITS):

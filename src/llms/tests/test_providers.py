@@ -650,3 +650,19 @@ def test_inflight_changes_push_providers_frame(admin_client):
             gate.set()
 
     _asyncio.run(_scenario())
+
+
+def test_create_provider_rejects_traversal_id(admin_client):
+    """Provider ids are path segments: ../ and / must 400, never mkdir."""
+    tc, _ = admin_client
+    for bad in ("../evil", "..\\evil", "/abs", "a/b", "a..b/../c", ""):
+        r = tc.post(
+            "/api/admin/providers",
+            json={"id": bad, "kind": "warp", "exits": 1, "models": ["gpt-*"]},
+        )
+        assert r.status_code == 400, (bad, r.status_code)
+    r = tc.post(
+        "/api/admin/providers",
+        json={"id": "warp-ok_1", "kind": "warp", "exits": 1, "models": ["gpt-*"]},
+    )
+    assert r.status_code == 201, r.text

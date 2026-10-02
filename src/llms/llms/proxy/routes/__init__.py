@@ -10,7 +10,10 @@ async def healthz(request: Request) -> dict[str, str]:
     body: dict[str, str] = {"status": "ok"}
     store_error = getattr(request.app.state, "store_error", None)
     if store_error:
-        body = {"status": "degraded", "store_error": store_error}
+        # Unauthenticated path: never reflect raw parser text (YAML
+        # errors echo the offending line, which can carry key/config
+        # material). Degraded status is the signal; detail stays in logs.
+        body = {"status": "degraded", "store_error": "key store unavailable"}
     return body
 
 

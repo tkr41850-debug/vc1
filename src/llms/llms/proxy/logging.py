@@ -28,8 +28,15 @@ def redact_headers(headers: dict) -> dict:
     out = {}
     for k, v in headers.items():
         lk = k.lower()
-        if lk == "authorization" and isinstance(v, str) and len(v) > 12:
-            out[k] = v[:12] + "...<redacted>"
+        if lk == "authorization" and isinstance(v, str):
+            # Drop the whole value: even a scheme + few-char prefix
+            # ("Bearer oper…") leaks a known prefix of the operator key
+            # and cuts brute-force entropy for anyone with log access.
+            out[k] = "<redacted>"
+        elif lk == "x-api-key" and isinstance(v, str) and v:
+            # sk- secrets ride here for Anthropic-style clients: a
+            # full-value log line is a credential leak, not telemetry.
+            out[k] = "<redacted>"
         elif lk in {"x-opencode-session", "x-opencode-request"}:
             out[k] = v
         else:
