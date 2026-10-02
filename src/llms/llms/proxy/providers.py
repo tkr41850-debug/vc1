@@ -490,8 +490,13 @@ class ProviderRegistry:
         if egress is not None:
             ready_ports = sorted(w.socks for w in health.exits if w.ready)
             egress.set_num_slots(len(ready_ports))
-            if ready_ports:
-                egress.set_socks_ports(ready_ports)
+            # Ports must follow slots down, not just up: a zero-ready
+            # refresh that keeps the old ports list routes dials at
+            # half-torn-down SOCKS exits (502) instead of failing open.
+            # set_socks_ports([]) makes pick_port return None so the
+            # pool-may-recover branch is the only warp path, and it
+            # re-seeds ports on the next ready snapshot here.
+            egress.set_socks_ports(ready_ports)
         try:
             self.save_warp_status(provider.id, health)
         except OSError:
@@ -557,8 +562,12 @@ def derive_lifecycle(
         alive = pool_alive(registry, provider.id) if registry is not None else False
         if not enabled and (alive or in_flight > 0):
             forced = drain_until > 0 and current >= drain_until and in_flight > 0
+            # Ship remaining-ms, not the absolute monotonic deadline: the
+            # UI renders until_ms/60000 as a countdown, and an absolute
+            # uptime-ms value grows with process age (~93m at 5000s
+            # uptime for a 10m drain) and never counts down.
             return "draining", {
-                "until_ms": max(0, int(drain_until * 1000)),
+                "until_ms": max(0, int((drain_until - current) * 1000)),
                 "forced": bool(forced),
             }
         if enabled and retry > 0:

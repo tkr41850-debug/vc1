@@ -310,10 +310,33 @@ async def delete_provider(
     registry.save(providers)
     # Datadirs stay on disk: Cloudflare rate-limits re-registration, so a
     # same-id re-create reuses them instead of burning registration budget.
-    # Only the live pool (daemons + clients) is dropped.
+    # Everything live is dropped: bump the intent generation so a stale
+    # disable-settle task can never drop the recreated pool, reset the
+    # reused runtime (health/backoff/in-flight/drain would otherwise haunt
+    # the new provider), and drop the cached egress (stale SOCKS ports
+    # would 502 fresh requests until a refresh corrects them).
+    rt = registry.runtime(provider_id)
+    rt.gen += 1
+    rt.retry_until = 0.0
+    rt.retry_reason = ""
+    rt.in_flight = 0
+    rt.drain_until = 0.0
+    rt.boot_epoch = 0.0
+    rt.cycling = False
+    rt.probation = False
+    try:
+        from llms.proxy.providers import ProviderHealth
+
+        rt.health = ProviderHealth()
+    except Exception:
+        pass
     supervisor = getattr(registry, "_supervisor", None)
     if supervisor is not None:
         await supervisor.drop(provider_id)
+    try:
+        await registry.drop_egress(provider_id)
+    except Exception as exc:
+        logger.warning("provider %s egress drop failed: %r", provider_id, exc)
     invalidate_ips(provider_id)
     _sync_slots(request)
     await get_hub(request).publish("providers")
@@ -376,6 +399,14 @@ async def _do_reconnect(request: Request, provider_id: str) -> dict:
         except Exception as exc:
             logger.warning("provider %s reconnect failed: %r", provider_id, exc)
         if rt.gen != gen:
+            # Stale bounce (superseded by a newer intent): the reconnect
+            # above still mutated health/backoff, so publish the trailing
+            # frame — otherwise push-only SSE shows the pre-bounce
+            # snapshot until the next unrelated event.
+            try:
+                await hub.publish("providers")
+            except Exception:
+                pass
             return
         invalidate_ips(provider_id)
         await hub.publish("providers")

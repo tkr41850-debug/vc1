@@ -1241,6 +1241,7 @@ def _maybe_auto_cycle(
         rt.cycling = True
         rt.cycle_hits = 0
         bounce_epoch = rt.retry_epoch
+        bounce_gen = rt.gen
         logger.info(
             "[%s] warp provider %s exit %s (port %s) ratelimited, cycling",
             trace_id,
@@ -1269,39 +1270,58 @@ def _maybe_auto_cycle(
                     inst.idx,
                     exc,
                 )
-            finally:
-                rt.cycling = False
-                rt.cycle_hits = 0
+            rt.cycling = False
+            rt.cycle_hits = 0
+            if rt.gen != bounce_gen:
+                # Superseded mid-bounce (disable/delete): the pool is
+                # gone on purpose. refresh_health would ensure_pool a
+                # brand-new pool for a dead provider and resurrect
+                # daemons for it — skip the refresh, just converge SSE.
+                # (Unconditional clears, not finally: a return in
+                # finally would swallow bounce exceptions.)
+                logger.info(
+                    "[%s] warp provider %s auto-cycle superseded "
+                    "(gen %s -> %s), skipping post-cycle refresh",
+                    trace_id,
+                    provider_id,
+                    bounce_gen,
+                    rt.gen,
+                )
                 try:
-                    await registry.refresh_health(provider, force=True)
-                except Exception as exc:
-                    logger.warning(
-                        "[%s] warp provider %s post-cycle refresh failed: %r",
-                        trace_id,
-                        provider_id,
-                        exc,
-                    )
-                if bounced_ok and rt.retry_epoch == bounce_epoch:
-                    # Fresh circuits: drop the 429 backoff so the provider
-                    # rejoins immediately instead of sitting out max(60s,
-                    # retry-after). Guarded by epoch: a sibling 429 that
-                    # landed mid-bounce bumped the epoch and must survive.
-                    # A still-bad exit keeps its backoff and the cooldown
-                    # gates the next bounce.
-                    rt.retry_until = 0.0
-                    rt.retry_reason = ""
-                    # Bounce-ok is a becoming-ready path: arm probation so
-                    # the next request probes at concurrency 1 (promotion
-                    # happens on first success).
-                    rt.probation = True
-                    logger.info(
-                        "[%s] warp provider %s exit %s backoff cleared",
-                        trace_id,
-                        provider_id,
-                        inst.idx,
-                    )
-                    # Backoff cleared: push the fresh (green) status to SSE.
                     await get_hub(request).publish("providers")
+                except Exception:
+                    pass
+                return
+            try:
+                await registry.refresh_health(provider, force=True)
+            except Exception as exc:
+                logger.warning(
+                    "[%s] warp provider %s post-cycle refresh failed: %r",
+                    trace_id,
+                    provider_id,
+                    exc,
+                )
+            if bounced_ok and rt.retry_epoch == bounce_epoch:
+                # Fresh circuits: drop the 429 backoff so the provider
+                # rejoins immediately instead of sitting out max(60s,
+                # retry-after). Guarded by epoch: a sibling 429 that
+                # landed mid-bounce bumped the epoch and must survive.
+                # A still-bad exit keeps its backoff and the cooldown
+                # gates the next bounce.
+                rt.retry_until = 0.0
+                rt.retry_reason = ""
+                # Bounce-ok is a becoming-ready path: arm probation so
+                # the next request probes at concurrency 1 (promotion
+                # happens on first success).
+                rt.probation = True
+                logger.info(
+                    "[%s] warp provider %s exit %s backoff cleared",
+                    trace_id,
+                    provider_id,
+                    inst.idx,
+                )
+                # Backoff cleared: push the fresh (green) status to SSE.
+                await get_hub(request).publish("providers")
 
         rt.cycle_task = asyncio.create_task(_bounce_and_clear())
     except Exception as exc:

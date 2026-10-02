@@ -40,11 +40,9 @@ function lifecycleDot(p: ProviderEntry): { dot: string; title: string } {
           : "Preparing — boot requested, first health poll pending",
       };
     case "draining": {
-      // until_ms is an absolute monotonic-ms deadline, not a duration:
-      // remaining counts down against the connect-time anchor (first
-      // frame's until_ms + in_flight observed then is the best clock we
-      // have; falls back to raw deadline when no anchor yet).
-      const remainingMs = Math.max(0, (p.drain?.until_ms ?? 0) - Date.now());
+      // until_ms is remaining-ms straight from the backend (the snapshot
+      // ships drain_until - now, not the absolute monotonic deadline).
+      const remainingMs = Math.max(0, p.drain?.until_ms ?? 0);
       const remainingMin = remainingMs / 60000;
       return {
         dot: "🟠",
@@ -102,14 +100,26 @@ function DebugModal({
   }, [provider]);
 
   // Resync the models editor when the incoming provider changes (SSE
-  // push or health refresh) — but never while it has focus, so typing
-  // is never clobbered by a background update.
+  // push or health refresh) — but never while the draft is dirty, so
+  // typing is never clobbered by a background update. Focus-only
+  // guarding lost on Save (focus moves to the button) and on tab-away.
   const modelsRef = useRef<HTMLTextAreaElement | null>(null);
+  // Last server text the editor synced from: resync only fires while
+  // the draft still matches it, so in-progress edits (saved or not)
+  // are never clobbered by a background refresh.
+  const serverModelsRef = useRef<string>(shown.models.join("\n"));
+  const serverModels = shown.models.join("\n");
   useEffect(() => {
-    if (modelsRef.current && document.activeElement === modelsRef.current) return;
-    setModelsText(shown.models.join("\n"));
+    setModelsText((prev) => {
+      const pristine = prev === serverModelsRef.current;
+      serverModelsRef.current = serverModels;
+      if (!pristine) return prev;
+      if (modelsRef.current && document.activeElement === modelsRef.current)
+        return prev;
+      return serverModels;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider.id, shown.models.join("\n")]);
+  }, [provider.id, serverModels]);
 
   const refresh = () => {
     api
@@ -437,15 +447,37 @@ export default function ProvidersTab({
       return;
     }
     const exits = Math.max(1, Math.min(32, parseInt(form.exits, 10) || 1));
+    const models = form.models.split(",").map((m) => m.trim()).filter(Boolean);
+    const id = form.id.trim();
     await run(async () => {
       await api.createProvider({
-        id: form.id.trim(),
+        id,
         label: form.label,
         kind: "warp",
-        models: form.models.split(",").map((m) => m.trim()).filter(Boolean),
+        models,
         enabled: true,
         exits,
       });
+      // Optimistic add: the collection SSE is the source of truth, but
+      // while the stream is down the table would otherwise lie (no row
+      // until reconnect). The next SSE frame merges over this stub.
+      applyOne({
+        id,
+        label: form.label,
+        kind: "warp",
+        models,
+        enabled: true,
+        exits,
+        deletable: true,
+        lifecycle: "preparing",
+        in_flight: 0,
+        drain: null,
+        retry_in: 0,
+        retry_reason: "",
+        cycling: false,
+        cycle_cooldown_remaining: 0,
+        health: { fetched_at: 0, error: "", exits: [] },
+      } as unknown as ProviderEntry);
       setForm({ id: "", label: "", models: "", exits: "1" });
     }, reload);
   };
@@ -469,7 +501,20 @@ export default function ProvidersTab({
 
   const remove = (p: ProviderEntry) => {
     if (!window.confirm(`Delete provider ${p.id}?`)) return;
-    return run(() => api.deleteProvider(p.id), reload);
+    const id = p.id;
+    const backup = providers;
+    // Optimistic remove mirrors the add path: drop the row at once so
+    // a downed stream doesn't leave a deleted row on screen. A failed
+    // DELETE restores the row (reload is a no-op by design).
+    onProviders((prev) => prev.filter((q) => q.id !== id));
+    return run(async () => {
+      try {
+        await api.deleteProvider(id);
+      } catch (e) {
+        onProviders(backup);
+        throw e;
+      }
+    }, reload);
   };
 
   const debugProvider = debugId ? providers.find((p) => p.id === debugId) ?? null : null;

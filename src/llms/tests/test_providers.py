@@ -378,7 +378,10 @@ def test_lifecycle_precedence_matrix():
     r.drain_until = now + 300.0
     lc, drain = derive_lifecycle(p, r, now=now)
     assert lc == "draining"
-    assert drain == {"until_ms": int((now + 300.0) * 1000), "forced": False}
+    # until_ms is remaining-ms (the UI renders it as a countdown), not
+    # the absolute monotonic deadline: 300s out reads ~300000ms here
+    # and converges to 0, independent of process uptime.
+    assert drain == {"until_ms": int(300.0 * 1000), "forced": False}
     # draining beats ratelimited
     r.retry_until = now + 300.0
     assert derive_lifecycle(p, r, now=now)[0] == "draining"
