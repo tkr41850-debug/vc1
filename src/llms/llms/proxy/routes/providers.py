@@ -65,6 +65,17 @@ def _registry(request: Request) -> ProviderRegistry:
 
 
 def _find(registry: ProviderRegistry, provider_id: str) -> Provider:
+    # Every {provider_id:path} route funnels here: validate before any
+    # filesystem/socket use (warps/<id>, /run/llms-warp-<id>-*). Create
+    # enforces the same shape up front; this is the backstop for
+    # update/delete/health/reconnect/ips (admin OAuth) and the sk-authed
+    # operator routes, where a low-privilege key holder could otherwise
+    # inject path separators into daemon/socket namespaces.
+    if not _valid_provider_id(provider_id):
+        raise HTTPException(
+            status_code=400,
+            detail="id must be 1-64 chars of letters, digits, dash, underscore",
+        )
     for p in registry.load():
         if p.id == provider_id:
             return p
@@ -300,6 +311,11 @@ async def delete_provider(
 ):
     if provider_id == "noproxy":
         raise HTTPException(status_code=403, detail="default provider is not deletable")
+    if not _valid_provider_id(provider_id):
+        raise HTTPException(
+            status_code=400,
+            detail="id must be 1-64 chars of letters, digits, dash, underscore",
+        )
     registry = _registry(request)
     try:
         providers = [p for p in registry.load() if p.id != provider_id]

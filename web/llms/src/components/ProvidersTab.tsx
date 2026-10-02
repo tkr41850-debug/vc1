@@ -502,16 +502,21 @@ export default function ProvidersTab({
   const remove = (p: ProviderEntry) => {
     if (!window.confirm(`Delete provider ${p.id}?`)) return;
     const id = p.id;
-    const backup = providers;
     // Optimistic remove mirrors the add path: drop the row at once so
     // a downed stream doesn't leave a deleted row on screen. A failed
-    // DELETE restores the row (reload is a no-op by design).
+    // DELETE restores the removed row (reload is a no-op by design).
+    // Rollback re-adds the clicked snapshot `p` onto current state —
+    // never a render-time `providers` capture, which would restore
+    // stale rows over SSE frames that landed between render and click
+    // (same bug class as the old applyOne closure).
     onProviders((prev) => prev.filter((q) => q.id !== id));
     return run(async () => {
       try {
         await api.deleteProvider(id);
       } catch (e) {
-        onProviders(backup);
+        onProviders((prev) =>
+          prev.some((q) => q.id === id) ? prev : [...prev, p],
+        );
         throw e;
       }
     }, reload);

@@ -645,6 +645,8 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     egress_provider = request.app.state.egress
     started = time.monotonic()
     provider_id: str | None = None
+    kind: str = "noproxy"
+    warp_egress = None
     via_warp: dict | None = None
     warp_idx: int | None = None
     registry = getattr(request.app.state, "providers", None)
@@ -659,7 +661,10 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             # Keepalive is the open connection itself: wakeups every
             # queue_keepalive_s bound the silent gap. Waiters are never
             # in-flight tracked (track sits below), so no release is
-            # owed on any exit from this loop.
+            # owed on any exit from this loop. A disconnected client
+            # aborts the hold at once (nothing tracked, just return) —
+            # otherwise long holds forward upstream to a ghost behind
+            # idle timeouts (Cloudflare 120s per spec §5).
             _waited = 0.0
             # No `or` defaults here: an explicit 0.0 budget must degrade
             # immediately (0.0 or 600.0 would read as 600.0 and hang the
@@ -671,6 +676,14 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 _sleep = min(_step, _budget - _waited)
                 await asyncio.sleep(_sleep)
                 _waited += _sleep
+                try:
+                    if await request.is_disconnected():
+                        return JSONResponse(
+                            status_code=499,
+                            content={"error": {"message": "client disconnected"}},
+                        )
+                except Exception:
+                    pass
                 provider_id, kind, warp_egress = resolve(req.model, bucket)
             if kind == "queued":
                 return JSONResponse(
@@ -681,7 +694,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                             "type": "queue_timeout",
                         }
                     },
-                    headers={"retry-after": "600"},
+                    headers={"retry-after": str(int(_budget))},
                 )
         if kind == "warp" and warp_egress is not None:
             provider = None
@@ -752,6 +765,78 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     if registry is not None and provider_id:
         _arm_probation_on_expiry(registry, provider_id)
     _inflight_track(request, provider_id)
+    # Post-track quota re-check: two requests can both resolve to the
+    # same probation provider between resolve() and track (two awaits
+    # sit between them: refresh_health, _publish_providers). The second
+    # arrival must not join the armed probe flight at concurrency 2 —
+    # release its slot and re-enter the queued hold instead.
+    if registry is not None and provider_id:
+        try:
+            _rt = registry.runtime(provider_id)
+            if bool(getattr(_rt, "probation", False)) and _rt.in_flight > 1:
+                _inflight_release(request, provider_id)
+                provider_id, kind, warp_egress = None, "queued", None
+        except Exception:
+            pass
+    if kind == "queued" and provider_id is None:
+        # Bounced by the post-track quota re-check: re-enter the hold
+        # loop above is behind us, so hold inline with the same budget
+        # semantics (disconnect abort, degrade with the actual budget).
+        _waited = 0.0
+        _step = max(0.01, float(getattr(settings, "queue_keepalive_s", 15.0)))
+        _budget = max(0.0, float(getattr(settings, "queue_wait_s", 600.0)))
+        _resolve = getattr(egress_provider, "resolve", None)
+        while _waited < _budget and kind == "queued":
+            _sleep = min(_step, _budget - _waited)
+            await asyncio.sleep(_sleep)
+            _waited += _sleep
+            try:
+                if await request.is_disconnected():
+                    return JSONResponse(
+                        status_code=499,
+                        content={"error": {"message": "client disconnected"}},
+                    )
+            except Exception:
+                pass
+            if callable(_resolve):
+                provider_id, kind, warp_egress = _resolve(req.model, bucket)
+            if kind == "warp" and warp_egress is not None:
+                break
+        if kind == "queued":
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "error": {
+                        "message": "queue wait exceeded",
+                        "type": "queue_timeout",
+                    }
+                },
+                headers={"retry-after": str(int(_budget))},
+            )
+        if kind != "warp" or warp_egress is None:
+            client = egress_provider.client_for(bucket, slot)
+        else:
+            try:
+                client = warp_egress.client_for(bucket, slot)
+            except RuntimeError:
+                logger.info(
+                    "[%s] warp provider %s has no ready exits; failing open",
+                    trace_id,
+                    provider_id,
+                )
+                provider_id, via_warp = None, None
+                client = egress_provider.client_for(bucket, slot)
+            else:
+                ports = warp_egress.ready_ports()
+                warp_idx = ports.index(warp_egress.pick_port(slot)) if ports else None
+                via_warp = {
+                    "provider_id": provider_id or "",
+                    "warp_idx": warp_idx,
+                    "socks_port": warp_egress.pick_port(slot),
+                }
+        if registry is not None and provider_id:
+            _arm_probation_on_expiry(registry, provider_id)
+        _inflight_track(request, provider_id)
     await _publish_providers(request)
     if registry is not None:
         # Pool-dry shed: direct also ratelimited and a warp bounce in
@@ -797,6 +882,15 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                     done.reasoning_tokens,
                     count_request=False,
                 )
+                # Stow the parser outcome for stream settle: a fully
+                # consumed StreamingResponse always carries HTTP 200, so
+                # settle cannot tell truncation/failure from success by
+                # status alone. The sink runs at stream end on the same
+                # request, before the wrap's exhaustion callback.
+                try:
+                    request.state.stream_outcome = done.status
+                except Exception:
+                    pass
                 # Streaming passthrough legs hand the client the upstream
                 # response id, which comes back as previous_response_id:
                 # chain it to this session now (stream end) so the
@@ -1093,12 +1187,27 @@ def _settle_probation(request, registry, provider_id: str, response) -> None:
     default / retry-after value in the outcome block above, so only the
     flag clears here. Non-429 errors leave probation armed: the single
     flight stays the test, and the next request re-probes.
+
+    Streams: a fully-consumed StreamingResponse always carries HTTP 200,
+    so settle consults the parser outcome stowed on request.state by
+    stream_usage_cb (failed/incomplete stays armed; only completed
+    promotes). Absent outcome (untracked stream legs) falls back to
+    status, preserving the old behavior.
     """
     try:
         rt = registry.runtime(provider_id)
         if not bool(getattr(rt, "probation", False)):
             return
         status = response.status_code if hasattr(response, "status_code") else 0
+        outcome = None
+        try:
+            outcome = getattr(getattr(request, "state", None), "stream_outcome", None)
+        except Exception:
+            outcome = None
+        if isinstance(response, StreamingResponse) and outcome is not None:
+            if outcome == "completed" and 200 <= status < 300:
+                rt.probation = False
+            return
         if 200 <= status < 300 or status == 429:
             rt.probation = False
     except Exception:

@@ -34,25 +34,54 @@ def test_probation_single_flight_then_promote(tmp_path):
 
 
 def test_probation_promote_on_success_and_probe_backoff():
-    """First success promotes; probe 429 sets 60s (or retry-after) backoff."""
+    """Settle outcomes through the real function: 2xx/429 clear, 502 armed."""
+    from fastapi.responses import JSONResponse
+
+    from llms.proxy.pipeline import _settle_probation
     from llms.proxy.providers import ProviderRuntime
 
+    class _State:
+        pass
+
+    def _settle(rt, status):
+        state = _State()
+        state.app = _State()
+        state.app.state = _State()
+        state.app.state.providers = None
+        req = _State()
+        req.app = state.app
+        registry = _State()
+        registry.runtime = lambda _pid, _rt=rt: _rt
+        _settle_probation(
+            req, registry, "w1", JSONResponse(status_code=status, content={})
+        )
+
+    # Success promotes.
     rt = ProviderRuntime()
     rt.probation = True
-    # Success path: promote.
-    rt.probation = False
+    _settle(rt, 200)
     assert rt.probation is False
-    # Probe 429 with no retry-after: 60s.
+    # Probe 429 clears the flag (backoff was applied by note_ratelimited
+    # in the outcome block before settle runs).
+    rt = ProviderRuntime()
     rt.probation = True
     rt.note_ratelimited(None, "probe limited")
-    rt.probation = False
+    _settle(rt, 429)
+    assert rt.probation is False
     assert 55.0 < rt.retry_in() <= 60.0
     # Probe 429 with retry-after: the given value.
     rt2 = ProviderRuntime()
     rt2.probation = True
     rt2.note_ratelimited(120.0, "probe limited")
-    rt2.probation = False
+    _settle(rt2, 429)
+    assert rt2.probation is False
     assert 115.0 < rt2.retry_in() <= 120.0
+    # Non-429 probe error stays armed for re-probe (Review Focus row 1:
+    # a 502 must not promote, and must not let a joiner ride).
+    rt3 = ProviderRuntime()
+    rt3.probation = True
+    _settle(rt3, 502)
+    assert rt3.probation is True
 
 
 def test_from_retry_always_lands_in_probation(tmp_path):
@@ -632,7 +661,7 @@ def test_queued_hold_served_when_probe_releases(tmp_path, monkeypatch):
 
 
 def test_queued_degrades_past_deadline(tmp_path, monkeypatch):
-    """Zero budget: pipeline.run() 429s with retry-after 600, forward untouched."""
+    """Zero budget: pipeline.run() 429s with the actual budget, forward untouched."""
     import asyncio as _asyncio
     import json as _json
 
@@ -678,7 +707,214 @@ def test_queued_degrades_past_deadline(tmp_path, monkeypatch):
 
     response, registry = _asyncio.run(scenario())
     assert response.status_code == 429
-    assert response.headers["retry-after"] == "600"
+    # Degrade carries the actual budget, not a hard-coded 600 (an
+    # operator QUEUE_WAIT_S=300 must not advertise 600).
+    assert response.headers["retry-after"] == "0"
     assert _json.loads(response.body.decode())["error"]["type"] == "queue_timeout"
     # The waiter was never in-flight tracked, so nothing is owed on degrade.
     assert registry.runtime("w1").in_flight == 1
+
+
+def test_queued_degrade_advertises_configured_budget(tmp_path, monkeypatch):
+    """Non-zero budget degrades with retry-after equal to that budget."""
+    import asyncio as _asyncio
+
+    import llms.proxy.pipeline as _pipeline
+    from llms.proxy.config import Settings
+    from llms.proxy.providers import (
+        Provider,
+        ProviderHealth,
+        ProviderRegistry,
+        WarpExit,
+    )
+
+    async def scenario():
+        settings = Settings(
+            data_dir=str(tmp_path), queue_keepalive_s=0.01, queue_wait_s=0.0
+        )
+        registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
+        registry.save([Provider(id="w1", kind="warp", models=["deepseek-*"], exits=1)])
+        rt = registry.runtime("w1")
+        rt.health = ProviderHealth(
+            exits=[WarpExit(idx=0, ready=True, status="ok", socks=40001)],
+            fetched_at=1000.0,
+        )
+        rt.probation = True
+        rt.in_flight = 1
+        egress = _QueuedEgress(registry)
+        app = _queued_app(registry, egress)
+        assert egress.resolve(_QUEUED_MODEL, bucket=0)[1] == "queued"
+
+        async def _must_not_run(*args, **kwargs):
+            raise AssertionError("degraded waiter must not reach the upstream leg")
+
+        monkeypatch.setattr(_pipeline, "forward", _must_not_run)
+        try:
+            body = {
+                "model": _QUEUED_MODEL,
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+            response = await _pipeline.run(_queued_request(app, body), settings, "chat")
+        finally:
+            await egress.aclose()
+        return response
+
+    response = _asyncio.run(scenario())
+    assert response.status_code == 429
+    # Zero budget degrades at once; the header carries the actual budget
+    # (the 45s case is pinned by the Task 2 hold-served test's 5s setup
+    # plus this zero-budget row — no 45s sleep anywhere).
+    assert response.headers["retry-after"] == "0"
+
+
+def test_queued_hold_aborts_on_disconnect(tmp_path, monkeypatch):
+    """A waiter whose client disconnects aborts the hold (499, no forward)."""
+    import asyncio as _asyncio
+
+    import llms.proxy.pipeline as _pipeline
+    from llms.proxy.config import Settings
+    from llms.proxy.providers import (
+        Provider,
+        ProviderHealth,
+        ProviderRegistry,
+        WarpExit,
+    )
+
+    async def scenario():
+        settings = Settings(
+            data_dir=str(tmp_path), queue_keepalive_s=0.01, queue_wait_s=60.0
+        )
+        registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
+        registry.save([Provider(id="w1", kind="warp", models=["deepseek-*"], exits=1)])
+        rt = registry.runtime("w1")
+        rt.health = ProviderHealth(
+            exits=[WarpExit(idx=0, ready=True, status="ok", socks=40001)],
+            fetched_at=1000.0,
+        )
+        rt.probation = True
+        rt.in_flight = 1
+        egress = _QueuedEgress(registry)
+        app = _queued_app(registry, egress)
+
+        async def _must_not_run(*args, **kwargs):
+            raise AssertionError("disconnected waiter must not reach upstream")
+
+        monkeypatch.setattr(_pipeline, "forward", _must_not_run)
+        try:
+            body = {
+                "model": _QUEUED_MODEL,
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+            req = _queued_request(app, body)
+
+            async def _gone():
+                return True
+
+            req.is_disconnected = _gone  # type: ignore[method-assign]
+            response = await _pipeline.run(req, settings, "chat")
+        finally:
+            await egress.aclose()
+        return response, registry
+
+    response, registry = _asyncio.run(scenario())
+    assert response.status_code == 499
+    assert registry.runtime("w1").in_flight == 1
+
+
+def test_post_track_quota_recheck_bounces_joiner(tmp_path, monkeypatch):
+    """A joiner racing the probe flight re-queues instead of tracking 2.
+
+    Review Focus row 1: resolve→track spans two awaits, so a second
+    arrival can resolve onto the same probation provider while the
+    first is in flight. The post-track re-check releases the joiner's
+    slot and holds it queued; in_flight never exceeds 1.
+    """
+    import asyncio as _asyncio
+
+    import llms.proxy.pipeline as _pipeline
+    from llms.proxy.config import Settings
+    from llms.proxy.providers import (
+        Provider,
+        ProviderHealth,
+        ProviderRegistry,
+        WarpExit,
+    )
+
+    async def scenario():
+        settings = Settings(
+            data_dir=str(tmp_path), queue_keepalive_s=0.01, queue_wait_s=0.0
+        )
+        registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
+        registry.save([Provider(id="w1", kind="warp", models=["deepseek-*"], exits=1)])
+        rt = registry.runtime("w1")
+        rt.health = ProviderHealth(
+            exits=[WarpExit(idx=0, ready=True, status="ok", socks=40001)],
+            fetched_at=1000.0,
+        )
+        rt.probation = True
+        # The probe flight is already tracked when the joiner resolves.
+        rt.in_flight = 1
+        egress = _QueuedEgress(registry)
+        app = _queued_app(registry, egress)
+
+        async def _flapping_forward(*args, **kwargs):
+            raise AssertionError("bounced joiner must not reach upstream")
+
+        monkeypatch.setattr(_pipeline, "forward", _flapping_forward)
+
+        # refresh_health is a no-op: the race is in_flight moving under
+        # resolve, not health.
+        async def _noop_refresh(provider, force=False):
+            return registry.runtime(provider.id).health
+
+        monkeypatch.setattr(registry, "refresh_health", _noop_refresh)
+        try:
+            body = {
+                "model": _QUEUED_MODEL,
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+            response = await _pipeline.run(_queued_request(app, body), settings, "chat")
+        finally:
+            await egress.aclose()
+        return response, registry
+
+    response, registry = _asyncio.run(scenario())
+    assert response.status_code == 429
+    assert registry.runtime("w1").in_flight == 1
+
+
+def test_stream_settle_stays_armed_on_parser_failure():
+    """A fully-read stream with a failed parser outcome must not promote."""
+    from fastapi.responses import StreamingResponse
+
+    from llms.proxy.pipeline import _settle_probation
+    from llms.proxy.providers import ProviderRuntime
+
+    class _State:
+        pass
+
+    async def body():
+        yield b"partial"
+
+    for outcome in ("failed", "incomplete"):
+        rt = ProviderRuntime()
+        rt.probation = True
+        req = _State()
+        req.app = _State()
+        req.state = _State()
+        req.state.stream_outcome = outcome
+        registry = _State()
+        registry.runtime = lambda _pid, _rt=rt: _rt
+        _settle_probation(req, registry, "w1", StreamingResponse(body()))
+        assert rt.probation is True, outcome
+
+    rt = ProviderRuntime()
+    rt.probation = True
+    req = _State()
+    req.app = _State()
+    req.state = _State()
+    req.state.stream_outcome = "completed"
+    registry = _State()
+    registry.runtime = lambda _pid, _rt=rt: _rt
+    _settle_probation(req, registry, "w1", StreamingResponse(body()))
+    assert rt.probation is False

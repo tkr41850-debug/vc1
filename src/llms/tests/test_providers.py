@@ -669,3 +669,18 @@ def test_create_provider_rejects_traversal_id(admin_client):
         json={"id": "warp-ok_1", "kind": "warp", "exits": 1, "models": ["gpt-*"]},
     )
     assert r.status_code == 201, r.text
+
+
+def test_provider_id_routes_reject_traversal(admin_client):
+    """Every {provider_id:path} route 400s traversal ids (backstop in _find).
+
+    Note: "/../evil" style paths normalize at the HTTP layer before
+    routing, so the directly reachable shapes are encoded dots and
+    absolute ids — all must 400, never reach the pool.
+    """
+    tc, _ = admin_client
+    for bad in ("%2e%2e%2fevil", "/abs"):
+        assert tc.get(f"/api/admin/providers/{bad}/health").status_code == 400
+        assert tc.post(f"/api/admin/providers/{bad}/reconnect").status_code == 400
+        r = tc.delete(f"/api/admin/providers/{bad}")
+        assert r.status_code == 400, (bad, r.status_code)

@@ -18,17 +18,51 @@ OPEN_ADMIN_PREFIXES = (
     "/api/admin/logout",
 )
 
-# sk- guessing brake: per-source-IP leaky bucket on auth failures only
-# (successes and open paths never count). N failures inside WINDOW_S
-# earn a COOLDOWN_S 429 instead of the 401, so online enumeration pays
-# one cooldown per guess instead of guessing at request cost. Memory-only
-# (single process, no persistence): worst case on restart is the brake
-# starts empty, never a lockout that survives one.
+# sk- guessing brake: per-(source, key-prefix) leaky bucket on auth
+# failures only (successes and open paths never count). N failures
+# inside WINDOW_S earn a COOLDOWN_S 429 instead of the 401, so online
+# enumeration pays one cooldown per guess instead of guessing at request
+# cost. Bucketed by source IP *and* the attempted key's short prefix
+# (first 8 chars: "sk-xxxx…"), so one bad actor behind shared egress
+# cannot 429 legitimate users guessing different keys — only the same
+# (source, prefix) pair trips. Memory-only (single process, no
+# persistence): worst case on restart is the brake starts empty, never
+# a lockout that survives one. Idle buckets are pruned on write so
+# quiescent sources never accumulate.
 _AUTH_FAIL_WINDOW_S = 60.0
 _AUTH_FAIL_THRESHOLD = 20
 _AUTH_FAIL_COOLDOWN_S = 60.0
+_AUTH_KEY_PREFIX_LEN = 8
 _auth_failures: dict[str, list[float]] = {}
 _auth_blocked_until: dict[str, float] = {}
+
+
+def _auth_attempted_prefix(request: Request) -> str:
+    """Short prefix of the presented (invalid) key for brake bucketing.
+
+    Uses the presented value, not the resolved one (resolution failed —
+    that is why we are here). Non-sk values collapse to one bucket; the
+    full secret never enters the key (a dict key is not a log line, but
+    minimal exposure is still the rule).
+    """
+    try:
+        from llms.proxy.auth import presented_secret_key
+
+        presented = presented_secret_key(request) or ""
+    except Exception:
+        presented = ""
+    try:
+        raw = request.headers.get("authorization", "") or request.headers.get(
+            "x-api-key", ""
+        )
+        presented = presented or raw.strip().split()[-1]
+    except Exception:
+        pass
+    return (presented.strip()[:_AUTH_KEY_PREFIX_LEN]) or "none"
+
+
+def _auth_bucket(request: Request, source: str) -> str:
+    return f"{source}\x00{_auth_attempted_prefix(request)}"
 
 
 def _auth_source(request: Request) -> str:
@@ -41,28 +75,35 @@ def _auth_source(request: Request) -> str:
     return "unknown"
 
 
-def _auth_failed(source: str, now: float) -> bool:
-    """Record an auth failure; True when the source is now rate-limited."""
-    hits = _auth_failures.get(source)
+def _auth_failed(bucket: str, now: float) -> bool:
+    """Record an auth failure; True when the bucket is now rate-limited."""
+    hits = _auth_failures.get(bucket)
     if hits is None:
-        hits = _auth_failures[source] = []
+        hits = _auth_failures[bucket] = []
     cutoff = now - _AUTH_FAIL_WINDOW_S
     while hits and hits[0] < cutoff:
         hits.pop(0)
     hits.append(now)
+    # Prune idle buckets on write: a source that went quiet keeps no
+    # residue (bounded memory under a distributed spray).
+    if len(_auth_failures) > 4096:
+        stale = [k for k, v in _auth_failures.items() if not v or v[-1] < cutoff][:1024]
+        for k in stale:
+            _auth_failures.pop(k, None)
+            _auth_blocked_until.pop(k, None)
     if len(hits) >= _AUTH_FAIL_THRESHOLD:
-        _auth_blocked_until[source] = now + _AUTH_FAIL_COOLDOWN_S
+        _auth_blocked_until[bucket] = now + _AUTH_FAIL_COOLDOWN_S
         return True
     return False
 
 
-def _auth_limited(source: str, now: float) -> bool:
-    until = _auth_blocked_until.get(source, 0.0)
+def _auth_limited(bucket: str, now: float) -> bool:
+    until = _auth_blocked_until.get(bucket, 0.0)
     if until and now < until:
         return True
     if until and now >= until:
-        _auth_blocked_until.pop(source, None)
-        _auth_failures.pop(source, None)
+        _auth_blocked_until.pop(bucket, None)
+        _auth_failures.pop(bucket, None)
     return False
 
 
@@ -143,7 +184,8 @@ class GateMiddleware(BaseHTTPMiddleware):
 
         _now = _time.monotonic()
         _source = _auth_source(request)
-        if _auth_limited(_source, _now):
+        _bucket = _auth_bucket(request, _source)
+        if _auth_limited(_bucket, _now):
             return JSONResponse(
                 status_code=429,
                 content={"error": {"message": "too many auth failures"}},
@@ -160,7 +202,7 @@ class GateMiddleware(BaseHTTPMiddleware):
         else:
             request.app.state.store_error = None
         if secret_key is None:
-            if _auth_failed(_source, _now):
+            if _auth_failed(_bucket, _now):
                 return JSONResponse(
                     status_code=429,
                     content={"error": {"message": "too many auth failures"}},

@@ -785,15 +785,43 @@ def test_sk_guessing_earns_cooldown(app_client):
     _mw._auth_blocked_until.clear()
     try:
         last = None
-        for i in range(25):
+        for _ in range(25):
             last = tc.post(
                 "/v1/responses",
                 json={"input": "hi"},
-                headers={"Authorization": f"Bearer sk-guess-{i:04d}"},
+                headers={"Authorization": "Bearer sk-guess-same-prefix-0000"},
             )
             assert last.status_code in (401, 429), last.status_code
         assert last.status_code == 429
         assert last.headers.get("retry-after") == "60"
+    finally:
+        _mw._auth_failures.clear()
+        _mw._auth_blocked_until.clear()
+
+
+def test_sk_brake_scopes_to_key_prefix(app_client):
+    """One bad actor's prefix must not 429 legitimate users' keys."""
+    from llms.proxy import middleware as _mw
+
+    tc, _ = app_client
+    _mw._auth_failures.clear()
+    _mw._auth_blocked_until.clear()
+    try:
+        for _ in range(25):
+            r = tc.post(
+                "/v1/responses",
+                json={"input": "hi"},
+                headers={"Authorization": "Bearer sk-evil-spray-0000"},
+            )
+            assert r.status_code in (401, 429)
+        assert r.status_code == 429
+        # Same source, different key prefix: still a plain 401.
+        legit = tc.post(
+            "/v1/responses",
+            json={"input": "hi"},
+            headers={"Authorization": "Bearer sk-legit-user-key"},
+        )
+        assert legit.status_code == 401
     finally:
         _mw._auth_failures.clear()
         _mw._auth_blocked_until.clear()
