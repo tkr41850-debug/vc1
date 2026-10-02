@@ -651,6 +651,38 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     resolve = getattr(egress_provider, "resolve", None)
     if callable(resolve):
         provider_id, kind, warp_egress = resolve(req.model, bucket)
+        if kind == "queued":
+            # Main-queue hold: warp capacity exists for this model but
+            # every candidate is an at-quota probe. Hold the connection
+            # open and re-resolve until a probe releases (falls through
+            # to the warp block below) or the budget lapses (429).
+            # Keepalive is the open connection itself: wakeups every
+            # queue_keepalive_s bound the silent gap. Waiters are never
+            # in-flight tracked (track sits below), so no release is
+            # owed on any exit from this loop.
+            _waited = 0.0
+            # No `or` defaults here: an explicit 0.0 budget must degrade
+            # immediately (0.0 or 600.0 would read as 600.0 and hang the
+            # waiter for the full budget). Floors only stop busy-spin
+            # (step) and negative budgets.
+            _step = max(0.01, float(getattr(settings, "queue_keepalive_s", 15.0)))
+            _budget = max(0.0, float(getattr(settings, "queue_wait_s", 600.0)))
+            while _waited < _budget and kind == "queued":
+                _sleep = min(_step, _budget - _waited)
+                await asyncio.sleep(_sleep)
+                _waited += _sleep
+                provider_id, kind, warp_egress = resolve(req.model, bucket)
+            if kind == "queued":
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "error": {
+                            "message": "queue wait exceeded",
+                            "type": "queue_timeout",
+                        }
+                    },
+                    headers={"retry-after": "600"},
+                )
         if kind == "warp" and warp_egress is not None:
             provider = None
             if registry is not None:

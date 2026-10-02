@@ -78,6 +78,12 @@ class Settings:
     max_timeout_s: float = field(
         default_factory=lambda: float(os.getenv("MAX_TIMEOUT", "60"))
     )
+    queue_wait_s: float = field(
+        default_factory=lambda: float(os.getenv("QUEUE_WAIT_S", "600"))
+    )
+    queue_keepalive_s: float = field(
+        default_factory=lambda: float(os.getenv("QUEUE_KEEPALIVE_S", "15"))
+    )
     port: int = field(
         default_factory=lambda: int(os.getenv("ZEN_GATEWAY_PORT", "8789"))
     )

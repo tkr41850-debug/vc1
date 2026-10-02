@@ -419,3 +419,266 @@ def test_stream_wrap_disconnect_keeps_probation_armed():
 
     with _tf.TemporaryDirectory() as tmp:
         _asyncio.run(scenario(tmp))
+
+
+def test_queue_signal_when_all_warp_at_quota(tmp_path):
+    """Warp serves the model but every candidate is an at-quota probe: queued."""
+    from llms.proxy.config import Settings
+    from llms.proxy.egress import ProviderEgress
+    from llms.proxy.providers import (
+        Provider,
+        ProviderHealth,
+        ProviderRegistry,
+        WarpExit,
+    )
+
+    settings = Settings(data_dir=str(tmp_path))
+    registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
+    registry.save([Provider(id="w1", kind="warp", models=["gpt-*"], exits=1)])
+    rt = registry.runtime("w1")
+    rt.health = ProviderHealth(
+        exits=[WarpExit(idx=0, ready=True, status="ok", socks=40001)],
+        fetched_at=1000.0,
+    )
+    rt.probation = True
+    rt.in_flight = 1
+    egress = ProviderEgress(None, registry=registry)
+    assert egress.resolve("gpt-5", bucket=0) == (None, "queued", None)
+
+
+def test_queue_failover_to_next_warp_with_space(tmp_path):
+    """Failover: next warp if space; else queue."""
+    from llms.proxy.config import Settings
+    from llms.proxy.egress import ProviderEgress
+    from llms.proxy.providers import (
+        Provider,
+        ProviderHealth,
+        ProviderRegistry,
+        WarpExit,
+    )
+
+    settings = Settings(data_dir=str(tmp_path))
+    registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
+    registry.save(
+        [
+            Provider(id="w1", kind="warp", models=["gpt-*"], exits=1),
+            Provider(id="w2", kind="warp", models=["gpt-*"], exits=1),
+        ]
+    )
+    for pid in ("w1", "w2"):
+        registry.runtime(pid).health = ProviderHealth(
+            exits=[WarpExit(idx=0, ready=True, status="ok", socks=40001)],
+            fetched_at=1000.0,
+        )
+    registry.runtime("w1").probation = True
+    registry.runtime("w1").in_flight = 1
+    egress = ProviderEgress(None, registry=registry)
+    picks = {egress.resolve("gpt-5", bucket=b)[0] for b in range(20)}
+    assert picks == {"w2"}
+
+
+def test_no_warp_serving_model_fails_open_not_queued(tmp_path):
+    """No warp serves the model: fail open to noproxy, never queue."""
+    from llms.proxy.config import Settings
+    from llms.proxy.egress import ProviderEgress
+    from llms.proxy.providers import Provider, ProviderRegistry
+
+    settings = Settings(data_dir=str(tmp_path))
+    registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
+    registry.save([Provider(id="w1", kind="warp", models=["other-*"], exits=1)])
+    egress = ProviderEgress(None, registry=registry)
+    _provider_id, kind, _warp = egress.resolve("gpt-5", bucket=0)
+    assert kind == "noproxy"
+
+
+_QUEUED_MODEL = "deepseek-v4-flash-free"  # chat ingress == chat egress
+
+
+def _queued_request(app, body: dict):
+    """Minimal Starlette Request over a stub app (test_inflight_leaks pattern)."""
+    import json as _json
+
+    from starlette.requests import Request
+
+    body_bytes = _json.dumps(body).encode()
+
+    async def receive():
+        return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/chat/completions",
+        "query_string": b"",
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+        "app": app,
+    }
+    return Request(scope, receive)
+
+
+class _QueuedEgress:
+    """Routes through the real ProviderEgress; stub client for fail-open."""
+
+    def __init__(self, registry):
+        import httpx as _httpx
+
+        from llms.proxy.egress import ProviderEgress
+
+        self._real = ProviderEgress(None, registry=registry)
+        self._direct = _httpx.AsyncClient()
+
+    def resolve(self, model, bucket=0):
+        return self._real.resolve(model, bucket)
+
+    def client_for(self, bucket, slot):
+        return self._direct
+
+    def sync_bucket_slots(self, table):
+        return self._real.sync_bucket_slots(table)
+
+    async def aclose(self):
+        await self._direct.aclose()
+        for egress in self._real._warp.values():
+            await egress.aclose()
+
+
+def _queued_app(registry, egress):
+    from types import SimpleNamespace as _NS
+
+    from llms.proxy.buckets import BucketTable
+
+    return _NS(
+        state=_NS(
+            bucket_table=BucketTable(),
+            egress=egress,
+            providers=registry,
+            usage=None,
+            sessions=None,
+            dedup=None,
+            admin_hub=None,
+        )
+    )
+
+
+def test_queued_hold_served_when_probe_releases(tmp_path, monkeypatch):
+    """A queued waiter rides pipeline.run() through to warp once the probe clears."""
+    import asyncio as _asyncio
+
+    import llms.proxy.pipeline as _pipeline
+    from llms.proxy.config import Settings
+    from llms.proxy.providers import (
+        Provider,
+        ProviderHealth,
+        ProviderRegistry,
+        WarpExit,
+    )
+
+    async def scenario():
+        settings = Settings(
+            data_dir=str(tmp_path), queue_keepalive_s=15.0, queue_wait_s=5.0
+        )
+        registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
+        registry.save([Provider(id="w1", kind="warp", models=["deepseek-*"], exits=1)])
+        rt = registry.runtime("w1")
+        rt.health = ProviderHealth(
+            exits=[WarpExit(idx=0, ready=True, status="ok", socks=40001)],
+            fetched_at=1000.0,
+        )
+        rt.probation = True
+        rt.in_flight = 1
+        egress = _QueuedEgress(registry)
+        app = _queued_app(registry, egress)
+        assert egress.resolve(_QUEUED_MODEL, bucket=0)[1] == "queued"
+
+        async def _noop_refresh(provider):
+            # Pool-less hermetic stand-in: health is already seeded above.
+            return registry.runtime(provider.id).health
+
+        monkeypatch.setattr(registry, "refresh_health", _noop_refresh)
+
+        async def _ok_forward(*args, **kwargs):
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(
+                status_code=200, content={"id": "chatcmpl-q", "choices": []}
+            )
+
+        monkeypatch.setattr(_pipeline, "forward", _ok_forward)
+
+        async def release_soon():
+            await _asyncio.sleep(0.05)
+            registry.runtime("w1").in_flight = 0
+
+        releaser = _asyncio.ensure_future(release_soon())
+        try:
+            body = {
+                "model": _QUEUED_MODEL,
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+            response = await _pipeline.run(_queued_request(app, body), settings, "chat")
+        finally:
+            await releaser
+            await egress.aclose()
+        return response, registry
+
+    response, registry = _asyncio.run(scenario())
+    assert response.status_code == 200
+    assert registry.runtime("w1").in_flight == 0
+    assert registry.runtime("w1").probation is False
+
+
+def test_queued_degrades_past_deadline(tmp_path, monkeypatch):
+    """Zero budget: pipeline.run() 429s with retry-after 600, forward untouched."""
+    import asyncio as _asyncio
+    import json as _json
+
+    import llms.proxy.pipeline as _pipeline
+    from llms.proxy.config import Settings
+    from llms.proxy.providers import (
+        Provider,
+        ProviderHealth,
+        ProviderRegistry,
+        WarpExit,
+    )
+
+    async def scenario():
+        settings = Settings(
+            data_dir=str(tmp_path), queue_keepalive_s=0.5, queue_wait_s=0.0
+        )
+        registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
+        registry.save([Provider(id="w1", kind="warp", models=["deepseek-*"], exits=1)])
+        rt = registry.runtime("w1")
+        rt.health = ProviderHealth(
+            exits=[WarpExit(idx=0, ready=True, status="ok", socks=40001)],
+            fetched_at=1000.0,
+        )
+        rt.probation = True
+        rt.in_flight = 1
+        egress = _QueuedEgress(registry)
+        app = _queued_app(registry, egress)
+        assert egress.resolve(_QUEUED_MODEL, bucket=0)[1] == "queued"
+
+        async def _must_not_run(*args, **kwargs):
+            raise AssertionError("degraded waiter must not reach the upstream leg")
+
+        monkeypatch.setattr(_pipeline, "forward", _must_not_run)
+        try:
+            body = {
+                "model": _QUEUED_MODEL,
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+            response = await _pipeline.run(_queued_request(app, body), settings, "chat")
+        finally:
+            await egress.aclose()
+        return response, registry
+
+    response, registry = _asyncio.run(scenario())
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "600"
+    assert _json.loads(response.body.decode())["error"]["type"] == "queue_timeout"
+    # The waiter was never in-flight tracked, so nothing is owed on degrade.
+    assert registry.runtime("w1").in_flight == 1

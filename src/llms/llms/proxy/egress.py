@@ -167,6 +167,7 @@ class ProviderEgress:
         # (in_flight >= 1) are skipped so the single probe flight is never
         # joined — overflow waits on the main queue instead.
         ring = []
+        quota_blocked = False
         for p in providers:
             if not p.enabled or p.kind != "warp" or not p.serves(model):
                 continue
@@ -174,6 +175,11 @@ class ProviderEgress:
             if rt.cycling:
                 continue
             if bool(getattr(rt, "probation", False)) and rt.in_flight >= 1:
+                # At-quota probe: capacity exists but is fully probed.
+                # Failover (next warp with space) falls out of the ring
+                # below; when nothing has space the queued signal tells
+                # the pipeline to hold instead of failing open to direct.
+                quota_blocked = True
                 continue
             try:
                 from llms.proxy.providers import derive_lifecycle
@@ -215,6 +221,12 @@ class ProviderEgress:
                     if saved is not None:
                         egress.set_num_slots(saved)
                 return p.id, "warp", egress
+        # Queue-behind: warp capacity exists for this model but every
+        # candidate is an at-quota probe — hold on the main queue instead
+        # of failing open to direct (fail-open is preserved when no warp
+        # serves the model at all: quota_blocked stays False below).
+        if quota_blocked:
+            return None, "queued", None
         for p in providers:
             if p.enabled and p.serves(model):
                 return p.id, "noproxy", None
