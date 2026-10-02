@@ -20,7 +20,7 @@ from llms.proxy.providers import RecentRequest
 from llms.proxy.rate_limit import classify
 from llms.proxy.router import ENDPOINT_PATH, pick, resolve_alias
 from llms.proxy.stream_translate import (
-    PARSERS,
+    SseFramer,
     new_chat_id,
     new_msg_id,
     new_resp_id,
@@ -76,6 +76,27 @@ def _stream_for(ingress: str, egress: str, model: str):
     return (ingress, egress, model)
 
 
+def _deltas_with_pending(parser, lines):
+    """Yield parser deltas plus pending-call flush (fold path only).
+
+    Lives here (not in the parser module) so the incremental emitter
+    path can never call it by accident: only _synthesize_for drains
+    pending calls, after the whole stream parsed.
+    """
+    framer = SseFramer()
+    for line in lines:
+        for payload in framer.feed(line):
+            yield from parser.feed_payload(payload)
+    for payload in framer.finish():
+        yield from parser.feed_payload(payload)
+    flush = getattr(parser, "flush_pending_calls", None)
+    if callable(flush):
+        yield from flush()
+    done = parser.finish()
+    if done is not None:
+        yield done
+
+
 def _synthesize_for(ingress: str, egress: str, model: str):
     """Fold upstream SSE into one downstream JSON body (responses leg only).
 
@@ -87,9 +108,11 @@ def _synthesize_for(ingress: str, egress: str, model: str):
         return None
 
     def run(lines, trace_id):
-        return EMITTERS[ingress](
-            deltas_to_response_ir(PARSERS[egress](lines), model), model
-        )
+        from llms.proxy.stream_translate import STREAM_PARSERS
+
+        parser = STREAM_PARSERS[egress]()
+        deltas = list(_deltas_with_pending(parser, lines))
+        return EMITTERS[ingress](deltas_to_response_ir(iter(deltas), model), model)
 
     return run
 

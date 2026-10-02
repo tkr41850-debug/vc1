@@ -250,6 +250,7 @@ class ResponsesParser:
 
     def __init__(self) -> None:
         self.names: dict[str, str] = {}
+        self.pending_calls: dict[str, str] = {}
         self.saw_calls = False
         self._done = False
 
@@ -269,6 +270,12 @@ class ResponsesParser:
             item = event["item"]
             if item.get("type") == "function_call":
                 self.names[item.get("id", "")] = item.get("name", "")
+                # Remember the announced call: if no args delta ever
+                # arrives (empty-args call), the fold still needs a
+                # ToolArgsDelta to emit the function_call downstream —
+                # otherwise the client never sees the call and loops
+                # re-issuing the turn (live codex session finding).
+                self.pending_calls[item.get("id", "")] = item.get("name", "")
             return deltas
         if kind == "response.output_text.delta":
             deltas.append(TextDelta(event.get("delta", "")))
@@ -279,6 +286,7 @@ class ResponsesParser:
         if kind == "response.function_call_arguments.delta":
             item_id = event.get("item_id", "")
             self.saw_calls = True
+            self.pending_calls.pop(item_id, None)
             deltas.append(
                 ToolArgsDelta(
                     item_id, self.names.get(item_id, ""), event.get("delta", "")
@@ -328,6 +336,23 @@ class ResponsesParser:
         return StreamDone(
             "incomplete", has_tool_calls=self.saw_calls or bool(self.names)
         )
+
+    def flush_pending_calls(self) -> list:
+        """ToolArgsDelta for announced-but-argless calls (fold path only).
+
+        Live Zen announces empty-args calls via output_item.added with
+        no following args delta. The incremental emitter path
+        (translate_streaming) must NOT call this — it would double-emit
+        when the args delta arrives later. Only the fold path
+        (deltas_to_response_ir, which consumes the whole stream at
+        once) drains pending calls after parsing completes.
+        """
+        out = []
+        for call_id, name in self.pending_calls.items():
+            out.append(ToolArgsDelta(call_id, name, ""))
+        self.pending_calls.clear()
+        self.saw_calls = self.saw_calls or bool(out)
+        return out
 
 
 def parse_responses_sse(

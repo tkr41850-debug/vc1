@@ -485,3 +485,55 @@ def test_unknown_failure_reason_surfaces_error_on_messages_response():
     }
     out = convert_response("chat", "messages", payload, "m")
     assert out["stop_reason"] == "error"
+
+
+def test_synthesize_fold_preserves_function_calls():
+    """Folded SSE tool calls survive to downstream output (not just usage).
+
+    Regression: the synthesize fold dropped ToolArgsDelta names when the
+    output_item.added arrived without a preceding args delta, so a
+    non-streaming downstream saw output:[] and clients (codex) looped
+    re-issuing the same call. Live Zen sends output_item.added with the
+    name; the fold must carry it.
+    """
+    from llms.proxy.stream_translate import PARSERS
+    from llms.proxy.translate import ir_messages_to_responses_output
+    from llms.proxy.translate_response import deltas_to_response_ir
+
+    lines = [
+        'data: {"type": "response.output_item.added", "item": {"id": "c1", "type": "function_call", "name": "write"}}',
+        "",
+        'data: {"type": "response.function_call_arguments.delta", "item_id": "c1", "delta": "{}"}',
+        "",
+        'data: {"type": "response.completed", "response": {"status": "completed"}}',
+        "",
+    ]
+    deltas = list(PARSERS["responses"](lines))
+    ir = deltas_to_response_ir(iter(deltas), "m")
+    out = ir_messages_to_responses_output(ir.messages)
+    calls = [i for i in out if i.get("type") == "function_call"]
+    assert len(calls) == 1, out
+    assert calls[0]["name"] == "write"
+    assert calls[0]["call_id"] == "c1"
+
+
+def test_synthesize_fold_name_only_added_still_emits_call():
+    """output_item.added carrying the name must emit a call even with no args delta."""
+    from llms.proxy.pipeline import _deltas_with_pending
+    from llms.proxy.stream_translate import STREAM_PARSERS
+    from llms.proxy.translate import ir_messages_to_responses_output
+    from llms.proxy.translate_response import deltas_to_response_ir
+
+    lines = [
+        'data: {"type": "response.output_item.added", "item": {"id": "c9", "type": "function_call", "name": "shell"}}',
+        "",
+        'data: {"type": "response.completed", "response": {"status": "completed"}}',
+        "",
+    ]
+    parser = STREAM_PARSERS["responses"]()
+    deltas = list(_deltas_with_pending(parser, lines))
+    ir = deltas_to_response_ir(iter(deltas), "m")
+    out = ir_messages_to_responses_output(ir.messages)
+    calls = [i for i in out if i.get("type") == "function_call"]
+    assert len(calls) == 1, out
+    assert calls[0]["name"] == "shell"
