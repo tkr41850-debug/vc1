@@ -46,8 +46,8 @@ REQUEST_FIXTURE = """    const opencodeProjectID = input.model.providerID.starts
 """
 
 TAGS_FIXTURE = (
-    '[{"name": "v2.0.12"}, {"name": "v2.0.9"}, {"name": "v1.18.32"},'
-    ' {"name": "not-a-version"}]'
+    '[{"name": "v2.0.22"}, {"name": "v2.0.12"}, {"name": "v2.0.9"},'
+    ' {"name": "v1.18.32"}, {"name": "not-a-version"}]'
 )
 
 
@@ -82,7 +82,7 @@ def test_parse_expected_detects_request_header():
 
 
 def test_list_v2_versions_descending():
-    assert fp.list_v2_versions(TAGS_FIXTURE) == ["v2.0.12", "v2.0.9"]
+    assert fp.list_v2_versions(TAGS_FIXTURE) == ["v2.0.22", "v2.0.12", "v2.0.9"]
 
 
 def test_mint_probe_session_shape():
@@ -112,13 +112,16 @@ def test_probe_version_accepted_status(monkeypatch):
     assert fp.probe_version_accepted("9.9.99", "title") is False
 
 
-def test_apply_version_bumps_newer_only(tmp_path):
+def test_apply_version_bumps_newer_only(tmp_path, monkeypatch):
     proxy = tmp_path / "llms" / "proxy"
     proxy.mkdir(parents=True)
     (proxy / "config.py").write_text(
         'x = os.getenv("ZEN_GATEWAY_OPENCODE_VERSION", "2.0.12")\n'
     )
     (proxy / "zen_fingerprint.py").write_text('"ua_version": "2.0.12"\n')
+    # Isolate from the live snapshot: the newer-only guard reads the
+    # module baseline, so pin it to the tmp files' version.
+    monkeypatch.setitem(fp.EXPECTED, "ua_version", "2.0.12")
     fp.apply_version("2.0.16", root=tmp_path)
     assert '"2.0.16"' in (proxy / "config.py").read_text()
     assert '"2.0.16"' in (proxy / "zen_fingerprint.py").read_text()
@@ -140,7 +143,9 @@ def test_run_refresh_pins_newest_accepted(tmp_path, monkeypatch):
     (proxy / "zen_fingerprint.py").write_text('"ua_version": "2.0.12"\n')
     import llms.proxy.zen_fingerprint as _fp
 
-    monkeypatch.setattr(_fp, "EXPECTED", dict(fp.EXPECTED))
+    baseline = dict(fp.EXPECTED)
+    baseline["ua_version"] = "2.0.12"
+    monkeypatch.setattr(_fp, "EXPECTED", baseline)
     tags = '[{"name": "v2.0.16"}, {"name": "v2.0.15"}, {"name": "v2.0.12"}]'
     monkeypatch.setattr(_fp, "fetch_sources", lambda *a, **k: _sources(tags=tags))
     monkeypatch.setattr(_fp, "probe_version_accepted", lambda v, *a, **k: v == "2.0.15")

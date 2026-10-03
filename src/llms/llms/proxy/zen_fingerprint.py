@@ -42,9 +42,10 @@ logger = logging.getLogger("zen_proxy")
 from llms.proxy.zen_prompts import TITLE_PREFIX
 
 EXPECTED = {
-    # ua_version must be a version Zen currently ACCEPTS (allowlist lags
-    # releases: 2.0.16 exists yet 403s). Only bump after a live probe 200s.
-    "ua_version": "2.0.12",
+    # ua_version must be a version Zen currently ACCEPTS (newest is not
+    # automatically safe — the allowlist lags releases. Only bump after
+    # a live probe 200s.
+    "ua_version": "2.0.22",
     "ua_channel": "latest",
     "required_headers": (
         "authorization",
