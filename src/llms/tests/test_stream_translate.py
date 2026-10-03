@@ -655,10 +655,7 @@ def test_streaming_fold_first_turn_overflow_passes_through():
             # fold's heartbeat wait hits the already-passed deadline
             # after the first frame; the remainder must still arrive
             # via the tap half from the same iterator.
-            yield (
-                b'data: {"type":"response.output_text.delta",'
-                b'"delta":"slow-hi"}\n\n'
-            )
+            yield (b'data: {"type":"response.output_text.delta","delta":"slow-hi"}\n\n')
             await _asyncio.sleep(0.05)
             yield (
                 b'data: {"type":"response.output_text.delta",'

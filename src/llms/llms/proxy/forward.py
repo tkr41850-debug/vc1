@@ -415,11 +415,18 @@ async def fold_and_steer_streaming(
             lines = await _collect(follow_resp, collect_deadline)
         except _FoldOverflow:
             # Re-request overflow: clean verdict unknown — fail closed
-            # rather than emit an unjudged turn.
+            # rather than emit an unjudged turn. The unconsumed body
+            # holds its pooled connection, so close it (same guard as the
+            # sibling branches) — _collect deliberately left it open for
+            # the first-turn handover, which does not apply here.
             logger.warning(
                 "[%s] streaming steer re-request overflow; failing closed",
                 trace_id,
             )
+            try:
+                await follow_resp.aclose()
+            except Exception:
+                pass
             lines = []
             _steer_failed = True
             break
