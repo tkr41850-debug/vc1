@@ -1214,6 +1214,11 @@ def test_streaming_steer_rerequest_error_signals_not_replays(tmp_path):
     assert "call_shell9" not in r.text
     assert '"type": "error"' in r.text or '"type":"error"' in r.text
     assert len(calls) == 2
-    # Stream settle records the turn in recents with the incomplete
-    # outcome as its error (fully-consumed body is still HTTP 200, so
-    # the parser outcome is the only failure signal).
+    # Fail-closed billing: sniffing the emptied lines yields an incomplete
+    # StreamDone with no tokens, recorded with count_request=False — the
+    # dead turn is never billed. The stowed stream_outcome keeps the
+    # provider from promoting on a steered-then-failed turn and records
+    # the recents error.
+    usage = tc.app.state.usage.snapshot()["keys"][TEST_SECRET]
+    assert usage["input_tokens"] == 0
+    assert usage["output_tokens"] == 0

@@ -631,13 +631,16 @@ def test_streaming_fold_steers_undeclared_call(tmp_path):
 
 
 def test_streaming_fold_first_turn_overflow_passes_through():
-    """First-turn collect past the budget: tap passthrough, no steer.
+    """First-turn collect past the budget: prefix replay + tap remainder.
 
     A slow upstream whose body never completes inside STREAM_TIMEOUT_S
-    cannot be judged, so the fold must not decide at all — the turn
-    streams through the legacy tap path byte-identical (pings flow,
-    usage still taps). Exercises _collect's deadline via monkeypatched
-    STREAM_TIMEOUT_S=0 so the very first heartbeat wait overflows.
+    cannot be judged, so the fold must not decide at all — the buffered
+    prefix replays verbatim, then the tap drains the SAME live iterator
+    for the remainder (httpx forbids re-iterating the body, so the
+    iterator hands over; usage covers prefix + remainder, billed once).
+    Exercises _collect's deadline via monkeypatched STREAM_TIMEOUT_S=0
+    so the very first heartbeat wait overflows. The generator must drain
+    fully here: an early break would mask a broken tap half.
     """
     import asyncio as _asyncio
 
@@ -648,20 +651,30 @@ def test_streaming_fold_first_turn_overflow_passes_through():
 
     async def handler(request):
         async def slow_body():
-            # Never completes fast enough: one frame, then silence past
-            # any budget. aiter_lines yields the frame; the fold's
-            # heartbeat wait then hits the already-passed deadline.
+            # One frame, then a late second frame past any budget: the
+            # fold's heartbeat wait hits the already-passed deadline
+            # after the first frame; the remainder must still arrive
+            # via the tap half from the same iterator.
             yield (
                 b'data: {"type":"response.output_text.delta",'
                 b'"delta":"slow-hi"}\n\n'
             )
-            await _asyncio.sleep(30)
+            await _asyncio.sleep(0.05)
+            yield (
+                b'data: {"type":"response.output_text.delta",'
+                b'"delta":"slow-lo"}\n\n'
+                b'data: {"type":"response.completed","response":{"id":"r9",'
+                b'"status":"completed","usage":{"input_tokens":2,'
+                b'"output_tokens":3}}}\n\n'
+            )
 
         return _httpx.Response(
             200,
             content=slow_body(),
             headers={"content-type": "text/event-stream"},
         )
+
+    seen: list = []
 
     async def scenario():
         client = _httpx.AsyncClient(transport=_httpx.MockTransport(handler))
@@ -676,10 +689,9 @@ def test_streaming_fold_first_turn_overflow_passes_through():
             outbound={"model": "m", "input": []},
             trace_id="t9",
             client_names={"exec_command"},
+            usage_sink=seen.append,
         ):
             out.append(chunk)
-            if sum(len(c) for c in out) > 64:
-                break
         return b"".join(out).decode()
 
     old_timeout = _forward_mod.STREAM_TIMEOUT_S
@@ -692,3 +704,9 @@ def test_streaming_fold_first_turn_overflow_passes_through():
         _forward_mod.STREAM_TIMEOUT_S = old_timeout
         _forward_mod.STREAM_HEARTBEAT_S = old_beat
     assert "slow-hi" in raw
+    # Remainder arrived through the tap half from the same iterator.
+    assert "slow-lo" in raw
+    # Single usage record covering prefix + remainder, billed once.
+    assert len(seen) == 1
+    assert seen[0].input_tokens == 2
+    assert seen[0].output_tokens == 3

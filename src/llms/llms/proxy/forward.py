@@ -179,20 +179,37 @@ async def fold_and_steer_streaming(
     latency) and line-ending normalization.
     """
 
+    class _FoldOverflow(Exception):
+        """First-turn collect past the budget; carries the buffered prefix.
+
+        Raised (never returned) so the prefix travels on the exception,
+        not shared mutable state — concurrent folds each carry their own.
+        Carries the still-pending line read (`pending_read`): the upstream
+        body stays open and exactly one consumer ever pulls the iterator
+        (concurrent anext() on one async generator raises), so the
+        fallback awaits the in-flight read, then keeps pulling the same
+        iterator for the remainder.
+        """
+
+        def __init__(self, prefix: list[str], iterator, pending_read):
+            super().__init__("streaming fold budget exhausted")
+            self.prefix = prefix
+            self.iterator = iterator
+            self.pending_read = pending_read
+
     async def _collect(
         resp: httpx.Response, deadline: float | None = None
-    ) -> list[str] | None:
-        """Buffer one upstream body to lines; None on budget overflow.
+    ) -> list[str]:
+        """Buffer one upstream body to lines; raises _FoldOverflow past budget.
 
         Heartbeat pings flow while collecting. When `deadline`
-        (loop-time seconds) passes before the body completes, the body
-        closes and None returns; the consumed prefix stays in
-        `_collect.prefix` for the caller to replay verbatim before its
-        fallback (tap passthrough for the first turn, fail-closed for a
-        steer re-request whose verdict is unknown).
+        (loop-time seconds) passes before the body completes, the live
+        line iterator, the still-pending read, and the consumed prefix
+        raise to the caller: the first-turn fallback replays the prefix
+        verbatim then keeps the tap draining the same iterator (a steer
+        re-request, whose verdict is unknown, fails closed instead).
         """
         prefix: list[str] = []
-        _collect.prefix = prefix  # type: ignore[attr-defined]
         it = resp.aiter_lines()
         read_task: asyncio.Task | None = None
         try:
@@ -210,11 +227,7 @@ async def fold_and_steer_streaming(
                         except RuntimeError:
                             now = deadline
                         if now >= deadline:
-                            try:
-                                await resp.aclose()
-                            except Exception:
-                                pass
-                            return None
+                            raise _FoldOverflow(prefix, it, read_task)
                     continue
                 line = read_task.result()
                 read_task = None
@@ -229,18 +242,21 @@ async def fold_and_steer_streaming(
                 if is_cost_frame(raw):
                     continue
                 prefix.append(line)
+        except _FoldOverflow:
+            # Handing the live iterator to the fallback: its pending read
+            # stays un-cancelled (cancelling it would strand the generator
+            # mid-yield). Any other exception cancels the read above.
+            raise
         except BaseException:
             if read_task is not None and not read_task.done():
                 read_task.cancel()
             raise
-        finally:
+        else:
             try:
                 await resp.aclose()
             except Exception:
                 pass
         return prefix
-
-    _collect.prefix = []  # type: ignore[attr-defined]
 
     def _replay(lines: list[str]) -> list[bytes]:
         # Verbatim replay of the final turn's own bytes: no emitter
@@ -263,25 +279,31 @@ async def fold_and_steer_streaming(
         )
     except RuntimeError:
         collect_deadline = None
-    collected = await _collect(upstream, collect_deadline)
-    if collected is None:
+    try:
+        lines = await _collect(upstream, collect_deadline)
+    except _FoldOverflow as over:
         # First-turn overflow: verdict unknown, so no steer decision is
-        # possible — but the consumed prefix is already buffered and the
-        # upstream body is spent, so replay the buffered prefix verbatim
-        # and keep the tap draining the remainder (legacy framing for
-        # both halves; the tap still owns the usage record).
+        # possible — replay the buffered prefix verbatim, then keep the
+        # tap draining the SAME live iterator (plus its pending read) for
+        # the remainder. The tap's usage record covers prefix +
+        # remainder, so nothing is double-billed or unbilled.
         logger.warning(
             "[%s] streaming fold budget exhausted; passing through",
             trace_id,
         )
-        prefix = _replay(list(_collect.prefix))  # type: ignore[attr-defined]
-        tapped = await tap_stream_usage(upstream, "responses", usage_sink=usage_sink)
-        for chunk in prefix:
+        tapped = await tap_stream_usage(
+            upstream,
+            "responses",
+            usage_sink=usage_sink,
+            seen_prefix=over.prefix,
+            line_iter=over.iterator,
+            pending_read=over.pending_read,
+        )
+        for chunk in _replay(over.prefix):
             yield chunk
         async for chunk in tapped:
             yield chunk
         return
-    lines = collected
     lowered = (
         {n.lower() for n in client_names if isinstance(n, str)}
         if client_names is not None
@@ -389,8 +411,9 @@ async def fold_and_steer_streaming(
                 lines = []
                 _steer_failed = True
                 break
-        recollected = await _collect(follow_resp, collect_deadline)
-        if recollected is None:
+        try:
+            lines = await _collect(follow_resp, collect_deadline)
+        except _FoldOverflow:
             # Re-request overflow: clean verdict unknown — fail closed
             # rather than emit an unjudged turn.
             logger.warning(
@@ -400,7 +423,6 @@ async def fold_and_steer_streaming(
             lines = []
             _steer_failed = True
             break
-        lines = recollected
     if _steer_failed:
         chunks = [_slow_error_frame(502, "steer re-request failed")]
     else:
@@ -445,11 +467,24 @@ class TappedStream:
     connection quiet past the tunnel idle timeout.
     """
 
-    def __init__(self, upstream: httpx.Response, ingress: str, usage_sink=None):
+    def __init__(
+        self,
+        upstream: httpx.Response,
+        ingress: str,
+        usage_sink=None,
+        seen_prefix: list[str] | None = None,
+        line_iter=None,
+        pending_read=None,
+    ):
         self._upstream = upstream
         self._ingress = ingress
         self._sink = usage_sink
-        self._seen: list[str] = []
+        self._seen: list[str] = list(seen_prefix) if seen_prefix else []
+        # Fold-overflow fallback hands over its live line iterator plus
+        # the still-pending read, so the remainder forwards from the same
+        # stream (no re-iteration) with exactly one iterator consumer.
+        self._line_iter = line_iter
+        self._pending_read = pending_read
         self._buf = bytearray()
 
     def __aiter__(self):
@@ -494,6 +529,41 @@ class TappedStream:
     async def _gen(self):
         read_task: asyncio.Task | None = None
         try:
+            if self._line_iter is not None:
+                # Fold-overflow fallback: the remainder forwards from the
+                # same live line iterator the fold was consuming (httpx
+                # forbids re-iterating the body). The fold's still-pending
+                # read resolves first — exactly one consumer ever pulls
+                # the iterator (concurrent anext() raises). Tap-identical
+                # framing per line; the usage record covers prefix +
+                # remainder.
+                it = self._line_iter
+                read_task = self._pending_read
+                self._pending_read = None
+                while True:
+                    if read_task is None:
+                        read_task = asyncio.create_task(anext(it, _END))
+                    done, _ = await asyncio.wait(
+                        {read_task}, timeout=STREAM_HEARTBEAT_S
+                    )
+                    if not done:
+                        yield b": ping\n\n"
+                        self._seen.append(": ping")
+                        continue
+                    line = read_task.result()
+                    read_task = None
+                    if line is _END:
+                        break
+                    if not line:
+                        yield b": ping\n\n"
+                        self._seen.append(": ping")
+                        continue
+                    raw = line.encode() if isinstance(line, str) else line
+                    if is_cost_frame(raw):
+                        continue
+                    self._seen.append(line)
+                    yield raw + b"\n"
+                return
             # Small chunks so a terminal usage frame split across TCP
             # segments still reassembles before the stream ends. (Default
             # chunking can deliver >100KB at once; the reassembly below
@@ -552,9 +622,23 @@ class TappedStream:
             logger.debug("stream usage sink failed: %s", exc)
 
 
-async def tap_stream_usage(upstream: httpx.Response, ingress: str, usage_sink=None):
+async def tap_stream_usage(
+    upstream: httpx.Response,
+    ingress: str,
+    usage_sink=None,
+    seen_prefix: list[str] | None = None,
+    line_iter=None,
+    pending_read=None,
+):
     """Build a TappedStream for passthrough responses (see class docs)."""
-    return TappedStream(upstream, ingress, usage_sink)
+    return TappedStream(
+        upstream,
+        ingress,
+        usage_sink,
+        seen_prefix=seen_prefix,
+        line_iter=line_iter,
+        pending_read=pending_read,
+    )
 
 
 def _stream_response_id(ingress: str, seen: list[str]) -> str | None:
