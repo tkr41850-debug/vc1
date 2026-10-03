@@ -920,3 +920,300 @@ def test_streaming_steer_folds_undeclared_call_end_to_end(tmp_path):
     ]
     assert outputs and outputs[0]["call_id"] == "call_shell1"
     assert "exec_command" in outputs[0]["output"]
+
+
+def _mixed_turn_sse() -> bytes:
+    """One upstream body: declared exec_command + undeclared shell calls."""
+    return (
+        b'data: {"type":"response.output_item.added","output_index":0,'
+        b'"item":{"id":"call_exec9","type":"function_call","name":"exec_command",'
+        b'"arguments":"{}","call_id":"call_exec9","status":"in_progress"}}\n\n'
+        b'data: {"type":"response.function_call_arguments.delta",'
+        b'"output_index":0,"item_id":"call_exec9",'
+        b'"delta":"{\\"cmd\\":\\"echo kept\\"}"}\n\n'
+        b'data: {"type":"response.output_item.added","output_index":1,'
+        b'"item":{"id":"call_shell9","type":"function_call","name":"shell",'
+        b'"arguments":"{}","call_id":"call_shell9","status":"in_progress"}}\n\n'
+        b'data: {"type":"response.function_call_arguments.delta",'
+        b'"output_index":1,"item_id":"call_shell9",'
+        b'"delta":"{\\"command\\":\\"echo dropped\\"}"}\n\n'
+        b'data: {"type":"response.completed",'
+        b'"response":{"id":"resp_mixed1","status":"completed",'
+        b'"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+    )
+
+
+def _clean_turn_sse() -> bytes:
+    """Upstream clean turn answering after the redirect (no tool calls)."""
+    return (
+        b'data: {"type":"response.output_text.delta","delta":"answered"}\n\n'
+        b'data: {"type":"response.completed",'
+        b'"response":{"id":"resp_mixed2","status":"completed",'
+        b'"usage":{"input_tokens":9,"output_tokens":3,"total_tokens":12}}}\n\n'
+    )
+
+
+def test_streaming_steer_mixed_turn_replaces_whole_dead_turn(tmp_path):
+    """Mixed declared+undeclared turn: whole-turn replacement, like synthesize.
+
+    The dead turn (even its declared exec_command frame) never emits;
+    only the re-requested clean turn replays downstream, while the dead
+    turn's calls — declared and undeclared alike — stay upstream as
+    input history (the follow-up carries function_call_output for the
+    undeclared call and the declared call is present for the model to
+    re-issue). This matches _steer_genuine_calls whole-response
+    replacement on the synthesize path: the model re-issues whatever
+    declared call it still needs in the clean turn (observed live).
+    """
+    import httpx
+
+    from tests.conftest import TEST_HEADERS, TEST_SECRET, build_app_client
+    from tests.conftest import make_settings as _make_settings
+
+    calls: list = []
+
+    async def handler(request):
+        import json as _json
+
+        calls.append(_json.loads(request.content.decode()))
+        body = _mixed_turn_sse() if len(calls) == 1 else _clean_turn_sse()
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    with build_app_client(
+        _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "run echo",
+                "stream": True,
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "exec_command",
+                        "description": "run",
+                        "parameters": {"type": "object"},
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    # Dead turn suppressed wholesale: neither call frame replays.
+    assert "call_shell9" not in r.text
+    assert "call_exec9" not in r.text
+    assert "answered" in r.text
+    assert len(calls) == 2
+    followup = calls[1]
+    outputs = [
+        i
+        for i in followup["input"]
+        if isinstance(i, dict) and i.get("type") == "function_call_output"
+    ]
+    assert [o["call_id"] for o in outputs] == ["call_shell9"]
+    # Usage attributes the final turn only (single billing).
+    usage = tc.app.state.usage.snapshot()["keys"][TEST_SECRET]
+    assert usage["input_tokens"] == 9
+    assert usage["output_tokens"] == 3
+
+
+def test_streaming_fold_case_variant_declared_name_passes(tmp_path):
+    """Fold path honors the case-insensitive contract: client "Read" owns
+    upstream "read" — no steer follow-up (exactly 1 upstream call)."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_read1", "read", '{"path":"notes.txt"}'),
+        _text_sse("unreached"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "read notes",
+                "stream": True,
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "Read",
+                        "description": "mine",
+                        "parameters": {},
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    assert "call_read1" in r.text
+
+
+def test_streaming_fold_genuine_client_passes_through(tmp_path):
+    """Genuine opencode legs never fold-steer: even an undeclared-name
+    call streams verbatim with exactly 1 upstream call (no shaping,
+    no steer)."""
+    import httpx
+
+    from tests.conftest import TEST_SECRET, build_app_client
+    from tests.conftest import make_settings as _make_settings
+
+    calls: list = []
+
+    async def handler(request):
+        import json as _json
+
+        calls.append(_json.loads(request.content.decode()))
+        return httpx.Response(
+            200,
+            content=_tool_call_sse("call_shell1", "shell", '{"command":"x"}'),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    genuine_headers = {
+        "Authorization": f"Bearer {TEST_SECRET}",
+        "User-Agent": "opencode/2.0.22/cli",
+        "x-opencode-client": "cli",
+    }
+    with build_app_client(
+        _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "run x",
+                "stream": True,
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "exec_command",
+                        "description": "run",
+                        "parameters": {"type": "object"},
+                    },
+                ],
+            },
+            headers=genuine_headers,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    assert "call_shell1" in r.text
+
+
+def test_streaming_steer_reports_chained_response_id(tmp_path):
+    """Fold usage carries the replayed turn's upstream response id.
+
+    streaming_steer_folds path must mirror TappedStream._record: the
+    session tracker learns chain:<upstream-id> so the follow-up turn
+    reuses the session and the prompt cache stays warm.
+    """
+    import httpx
+
+    from tests.conftest import TEST_HEADERS, TEST_SECRET, build_app_client
+    from tests.conftest import make_settings as _make_settings
+
+    async def handler(request):
+        body = _clean_turn_sse().replace(b"resp_mixed2", b"resp_chain7")
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    with build_app_client(
+        _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "say hi",
+                "stream": True,
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "exec_command",
+                        "description": "run",
+                        "parameters": {"type": "object"},
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert "resp_chain7" in r.text
+    assert tc.app.state.sessions.lookup(TEST_SECRET, "chain:resp_chain7") is not None
+
+
+def test_streaming_steer_rerequest_error_signals_not_replays(tmp_path):
+    """Steer re-request 500: downstream gets an error frame, not the dead turn.
+
+    Replaying the violating turn on steer failure would emit exactly the
+    undeclared-call bytes the feature exists to suppress; fail closed
+    with a terminal SSE error frame (slow_send_stream precedent) while
+    the usage sink records the dead turn as incomplete.
+    """
+    import httpx
+
+    from tests.conftest import TEST_HEADERS, TEST_SECRET, build_app_client
+    from tests.conftest import make_settings as _make_settings
+
+    calls: list = []
+
+    async def handler(request):
+        import json as _json
+
+        calls.append(_json.loads(request.content.decode()))
+        if len(calls) == 1:
+            return httpx.Response(
+                200,
+                content=_mixed_turn_sse(),
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx.Response(500, content=b"upstream blew up")
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    with build_app_client(
+        _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "run echo",
+                "stream": True,
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "exec_command",
+                        "description": "run",
+                        "parameters": {"type": "object"},
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert "call_shell9" not in r.text
+    assert '"type": "error"' in r.text or '"type":"error"' in r.text
+    assert len(calls) == 2
+    # Stream settle records the turn in recents with the incomplete
+    # outcome as its error (fully-consumed body is still HTTP 200, so
+    # the parser outcome is the only failure signal).

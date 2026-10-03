@@ -148,7 +148,6 @@ async def fold_and_steer_streaming(
     headers: dict,
     outbound: dict,
     trace_id: str,
-    model: str,
     client_names: set[str] | None,
     usage_sink=None,
 ):
@@ -156,25 +155,44 @@ async def fold_and_steer_streaming(
 
     True-steer twin of the synthesize path for streaming downstream:
     the first upstream body buffers to lines (heartbeat pings flow
-    while collecting, bounded by STREAM_TIMEOUT_S with passthrough
-    fallback on overflow); the fold detects model calls naming tools
-    the client never declared (case-insensitive, declared passes);
-    on hit the redirect + re-request loop runs upstream (same
-    contract as _steer_genuine_calls: STEER_MAX_ITERS, final-turn-only
-    usage); only the final clean turn replays downstream — as its own
-    verbatim bytes (never re-framed through an emitter), so the client
-    sees exactly what it would have seen had the model behaved: same
-    response id, same call ids, same frame fields. The dead turn never
-    emits downstream but stays upstream as input history — no context
-    lost. Without undeclared calls (or without client_names) the first
-    turn's bytes replay untouched: zero behavior change for the 99%
-    case. Replay framing matches TappedStream (empty lines as ping
-    comments, cost frames dropped) so folded and passthrough legs look
-    identical on the wire.
+    while collecting, bounded by the STREAM_TIMEOUT_S collect budget);
+    the fold detects model calls naming tools the client never declared
+    (case-insensitive, declared passes); on hit the redirect +
+    re-request loop runs upstream (same contract as _steer_genuine_calls:
+    STEER_MAX_ITERS, final-turn-only usage); only the final clean turn
+    replays downstream — as its own verbatim bytes (never re-framed
+    through an emitter), so the client sees exactly what it would have
+    seen had the model behaved: same response id, same call ids, same
+    frame fields. A turn with mixed declared + undeclared calls is
+    replaced wholesale (synthesize-path semantics): the declared frames
+    never replay, but the dead turn stays upstream as input history and
+    the model re-issues whatever declared call it still needs in the
+    clean turn (observed live). Without undeclared calls (or without
+    client_names) the first turn's bytes replay untouched: zero behavior
+    change for the 99% case. Steer failure (re-request error or
+    exhausted budget) fails closed with a terminal SSE error frame —
+    never the violating turn. Usage attributes the final turn only;
+    the replayed turn's upstream response id chains the session like
+    TappedStream. Replay framing matches TappedStream (empty lines as
+    ping comments, cost frames dropped) so folded and passthrough legs
+    look identical on the wire modulo timing (TTFB becomes full-turn
+    latency) and line-ending normalization.
     """
 
-    async def _collect(resp: httpx.Response) -> list[str]:
-        lines: list[str] = []
+    async def _collect(
+        resp: httpx.Response, deadline: float | None = None
+    ) -> list[str] | None:
+        """Buffer one upstream body to lines; None on budget overflow.
+
+        Heartbeat pings flow while collecting. When `deadline`
+        (loop-time seconds) passes before the body completes, the body
+        closes and None returns; the consumed prefix stays in
+        `_collect.prefix` for the caller to replay verbatim before its
+        fallback (tap passthrough for the first turn, fail-closed for a
+        steer re-request whose verdict is unknown).
+        """
+        prefix: list[str] = []
+        _collect.prefix = prefix  # type: ignore[attr-defined]
         it = resp.aiter_lines()
         read_task: asyncio.Task | None = None
         try:
@@ -185,7 +203,18 @@ async def fold_and_steer_streaming(
                     {read_task}, timeout=STREAM_HEARTBEAT_S
                 )
                 if not done_wait:
-                    lines.append(": ping")
+                    prefix.append(": ping")
+                    if deadline is not None:
+                        try:
+                            now = asyncio.get_running_loop().time()
+                        except RuntimeError:
+                            now = deadline
+                        if now >= deadline:
+                            try:
+                                await resp.aclose()
+                            except Exception:
+                                pass
+                            return None
                     continue
                 line = read_task.result()
                 read_task = None
@@ -194,12 +223,12 @@ async def fold_and_steer_streaming(
                 if not line:
                     # Tap-identical framing: blank separators replay as
                     # ping comments (see TappedStream._emit_chunk).
-                    lines.append(": ping")
+                    prefix.append(": ping")
                     continue
                 raw = line.encode() if isinstance(line, str) else line
                 if is_cost_frame(raw):
                     continue
-                lines.append(line)
+                prefix.append(line)
         except BaseException:
             if read_task is not None and not read_task.done():
                 read_task.cancel()
@@ -209,7 +238,9 @@ async def fold_and_steer_streaming(
                 await resp.aclose()
             except Exception:
                 pass
-        return lines
+        return prefix
+
+    _collect.prefix = []  # type: ignore[attr-defined]
 
     def _replay(lines: list[str]) -> list[bytes]:
         # Verbatim replay of the final turn's own bytes: no emitter
@@ -226,7 +257,31 @@ async def fold_and_steer_streaming(
             out.append(raw + b"\n")
         return out
 
-    lines = await _collect(upstream)
+    try:
+        collect_deadline: float | None = (
+            asyncio.get_running_loop().time() + STREAM_TIMEOUT_S
+        )
+    except RuntimeError:
+        collect_deadline = None
+    collected = await _collect(upstream, collect_deadline)
+    if collected is None:
+        # First-turn overflow: verdict unknown, so no steer decision is
+        # possible — but the consumed prefix is already buffered and the
+        # upstream body is spent, so replay the buffered prefix verbatim
+        # and keep the tap draining the remainder (legacy framing for
+        # both halves; the tap still owns the usage record).
+        logger.warning(
+            "[%s] streaming fold budget exhausted; passing through",
+            trace_id,
+        )
+        prefix = _replay(list(_collect.prefix))  # type: ignore[attr-defined]
+        tapped = await tap_stream_usage(upstream, "responses", usage_sink=usage_sink)
+        for chunk in prefix:
+            yield chunk
+        async for chunk in tapped:
+            yield chunk
+        return
+    lines = collected
     lowered = (
         {n.lower() for n in client_names if isinstance(n, str)}
         if client_names is not None
@@ -239,6 +294,7 @@ async def fold_and_steer_streaming(
         max_iters = int(_MAX)
     except Exception:
         pass
+    _steer_failed = False
     for _ in range(max_iters):
         calls = fold_stream_calls(lines, "responses") if lowered is not None else []
         steer = [
@@ -259,7 +315,7 @@ async def fold_and_steer_streaming(
         )
         followups: list = []
         for call in steer:
-            call_id = str(call.get("call_id") or "")
+            call_id = str(call.get("call_id") or call.get("id") or "")
             followups.append(
                 {
                     "type": "function_call",
@@ -297,10 +353,15 @@ async def fold_and_steer_streaming(
             follow_resp = await client.send(req, stream=True)
         except httpx.HTTPError as exc:
             logger.error("[%s] steer re-request failed: %s", trace_id, exc)
+            # Fail closed: never replay a turn known to carry undeclared
+            # calls. Emit a terminal error frame (slow_send_stream
+            # precedent) while the dead turn stays upstream as history.
+            lines = []
+            _steer_failed = True
             break
         if follow_resp.status_code >= 400:
             logger.warning(
-                "[%s] steer re-request upstream status=%s; replaying dead turn",
+                "[%s] steer re-request upstream status=%s; failing closed",
                 trace_id,
                 follow_resp.status_code,
             )
@@ -308,12 +369,56 @@ async def fold_and_steer_streaming(
                 await follow_resp.aclose()
             except Exception:
                 pass
+            lines = []
+            _steer_failed = True
             break
-        lines = await _collect(follow_resp)
-    chunks = _replay(lines)
+        if collect_deadline is not None:
+            try:
+                over = asyncio.get_running_loop().time() >= collect_deadline
+            except RuntimeError:
+                over = False
+            if over:
+                logger.warning(
+                    "[%s] streaming steer budget exhausted; failing closed",
+                    trace_id,
+                )
+                try:
+                    await follow_resp.aclose()
+                except Exception:
+                    pass
+                lines = []
+                _steer_failed = True
+                break
+        recollected = await _collect(follow_resp, collect_deadline)
+        if recollected is None:
+            # Re-request overflow: clean verdict unknown — fail closed
+            # rather than emit an unjudged turn.
+            logger.warning(
+                "[%s] streaming steer re-request overflow; failing closed",
+                trace_id,
+            )
+            lines = []
+            _steer_failed = True
+            break
+        lines = recollected
+    if _steer_failed:
+        chunks = [_slow_error_frame(502, "steer re-request failed")]
+    else:
+        chunks = _replay(lines)
     if usage_sink is not None:
         try:
-            usage_sink(sniff_stream_usage(lines, "responses"))
+            from dataclasses import replace as _replace
+
+            from llms.proxy.ir import StreamDone as _StreamDone
+
+            done = sniff_stream_usage(lines, "responses")
+            if _steer_failed and isinstance(done, _StreamDone):
+                done = _replace(done, status="incomplete")
+            elif isinstance(done, _StreamDone) and done.response_id is None:
+                rid = _stream_response_id("responses", lines)
+                if rid:
+                    done = _replace(done, response_id=rid)
+            usage_sink(done)
         except Exception as exc:
             logger.debug("fold-path usage sink failed: %s", exc)
     for chunk in chunks:
@@ -771,7 +876,6 @@ async def forward(
                         headers=headers,
                         outbound=dict(body),
                         trace_id=trace_id,
-                        model=model,
                         client_names=client_names,
                         usage_sink=stream_usage_sink,
                     ),
@@ -808,7 +912,6 @@ async def forward(
                     headers=headers,
                     outbound=dict(body),
                     trace_id=trace_id,
-                    model=body.get("model", ""),
                     client_names=client_names,
                     usage_sink=stream_usage_sink,
                 ),

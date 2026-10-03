@@ -618,7 +618,6 @@ def test_streaming_fold_steers_undeclared_call(tmp_path):
             headers={},
             outbound={"model": "m", "input": []},
             trace_id="t1",
-            model="m",
             client_names={"exec_command"},
         ):
             out.append(chunk)
@@ -629,3 +628,67 @@ def test_streaming_fold_steers_undeclared_call(tmp_path):
     assert '"name": "shell"' not in raw
     assert "done" in raw
     assert len(seen) == 2
+
+
+def test_streaming_fold_first_turn_overflow_passes_through():
+    """First-turn collect past the budget: tap passthrough, no steer.
+
+    A slow upstream whose body never completes inside STREAM_TIMEOUT_S
+    cannot be judged, so the fold must not decide at all — the turn
+    streams through the legacy tap path byte-identical (pings flow,
+    usage still taps). Exercises _collect's deadline via monkeypatched
+    STREAM_TIMEOUT_S=0 so the very first heartbeat wait overflows.
+    """
+    import asyncio as _asyncio
+
+    import httpx as _httpx
+
+    import llms.proxy.forward as _forward_mod
+    from llms.proxy import forward as _forward
+
+    async def handler(request):
+        async def slow_body():
+            # Never completes fast enough: one frame, then silence past
+            # any budget. aiter_lines yields the frame; the fold's
+            # heartbeat wait then hits the already-passed deadline.
+            yield (
+                b'data: {"type":"response.output_text.delta",'
+                b'"delta":"slow-hi"}\n\n'
+            )
+            await _asyncio.sleep(30)
+
+        return _httpx.Response(
+            200,
+            content=slow_body(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def scenario():
+        client = _httpx.AsyncClient(transport=_httpx.MockTransport(handler))
+        req = client.build_request("POST", "http://x", json={"model": "m"})
+        upstream = await client.send(req, stream=True)
+        out = []
+        async for chunk in _forward.fold_and_steer_streaming(
+            upstream,
+            client=client,
+            url="http://x",
+            headers={},
+            outbound={"model": "m", "input": []},
+            trace_id="t9",
+            client_names={"exec_command"},
+        ):
+            out.append(chunk)
+            if sum(len(c) for c in out) > 64:
+                break
+        return b"".join(out).decode()
+
+    old_timeout = _forward_mod.STREAM_TIMEOUT_S
+    old_beat = _forward_mod.STREAM_HEARTBEAT_S
+    _forward_mod.STREAM_TIMEOUT_S = 0
+    _forward_mod.STREAM_HEARTBEAT_S = 0.01
+    try:
+        raw = _asyncio.run(scenario())
+    finally:
+        _forward_mod.STREAM_TIMEOUT_S = old_timeout
+        _forward_mod.STREAM_HEARTBEAT_S = old_beat
+    assert "slow-hi" in raw
