@@ -1103,6 +1103,203 @@ def test_owned_name_missing_key_steers_synthesize(tmp_path):
     assert outputs and "Shell" in outputs[0]["output"]
 
 
+def _empty_args_tool_call_sse(call_id: str, name: str) -> bytes:
+    """Upstream SSE emitting a function_call whose wire arguments are "".
+
+    Fires the followup-coercion branch on both steer paths: the steer
+    followup must replay valid JSON ("{}"), never raw "", upstream.
+    """
+    return _tool_call_sse(call_id, name, "")
+
+
+def test_streaming_empty_args_steer_coerces_to_empty_object(tmp_path):
+    """Streaming: upstream call with "" args steers; the followup replays
+    "{}" (not raw "") so the upstream validator never 400s."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _empty_args_tool_call_sse("call_shell1", "shell"),
+        _text_sse("done"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "run echo",
+                "stream": True,
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "Shell",
+                        "description": "mine",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"cmd": {"type": "string"}},
+                            "required": ["cmd"],
+                        },
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 2
+    echoed = [
+        i
+        for i in calls[1]["input"]
+        if isinstance(i, dict) and i.get("type") == "function_call"
+    ]
+    assert echoed
+    assert all(item["arguments"] == "{}" for item in echoed)
+
+
+def test_synthesize_empty_args_steer_coerces_to_empty_object(tmp_path):
+    """Non-streaming mirror: "" args steer; followup replays "{}"."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _empty_args_tool_call_sse("call_shell1", "shell"),
+        _text_sse("done"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "run echo",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "Shell",
+                        "description": "mine",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"cmd": {"type": "string"}},
+                            "required": ["cmd"],
+                        },
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 2
+    echoed = [
+        i
+        for i in calls[1]["input"]
+        if isinstance(i, dict) and i.get("type") == "function_call"
+    ]
+    assert echoed
+    assert all(item["arguments"] == "{}" for item in echoed)
+
+
+def test_genuine_nonstreaming_valid_turn_never_steers(tmp_path):
+    """Genuine opencode, valid call, non-streaming: exactly 1 upstream
+    call — no redirect round-trip, no redirect text (fidelity)."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_read1", "read", '{"path":"/tmp/x"}'),
+        _text_sse("unreached"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "instructions": "You are opencode.",
+                "input": "hi",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "read",
+                        "description": "d",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                ],
+            },
+            headers=dict(
+                TEST_HEADERS,
+                **{
+                    "User-Agent": "opencode/latest/2.0.12/cli",
+                    "x-opencode-client": "cli",
+                    "x-opencode-project": "global",
+                    "x-opencode-session": "ses_abcdef1234567890abcdefghij12",
+                },
+            ),
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    # Genuine path: no notice appended, valid call passes verbatim.
+    assert "'read'" not in calls[0].get("instructions", "")
+    returned = [
+        i for i in r.json().get("output", []) if i.get("type") == "function_call"
+    ]
+    assert len(returned) == 1
+    assert returned[0]["name"] == "read"
+
+
+def test_deferred_only_tools_notice_lists_them_e2e(app_client):
+    """Request carrying only `additional_tools` items: the outbound notice
+    (in instructions) lists the dissolved deferred tool."""
+    tc, seen = app_client
+    r = tc.post(
+        "/v1/responses",
+        json={
+            "model": "muse-spark-1.3-contributor-free",
+            "instructions": "Be brief.",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}],
+                },
+                {
+                    "type": "additional_tools",
+                    "id": "at_1",
+                    "role": "developer",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "deferred_exec",
+                            "description": "run it",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"cmd": {"type": "string"}},
+                                "required": ["cmd"],
+                            },
+                        }
+                    ],
+                },
+            ],
+        },
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 200
+    # No additional_tools item rides upstream (Zen rejects the shape)...
+    assert not [
+        i
+        for i in seen["json"].get("input", [])
+        if isinstance(i, dict) and i.get("type") == "additional_tools"
+    ]
+    # ...but the dissolved tool is in tools and named in the notice.
+    names = [
+        t.get("name")
+        for t in seen["json"].get("tools", [])
+        if isinstance(t, dict) and t.get("name")
+    ]
+    assert "deferred_exec" in names
+    assert "'deferred_exec'" in seen["json"]["instructions"]
+
+
 def _mixed_turn_sse() -> bytes:
     """One upstream body: declared exec_command + undeclared shell calls."""
     return (

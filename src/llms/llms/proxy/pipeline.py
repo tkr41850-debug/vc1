@@ -724,7 +724,20 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     requested = req.model
     req = with_model(req, resolve_alias(req.model, settings.model_aliases))
     egress = pick(req.model, ingress)
-    outbound = TO[egress](req)
+    genuine = is_genuine_opencode(request.headers)
+    # Client tool notice (model-facing collision handling): only run()
+    # knows genuine-vs-anonymous, so it computes the notice — but the
+    # instructions-append itself lives in to_zen_responses (single
+    # implementation, exercised by its unit tests). Genuine keeps exact
+    # fidelity: no notice computed, kwarg stays "".
+    notice = ""
+    if egress == "responses" and not settings.zen_api_key and not genuine:
+        notice = build_tool_notice(req.tools, GENUINE_TOOL_NAMES)
+    outbound = (
+        to_zen_responses(req, tool_notice=notice)
+        if egress == "responses"
+        else TO[egress](req)
+    )
     affinity = getattr(request.state, "affinity", None)
     secret_key = getattr(request.state, "secret_key", None)
     # Upstream session: per-conversation simulation on the responses leg
@@ -764,20 +777,14 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         outbound["prompt_cache_key"] = session_id
         # Anonymous free tier matches the genuine tool set (bisected
         # live: full set + any client extras passes; bare/renamed
-        # sets 403). The client tool notice (model-facing collision
-        # handling) appends after client instructions here — the only
-        # caller that knows genuine-vs-anonymous, so genuine keeps exact
-        # fidelity (passthrough, no notice). Keyed operators likewise.
-        # req.tools already includes deferred `additional_tools` names
-        # (dissolved in from_responses), so the notice covers the full set.
+        # sets 403). Genuine keeps exact fidelity (passthrough, no
+        # notice); keyed operators likewise. The client tool notice
+        # (model-facing collision handling, appended after client
+        # instructions by to_zen_responses) is computed above from the
+        # full set — req.tools already includes deferred
+        # `additional_tools` names (dissolved in from_responses).
         if not settings.zen_api_key and not genuine:
             _with_genuine_tools(outbound)
-            notice = build_tool_notice(req.tools, GENUINE_TOOL_NAMES)
-            if notice:
-                if outbound.get("instructions"):
-                    outbound["instructions"] = f"{outbound['instructions']}\n\n{notice}"
-                else:
-                    outbound["instructions"] = notice
     elif egress == "chat" and not settings.zen_api_key and not genuine:
         _ensure_chat_system(outbound)
     bucket = bucket_for(
@@ -1123,7 +1130,8 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         if synthesize is not None and egress == "responses":
             # Steer any call the client cannot execute (undeclared, or
             # owned-but-invalid args) back: with client tools list them,
-            # otherwise demand a direct answer.
+            # otherwise demand a direct answer. Genuine opencode keeps
+            # exact fidelity — no convert, no re-serialize (see run()).
             _response, _ = await _steer_genuine_calls(
                 _response,
                 client=client,
@@ -1133,7 +1141,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 synthesize=synthesize,
                 trace_id=trace_id,
                 client_names=_client_names,
-                client_tools=req.tools,
+                client_tools=() if genuine else req.tools,
             )
         return _response
 

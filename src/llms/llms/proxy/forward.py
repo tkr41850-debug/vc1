@@ -356,11 +356,13 @@ async def fold_and_steer_streaming(
                 for i, line in enumerate(lines):
                     # Rename only the function_call name field for this
                     # call's frames (matched by call id in the same line).
+                    # Same frame grammar as SseFramer: "data:" with or
+                    # without the space.
                     cid = call.get("call_id", "")
                     if cid and cid in line and f'"name":"{target}"' not in line:
-                        stripped = line[6:] if line.startswith("data: ") else None
-                        if stripped is None:
+                        if not line.startswith("data:"):
                             continue
+                        stripped = line[len("data:") :].strip()
                         try:
                             payload = _json.loads(stripped)
                         except Exception as exc:

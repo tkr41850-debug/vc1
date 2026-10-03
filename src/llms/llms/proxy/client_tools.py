@@ -10,7 +10,10 @@ from llms.proxy.ir import ToolDef
 def owned_tool_names(tools: tuple[ToolDef, ...]) -> dict[str, str]:
     owned: dict[str, str] = {}
     for t in tools:
-        if t.name and t.name.lower() not in owned:
+        # Last declaration wins (matches the defs map in _classify_calls
+        # callers): casing convert and required-keys validation agree on
+        # which duplicate the client meant.
+        if t.name:
             owned[t.name.lower()] = t.name
     return owned
 
