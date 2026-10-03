@@ -223,29 +223,63 @@ def test_genuine_calls_in_never_steers_client_named_calls():
     def resp(*output):
         return JSONResponse(status_code=200, content={"output": list(output)})
 
+    def split(r, names, tools=()):
+        passed, steer = _genuine_calls_in(r, names, client_tools=tools)
+        return passed + steer
+
     client_call = {
         "type": "function_call",
         "call_id": "c1",
         "name": "read",
         "arguments": "{}",
     }
-    assert _genuine_calls_in(resp(client_call), {"read", "mine"}) == []
+    assert split(resp(client_call), {"read", "mine"}) == []
     # Case-variant declarations also win: client "Read" owns upstream
     # "read" (and vice versa) — returned verbatim, never steered.
-    assert _genuine_calls_in(resp(client_call), {"Read", "mine"}) == []
-    assert (
-        _genuine_calls_in(resp(dict(client_call, name="Read")), {"read", "mine"}) == []
-    )
+    assert split(resp(client_call), {"Read", "mine"}) == []
+    assert split(resp(dict(client_call, name="Read")), {"read", "mine"}) == []
     # Undeclared genuine names still steer...
-    assert _genuine_calls_in(resp(client_call), {"mine"}) == [client_call]
-    assert _genuine_calls_in(resp(client_call), {"Mine"}) == [client_call]
+    assert split(resp(client_call), {"mine"}) == [client_call]
+    assert split(resp(client_call), {"Mine"}) == [client_call]
     # ...as do hallucinations with zero client tools...
     hallucinated = dict(client_call, call_id="c2", name="frobnicate")
-    assert _genuine_calls_in(resp(hallucinated), set()) == [hallucinated]
+    assert split(resp(hallucinated), set()) == [hallucinated]
     # ...while malformed items (missing/non-string name) stay steerable.
-    assert _genuine_calls_in(resp({"type": "function_call"}), {"read"}) == [
+    assert split(resp({"type": "function_call"}), {"read"}) == [
         {"type": "function_call"}
     ]
+
+
+def test_genuine_calls_in_splits_owned_by_required_keys():
+    """With client_tools, declared names split: valid args pass through
+    (converted casing), missing keys steer."""
+    from fastapi.responses import JSONResponse
+
+    from llms.proxy.ir import ToolDef
+    from llms.proxy.pipeline import _genuine_calls_in
+
+    shell = ToolDef(
+        "Shell",
+        "mine",
+        {"type": "object", "properties": {"cmd": {}}, "required": ["cmd"]},
+    )
+
+    def resp(*output):
+        return JSONResponse(status_code=200, content={"output": list(output)})
+
+    valid = {
+        "type": "function_call",
+        "call_id": "c1",
+        "name": "shell",
+        "arguments": '{"cmd": "echo hi"}',
+    }
+    passed, steer = _genuine_calls_in(resp(valid), {"Shell"}, client_tools=(shell,))
+    assert steer == []
+    assert [c["name"] for c in passed] == ["Shell"]
+    bad = dict(valid, arguments='{"command": "echo hi"}')
+    passed, steer = _genuine_calls_in(resp(bad), {"Shell"}, client_tools=(shell,))
+    assert passed == []
+    assert [c["name"] for c in steer] == ["shell"]
 
 
 def test_server_tool_specs_forwarded_never_500(app_client):

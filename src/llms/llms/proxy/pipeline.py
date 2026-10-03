@@ -774,17 +774,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             _with_genuine_tools(outbound)
             notice = build_tool_notice(req.tools, GENUINE_TOOL_NAMES)
             if notice:
-                import os as _os
-
-                if _os.getenv("TOOL_NOTICE_PLACEMENT", "instructions") == "message":
-                    outbound["input"].append(
-                        {
-                            "type": "message",
-                            "role": "developer",
-                            "content": [{"type": "input_text", "text": notice}],
-                        }
-                    )
-                elif outbound.get("instructions"):
+                if outbound.get("instructions"):
                     outbound["instructions"] = f"{outbound['instructions']}\n\n{notice}"
                 else:
                     outbound["instructions"] = notice

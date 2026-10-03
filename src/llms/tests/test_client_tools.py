@@ -32,7 +32,6 @@ def test_missing_required_keys_valid_missing_and_unparseable():
 
 def test_notice_empty_without_tools_marks_overrides():
     from llms.proxy.client_tools import build_tool_notice
-
     from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
 
     assert build_tool_notice((), GENUINE_TOOL_NAMES) == ""

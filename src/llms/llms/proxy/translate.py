@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import replace
 
 from llms.proxy.ir import (
@@ -759,18 +758,11 @@ def to_zen_responses(req: RequestIR, *, tool_notice: str = "") -> dict:
         body["stream"] = True
     if tool_notice:
         # Client tool notice (model-facing collision handling): appended
-        # after all input items by the caller, which owns the
-        # genuine-vs-anonymous decision. Placement is A/B-tested live
-        # (message-append vs instructions); the loser is deleted.
-        if os.getenv("TOOL_NOTICE_PLACEMENT", "instructions") == "message":
-            body["input"].append(
-                {
-                    "type": "message",
-                    "role": "developer",
-                    "content": [{"type": "input_text", "text": tool_notice}],
-                }
-            )
-        elif body.get("instructions"):
+        # after client instructions. Live A/B verdict 2026-10-03: the
+        # message-append variant steers no better (model still calls
+        # overlay names first, then self-heals via redirect), so the
+        # instructions placement wins on prompt-cache stability.
+        if body.get("instructions"):
             body["instructions"] = f"{body['instructions']}\n\n{tool_notice}"
         else:
             body["instructions"] = tool_notice

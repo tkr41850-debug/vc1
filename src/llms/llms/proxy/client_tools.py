@@ -33,8 +33,10 @@ def missing_required_keys(arguments: str, tool: ToolDef) -> list[str] | None:
 def build_tool_notice(tools: tuple[ToolDef, ...], genuine_names) -> str:
     genuine_lower = {str(n).lower() for n in genuine_names}
     lines = [
-        "Client tools (prefer these; where a name collides with a default tool, "
-        "use the client tool and its parameter shape):"
+        (
+            "Client tools (prefer these; where a name collides with a default tool, "
+            "use the client tool and its parameter shape):"
+        )
     ]
     for t in tools:
         if not t.name:
