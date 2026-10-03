@@ -161,14 +161,17 @@ async def fold_and_steer_streaming(
     the client never declared (case-insensitive, declared passes);
     on hit the redirect + re-request loop runs upstream (same
     contract as _steer_genuine_calls: STEER_MAX_ITERS, final-turn-only
-    usage); only the final clean turn replays downstream as SSE under
-    the same response id. The dead turn never emits downstream but
-    stays upstream as input history — no context lost. Without
-    undeclared calls (or without client_names) the folded bytes replay
-    verbatim: zero behavior change for the 99% case.
+    usage); only the final clean turn replays downstream — as its own
+    verbatim bytes (never re-framed through an emitter), so the client
+    sees exactly what it would have seen had the model behaved: same
+    response id, same call ids, same frame fields. The dead turn never
+    emits downstream but stays upstream as input history — no context
+    lost. Without undeclared calls (or without client_names) the first
+    turn's bytes replay untouched: zero behavior change for the 99%
+    case. Replay framing matches TappedStream (empty lines as ping
+    comments, cost frames dropped) so folded and passthrough legs look
+    identical on the wire.
     """
-    from llms.proxy.ir import StreamDone
-    from llms.proxy.stream_translate import STREAM_PARSERS, SseFramer
 
     async def _collect(resp: httpx.Response) -> list[str]:
         lines: list[str] = []
@@ -188,6 +191,14 @@ async def fold_and_steer_streaming(
                 read_task = None
                 if line is _END:
                     break
+                if not line:
+                    # Tap-identical framing: blank separators replay as
+                    # ping comments (see TappedStream._emit_chunk).
+                    lines.append(": ping")
+                    continue
+                raw = line.encode() if isinstance(line, str) else line
+                if is_cost_frame(raw):
+                    continue
                 lines.append(line)
         except BaseException:
             if read_task is not None and not read_task.done():
@@ -200,35 +211,21 @@ async def fold_and_steer_streaming(
                 pass
         return lines
 
-    def _replay(lines: list[str], emitter) -> list[bytes]:
+    def _replay(lines: list[str]) -> list[bytes]:
+        # Verbatim replay of the final turn's own bytes: no emitter
+        # re-framing (a fresh emitter drops wire fields such as
+        # function_call.call_id/status and mints a new response id,
+        # which codex needs to dispatch the call and chain the turn —
+        # live probe finding). Tap-identical framing per line.
         out: list[bytes] = []
-        parser = STREAM_PARSERS["responses"]()
-        framer = SseFramer()
-        seen_done = None
         for line in lines:
             if line == ": ping":
                 out.append(b": ping\n\n")
                 continue
-            for payload in framer.feed(line):
-                for delta in parser.feed_payload(payload):
-                    if isinstance(delta, StreamDone):
-                        seen_done = delta
-                    out.extend(emitter.feed_delta(delta))
-        for payload in framer.finish():
-            for delta in parser.feed_payload(payload):
-                if isinstance(delta, StreamDone):
-                    seen_done = delta
-                out.extend(emitter.feed_delta(delta))
-        terminal = parser.finish()
-        if terminal is not None:
-            if seen_done is None:
-                seen_done = terminal
-            out.extend(emitter.feed_delta(terminal))
+            raw = line.encode() if isinstance(line, str) else line
+            out.append(raw + b"\n")
         return out
 
-    from llms.proxy.stream_translate import STREAM_EMITTERS as _EMITTERS
-
-    emitter = _EMITTERS["responses"](trace_id, model)
     lines = await _collect(upstream)
     lowered = (
         {n.lower() for n in client_names if isinstance(n, str)}
@@ -302,14 +299,18 @@ async def fold_and_steer_streaming(
             logger.error("[%s] steer re-request failed: %s", trace_id, exc)
             break
         if follow_resp.status_code >= 400:
+            logger.warning(
+                "[%s] steer re-request upstream status=%s; replaying dead turn",
+                trace_id,
+                follow_resp.status_code,
+            )
             try:
                 await follow_resp.aclose()
             except Exception:
                 pass
             break
         lines = await _collect(follow_resp)
-        emitter = _EMITTERS["responses"](trace_id, model)
-    chunks = _replay(lines, emitter)
+    chunks = _replay(lines)
     if usage_sink is not None:
         try:
             usage_sink(sniff_stream_usage(lines, "responses"))
@@ -671,6 +672,8 @@ async def forward(
     via_warp: dict | None = None,
     stream_ingress: str | None = None,
     stream_usage_sink=None,
+    client_names: set[str] | None = None,
+    steer_streaming: bool = False,
 ) -> Response:
     # via_warp sends the Zen request through a client already bound to the
     # local warp SOCKS exit (httpx proxy=...): direct in-process egress, no
@@ -754,24 +757,68 @@ async def forward(
             )
         if translate_dialects is not None:
             ingress, egress, model = translate_dialects
-            response = StreamingResponse(
-                translate_streaming(
-                    upstream,
-                    ingress,
-                    egress,
-                    trace_id,
-                    model,
-                    stream_ingress,
-                    stream_usage_sink,
-                ),
-                media_type="text/event-stream",
-            )
+            if steer_streaming and ingress == "responses" and egress == "responses":
+                # Streaming steer fold (refold design): buffer turn 1,
+                # steer undeclared calls via redirect + re-request,
+                # replay only the clean turn. Same response id, no
+                # dead-call bytes downstream. Falls back to plain
+                # translate_streaming without client_names.
+                response = StreamingResponse(
+                    fold_and_steer_streaming(
+                        upstream,
+                        client=client,
+                        url=url,
+                        headers=headers,
+                        outbound=dict(body),
+                        trace_id=trace_id,
+                        model=model,
+                        client_names=client_names,
+                        usage_sink=stream_usage_sink,
+                    ),
+                    media_type="text/event-stream",
+                )
+            else:
+                response = StreamingResponse(
+                    translate_streaming(
+                        upstream,
+                        ingress,
+                        egress,
+                        trace_id,
+                        model,
+                        stream_ingress,
+                        stream_usage_sink,
+                    ),
+                    media_type="text/event-stream",
+                )
             if warped:
                 response.headers["x-egress-provider"] = via_warp.get("provider_id", "")
                 if via_warp.get("warp_idx") is not None:
                     response.headers["x-pool-active-warp"] = str(via_warp["warp_idx"])
             return response
         media = upstream.headers.get("content-type", "text/event-stream")
+        if steer_streaming and stream_ingress == "responses":
+            # Same-dialect responses streaming (codex path): fold +
+            # steer instead of raw tap passthrough. stream_ingress
+            # doubles as the fold dialect here.
+            response = StreamingResponse(
+                fold_and_steer_streaming(
+                    upstream,
+                    client=client,
+                    url=url,
+                    headers=headers,
+                    outbound=dict(body),
+                    trace_id=trace_id,
+                    model=body.get("model", ""),
+                    client_names=client_names,
+                    usage_sink=stream_usage_sink,
+                ),
+                media_type=media,
+            )
+            if warped:
+                response.headers["x-egress-provider"] = via_warp.get("provider_id", "")
+                if via_warp.get("warp_idx") is not None:
+                    response.headers["x-pool-active-warp"] = str(via_warp["warp_idx"])
+            return response
         if stream_ingress is not None:
             tapped = await tap_stream_usage(
                 upstream, stream_ingress, usage_sink=stream_usage_sink

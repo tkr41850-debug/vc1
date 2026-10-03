@@ -1016,6 +1016,18 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     )
 
     async def _do_forward():
+        # Streaming steer runs only for non-genuine responses-leg
+        # clients that declared tools: the fold needs client_names to
+        # detect undeclared calls. Genuine opencode passes through
+        # untouched (no shaping, no steer); other legs keep legacy
+        # streaming.
+        _client_names = {t.name for t in req.tools if t.name}
+        _steer_stream = (
+            not genuine
+            and egress == "responses"
+            and outbound.get("stream") is True
+            and bool(_client_names)
+        )
         _response = await forward(
             client,
             url,
@@ -1030,11 +1042,12 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             # for passthrough (ingress == egress) and required for translate.
             stream_ingress=egress if outbound.get("stream") is True else None,
             stream_usage_sink=stream_usage_cb,
+            client_names=_client_names or None,
+            steer_streaming=_steer_stream,
         )
         if synthesize is not None and egress == "responses":
             # Steer any non-client tool call (genuine or hallucinated) back:
             # with client tools list them, otherwise demand a direct answer.
-            _client_names = {t.name for t in req.tools if t.name}
             _response, _ = await _steer_genuine_calls(
                 _response,
                 client=client,

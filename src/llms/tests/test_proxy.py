@@ -825,3 +825,98 @@ def test_sk_brake_scopes_to_key_prefix(app_client):
     finally:
         _mw._auth_failures.clear()
         _mw._auth_blocked_until.clear()
+
+
+def test_streaming_steer_folds_undeclared_call_end_to_end(tmp_path):
+    """POST stream:true, model calls undeclared 'shell': steered in-stream.
+
+    Same wire shape as the live codex capture (stream:true, client tools
+    exec_command, model calls overlay 'shell'): downstream SSE carries no
+    executable shell call; upstream sees exactly 2 posts (turn + steer
+    follow-up with function_call_output for shell). The clean turn replays
+    upstream's own bytes verbatim (call_id/status fields, upstream
+    response id) — a fresh emitter drops those fields and codex cannot
+    dispatch the call (live probe finding: steered turn replayed but the
+    client executed nothing).
+    """
+    import httpx
+
+    from tests.conftest import TEST_HEADERS, TEST_SECRET, build_app_client
+    from tests.conftest import make_settings as _make_settings
+
+    calls: list = []
+
+    async def handler(request):
+        import json as _json
+
+        calls.append(_json.loads(request.content.decode()))
+        if len(calls) == 1:
+            body = (
+                'data: {"type":"response.output_item.added","output_index":1,'
+                '"item":{"id":"call_shell1","type":"function_call","name":"shell",'
+                '"arguments":"{}","call_id":"call_shell1",'
+                '"status":"in_progress"}}\n\n'
+                'data: {"type":"response.function_call_arguments.delta",'
+                '"output_index":1,"item_id":"call_shell1",'
+                '"delta":"{\\"command\\":\\"echo hi\\"}"}\n\n'
+                'data: {"type":"response.completed",'
+                '"response":{"id":"resp_dead1","status":"completed",'
+                '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+            )
+        else:
+            body = (
+                'data: {"type":"response.output_item.added","output_index":0,'
+                '"item":{"id":"call_exec1","type":"function_call",'
+                '"name":"exec_command","arguments":"{}","call_id":"call_exec1",'
+                '"status":"in_progress"}}\n\n'
+                'data: {"type":"response.function_call_arguments.delta",'
+                '"output_index":0,"item_id":"call_exec1",'
+                '"delta":"{\\"command\\":\\"echo tool-ok\\"}"}\n\n'
+                'data: {"type":"response.completed",'
+                '"response":{"id":"resp_clean1","status":"completed",'
+                '"usage":{"input_tokens":5,"output_tokens":6,"total_tokens":11}}}\n\n'
+            )
+        return httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    with build_app_client(
+        _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "run echo",
+                "stream": True,
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "exec_command",
+                        "description": "run",
+                        "parameters": {"type": "object"},
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert '"name":"shell"' not in r.text
+    assert '"name": "shell"' not in r.text
+    # Verbatim replay: the clean turn's own call bytes (not re-framed).
+    assert '"call_id":"call_exec1"' in r.text
+    assert "resp_clean1" in r.text
+    assert len(calls) == 2
+    followup = calls[1]
+    outputs = [
+        i
+        for i in followup["input"]
+        if isinstance(i, dict) and i.get("type") == "function_call_output"
+    ]
+    assert outputs and outputs[0]["call_id"] == "call_shell1"
+    assert "exec_command" in outputs[0]["output"]
