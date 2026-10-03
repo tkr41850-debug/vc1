@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import replace
 
 from llms.proxy.ir import (
@@ -624,7 +625,7 @@ def _responses_tool_from_ir(t: ToolDef) -> dict:
     return tool
 
 
-def to_zen_responses(req: RequestIR) -> dict:
+def to_zen_responses(req: RequestIR, *, tool_notice: str = "") -> dict:
     body: dict = {"model": req.model, "input": []}
     systems = [
         b.text
@@ -756,6 +757,23 @@ def to_zen_responses(req: RequestIR) -> dict:
         }
     if req.stream:
         body["stream"] = True
+    if tool_notice:
+        # Client tool notice (model-facing collision handling): appended
+        # after all input items by the caller, which owns the
+        # genuine-vs-anonymous decision. Placement is A/B-tested live
+        # (message-append vs instructions); the loser is deleted.
+        if os.getenv("TOOL_NOTICE_PLACEMENT", "instructions") == "message":
+            body["input"].append(
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": tool_notice}],
+                }
+            )
+        elif body.get("instructions"):
+            body["instructions"] = f"{body['instructions']}\n\n{tool_notice}"
+        else:
+            body["instructions"] = tool_notice
     return body
 
 

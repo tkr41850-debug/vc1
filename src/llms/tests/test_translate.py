@@ -1129,3 +1129,79 @@ def test_stop_sequences_preserved_on_responses_egress():
     out = to_zen_responses(req)
     stops = out.get("stop") or out.get("stop_sequences") or []
     assert "END" in (stops if isinstance(stops, list) else [stops])
+
+
+def test_responses_notice_lists_full_client_set_with_schemas():
+    from llms.proxy.client_tools import build_tool_notice
+    from llms.proxy.translate import from_responses, to_zen_responses
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+
+    req = from_responses(
+        {
+            "model": "m",
+            "instructions": "be nice",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "Shell",
+                    "description": "Run it",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"cmd": {"type": "string"}},
+                        "required": ["cmd"],
+                    },
+                }
+            ],
+        }
+    )
+    notice = build_tool_notice(req.tools, GENUINE_TOOL_NAMES)
+    body = to_zen_responses(req, tool_notice=notice)
+    assert body["instructions"].startswith("be nice")
+    assert "'Shell'" in body["instructions"] and '"cmd"' in body["instructions"]
+    assert "override" in body["instructions"]
+
+
+def test_responses_notice_message_placement():
+    """TOOL_NOTICE_PLACEMENT=message appends a developer message instead of
+    touching instructions (prompt-cache prefix stays intact)."""
+    import os
+
+    from llms.proxy.client_tools import build_tool_notice
+    from llms.proxy.translate import from_responses, to_zen_responses
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+
+    req = from_responses(
+        {
+            "model": "m",
+            "instructions": "be nice",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "Shell",
+                    "description": "Run it",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"cmd": {"type": "string"}},
+                        "required": ["cmd"],
+                    },
+                }
+            ],
+        }
+    )
+    notice = build_tool_notice(req.tools, GENUINE_TOOL_NAMES)
+    old = os.environ.get("TOOL_NOTICE_PLACEMENT")
+    os.environ["TOOL_NOTICE_PLACEMENT"] = "message"
+    try:
+        body = to_zen_responses(req, tool_notice=notice)
+    finally:
+        if old is None:
+            del os.environ["TOOL_NOTICE_PLACEMENT"]
+        else:
+            os.environ["TOOL_NOTICE_PLACEMENT"] = old
+    assert body["instructions"] == "be nice"
+    last = body["input"][-1]
+    assert last["type"] == "message" and last["role"] == "developer"
+    text = last["content"][0]["text"]
+    assert "'Shell'" in text and "override" in text

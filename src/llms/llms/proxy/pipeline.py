@@ -25,6 +25,7 @@ from llms.proxy.stream_translate import (
     new_msg_id,
     new_resp_id,
 )
+from llms.proxy.client_tools import build_tool_notice
 from llms.proxy.translate import (
     from_chat,
     from_messages,
@@ -42,7 +43,7 @@ from llms.proxy.translate_response import (
 from llms.proxy.zen_fingerprint import note_free_tier_error
 from llms.proxy.zen_headers import build_zen_headers, stable_session_id
 from llms.proxy.zen_prompts import TITLE_PREFIX
-from llms.proxy.zen_tools import GENUINE_TOOLS
+from llms.proxy.zen_tools import GENUINE_TOOL_NAMES, GENUINE_TOOLS
 
 logger = setup_logging()
 
@@ -349,54 +350,20 @@ def is_genuine_opencode(headers) -> bool:
     return ua.startswith("opencode/") or bool(headers.get("x-opencode-client"))
 
 
-def _with_genuine_tools(outbound: dict, client_names: set[str] | None = None) -> None:
-    """Prepend the genuine tool set ahead of client extras (no duplicates).
+def _with_genuine_tools(outbound: dict) -> None:
+    """Prepend the genuine tool set ahead of client extras, verbatim.
 
     The free-tier gate fuzzy-matches the set: the 12 genuine definitions
-    must go out byte-identical, in order, ahead of any extras — bare or
-    renamed sets 403. A client tool reusing a genuine name in the SAME
-    case keeps the CLIENT's definition in that slot (so the model calls
-    the client's shape and the call passes back for the client to
-    resolve); case-variant collisions ("Read" vs genuine "read") keep
-    the genuine definition untouched (renaming it breaks the gate) and
-    the client tool appends after as an extra. All 12 genuine names stay
-    present at least once, always with their genuine definition.
+    must go out byte-identical, in order, ahead of any extras. The
+    outbound tools array is never renamed or slot-substituted — a client
+    tool reusing a genuine name rides as a verbatim extra alongside the
+    genuine definition. Collision handling lives in the tool notice
+    (model-facing, built in translate) and in response-side
+    convert/validate (client-facing, in the steer paths).
     Mutates outbound in place.
-
-    Scoped overlay: when the caller supplies the client's own tool names,
-    a genuine tool the client ALSO declares under the exact same name is
-    skipped from the head — the client's definition already occupies the
-    slot, so prepending the genuine twin only dangles an unexecutable
-    same-name double in front of the model (live codex finding: model
-    called overlay 'shell' instead of declared 'exec_command', and codex
-    failed the turn with 'unsupported call: shell'). Skipped names still
-    satisfy the gate: the slot carries the client's definition under the
-    genuine name. Case-variant collisions ('Read' vs 'read') keep the
-    genuine definition untouched (renaming it breaks the gate) with the
-    client tool appended after. Without client_names every genuine tool
-    prepends (legacy behavior for callers that don't track declarations).
     """
-    genuine_names = {t.get("name") for t in GENUINE_TOOLS}
-    by_name = {t.get("name"): t for t in outbound.get("tools", []) or []}
-    head = []
-    for g in GENUINE_TOOLS:
-        gname = g.get("name", "")
-        if gname in by_name:
-            # Client declares this exact name: its own definition
-            # occupies the slot — skip the genuine twin so the model
-            # never sees an unexecutable same-name double (live codex
-            # finding: model called overlay 'shell' instead of the
-            # declared tool, failing the turn 'unsupported call').
-            continue
-        head.append(by_name.get(gname, g))
-    extras = [
-        t for t in outbound.get("tools", []) or [] if t.get("name") not in genuine_names
-    ]
-    # Declared-name client tools whose name collides with a genuine
-    # tool ride in their overlay slot position, ahead of extras — the
-    # slot keeps the client's definition.
-    slots = [by_name[gname] for gname in genuine_names if gname in by_name]
-    outbound["tools"] = [*head, *slots, *extras]
+    extras = [t for t in outbound.get("tools", []) or []]
+    outbound["tools"] = [*GENUINE_TOOLS, *extras]
 
 
 def _ensure_chat_system(outbound: dict) -> None:
@@ -698,12 +665,32 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         outbound["prompt_cache_key"] = session_id
         # Anonymous free tier matches the genuine tool set (bisected
         # live: full set + any client extras passes; bare/renamed
-        # sets 403). Instructions pass through untouched — any
-        # canonical lead steers behavior (title) or costs 9KB (agent).
-        # Keyed operators keep exact fidelity. Genuine opencode
-        # already carries the exact wire identity: passthrough.
+        # sets 403). The client tool notice (model-facing collision
+        # handling) appends after client instructions here — the only
+        # caller that knows genuine-vs-anonymous, so genuine keeps exact
+        # fidelity (passthrough, no notice). Keyed operators likewise.
+        # req.tools already includes deferred `additional_tools` names
+        # (dissolved in from_responses), so the notice covers the full set.
         if not settings.zen_api_key and not genuine:
-            _with_genuine_tools(outbound, {t.name for t in req.tools if t.name})
+            _with_genuine_tools(outbound)
+            notice = build_tool_notice(req.tools, GENUINE_TOOL_NAMES)
+            if notice:
+                import os as _os
+
+                if _os.getenv("TOOL_NOTICE_PLACEMENT", "instructions") == "message":
+                    outbound["input"].append(
+                        {
+                            "type": "message",
+                            "role": "developer",
+                            "content": [{"type": "input_text", "text": notice}],
+                        }
+                    )
+                elif outbound.get("instructions"):
+                    outbound["instructions"] = (
+                        f"{outbound['instructions']}\n\n{notice}"
+                    )
+                else:
+                    outbound["instructions"] = notice
     elif egress == "chat" and not settings.zen_api_key and not genuine:
         _ensure_chat_system(outbound)
     bucket = bucket_for(

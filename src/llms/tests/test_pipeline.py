@@ -163,10 +163,8 @@ def test_genuine_opencode_chat_passthrough(app_client):
 
 
 def test_nongenuine_overlapping_tools_client_definition_wins(app_client):
-    # A third-party client reusing a genuine tool name keeps its OWN
-    # definition in that slot (so the model calls the client's shape and
-    # the call returns for the client to resolve); all genuine names
-    # still ride at least once and true extras append after.
+    # Exact-name collision: genuine stays in slot AND client def rides as
+    # a verbatim extra (no slot-substitution); true extras append after.
     from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
 
     tc, seen = app_client
@@ -194,11 +192,15 @@ def test_nongenuine_overlapping_tools_client_definition_wins(app_client):
     )
     assert r.status_code == 200
     tools = seen["json"]["tools"]
-    assert [t.get("name") for t in tools].count("read") == 1
-    sent_read = next(t for t in tools if t.get("name") == "read")
-    assert sent_read["description"] == "mine"
+    reads = [t for t in tools if t.get("name") == "read"]
+    assert len(reads) == 2
+    assert reads[0]["description"] != "mine"
+    assert reads[1]["description"] == "mine"
     assert GENUINE_TOOL_NAMES <= {t.get("name") for t in tools}
     assert tools[-1]["name"] == "mine"
+    # Notice carries the collision: client instructions + full schemas.
+    instructions = seen["json"].get("instructions", "")
+    assert "'read'" in instructions and "override" in instructions
 
 
 def test_is_genuine_opencode_detection():
@@ -681,14 +683,13 @@ def test_genuine_tool_order_and_identity_preserved(app_client):
     assert [t.get("name") for t in tools][12:] == ["mine"]
 
 
-def test_overlay_skips_genuine_twin_of_declared_name(app_client):
-    """A client-declared 'shell' sees one shell slot: its own definition.
+def test_overlay_keeps_genuine_and_client_same_name_verbatim(app_client):
+    """Exact-name collision: genuine stays in slot AND client def rides as
+    extra, both byte-identical (no slot-substitution).
 
-    Regression (live codex wire capture): the overlay prepended genuine
-    'shell' ahead of codex's declared extras; the model called the
-    overlay twin and codex failed the turn ('unsupported call: shell').
-    Now the genuine twin is skipped and the client's definition rides
-    in the slot position — exactly one shell, client-owned.
+    The outbound tools array is never renamed or swapped: collision
+    handling moved to the tool notice (model-facing) and response-side
+    convert/validate (client-facing).
     """
     from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
 
@@ -717,13 +718,13 @@ def test_overlay_skips_genuine_twin_of_declared_name(app_client):
     )
     assert r.status_code == 200
     tools = seen["json"]["tools"]
-    assert [t.get("name") for t in tools].count("shell") == 1
-    sent_shell = next(t for t in tools if t.get("name") == "shell")
-    assert sent_shell["description"] == "codex shell"
-    # Gate safety: every other genuine name still rides at least once,
-    # and declared extras keep their slot-ahead-of-extras position.
-    assert (GENUINE_TOOL_NAMES - {"shell"}) <= {t.get("name") for t in tools}
-    assert tools.index(sent_shell) < tools.index(
+    shells = [t for t in tools if t.get("name") == "shell"]
+    assert len(shells) == 2
+    assert shells[0]["description"] != "codex shell"
+    assert shells[1]["description"] == "codex shell"
+    # Gate safety: genuine set rides byte-identical first, client extras after.
+    assert {t.get("name") for t in tools[:12]} == GENUINE_TOOL_NAMES
+    assert tools.index(shells[1]) < tools.index(
         next(t for t in tools if t.get("name") == "exec_command")
     )
 
