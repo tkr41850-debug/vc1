@@ -150,6 +150,7 @@ async def fold_and_steer_streaming(
     trace_id: str,
     client_names: set[str] | None,
     usage_sink=None,
+    client_tools: tuple = (),
 ):
     """Fold one streaming turn, steer undeclared calls, replay clean SSE.
 
@@ -317,16 +318,66 @@ async def fold_and_steer_streaming(
     except Exception:
         pass
     _steer_failed = False
+    from llms.proxy.client_tools import owned_tool_names as _owned_names
+    from llms.proxy.pipeline import _classify_calls as _classify
+    from llms.proxy.pipeline import _valid_json as _valid_args
+
+    _owned = _owned_names(client_tools)
+    _defs = {t.name.lower(): t for t in client_tools if t.name}
     for _ in range(max_iters):
         calls = fold_stream_calls(lines, "responses") if lowered is not None else []
-        steer = [
-            c
-            for c in calls
-            if not (
-                isinstance(c.get("name"), str)
-                and c["name"].lower() in (lowered or set())
+        # Shared classifier: owned-valid calls pass (converted casing),
+        # owned-invalid and undeclared calls steer. Without client_tools
+        # the legacy lowered-membership rule applies.
+        if client_tools:
+            passthrough, steer = _classify(calls, _owned, _defs)
+        else:
+            passthrough, steer = (
+                [],
+                [
+                    c
+                    for c in calls
+                    if not (
+                        isinstance(c.get("name"), str)
+                        and c["name"].lower() in (lowered or set())
+                    )
+                ],
             )
-        ]
+        if passthrough and not steer:
+            # Every call is client-owned and valid: rewrite the replayed
+            # lines' function_call name fields to the declared casing so
+            # the client dispatches its own declarations. Only data lines
+            # parse as JSON (pings/blank separators skip); frame bytes stay
+            # otherwise verbatim.
+            import json as _json
+
+            for call in passthrough:
+                target = call["name"]
+                for i, line in enumerate(lines):
+                    # Rename only the function_call name field for this
+                    # call's frames (matched by call id in the same line).
+                    cid = call.get("call_id", "")
+                    if cid and cid in line and f'"name":"{target}"' not in line:
+                        stripped = line[6:] if line.startswith("data: ") else None
+                        if stripped is None:
+                            continue
+                        try:
+                            payload = _json.loads(stripped)
+                        except Exception as exc:
+                            logger.debug(
+                                "[%s] fold rename skipped non-JSON line: %r",
+                                trace_id,
+                                exc,
+                            )
+                            continue
+                        item = payload.get("item", {})
+                        if (item.get("id") == cid or item.get("call_id") == cid) and (
+                            isinstance(item.get("name"), str)
+                            and item["name"].lower() == target.lower()
+                        ):
+                            item["name"] = target
+                            lines[i] = "data: " + _json.dumps(payload)
+            break
         if not steer or client_names is None:
             break
         names = sorted({str(c.get("name", "")) for c in steer if c.get("name")})
@@ -338,12 +389,16 @@ async def fold_and_steer_streaming(
         followups: list = []
         for call in steer:
             call_id = str(call.get("call_id") or call.get("id") or "")
+            args = call.get("arguments", "")
+            args = args if isinstance(args, str) else ""
             followups.append(
                 {
                     "type": "function_call",
                     "call_id": call_id,
                     "name": str(call.get("name", "")),
-                    "arguments": str(call.get("arguments", "")),
+                    # Steer followups replay upstream: never leak a raw ""
+                    # or non-JSON payload that the validator 400s.
+                    "arguments": args if _valid_args(args) else "{}",
                 }
             )
             followups.append(
@@ -870,6 +925,7 @@ async def forward(
     stream_usage_sink=None,
     client_names: set[str] | None = None,
     steer_streaming: bool = False,
+    client_tool_defs: tuple = (),
 ) -> Response:
     # via_warp sends the Zen request through a client already bound to the
     # local warp SOCKS exit (httpx proxy=...): direct in-process egress, no
@@ -969,6 +1025,7 @@ async def forward(
                         trace_id=trace_id,
                         client_names=client_names,
                         usage_sink=stream_usage_sink,
+                        client_tools=client_tool_defs,
                     ),
                     media_type="text/event-stream",
                 )
@@ -1005,6 +1062,7 @@ async def forward(
                     trace_id=trace_id,
                     client_names=client_names,
                     usage_sink=stream_usage_sink,
+                    client_tools=client_tool_defs,
                 ),
                 media_type=media,
             )

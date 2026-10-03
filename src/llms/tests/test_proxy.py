@@ -159,7 +159,9 @@ def test_anonymous_tooled_turn_sends_genuine_superset(app_client):
         t["name"] for t in GENUINE_TOOLS
     ]
     assert sent_tools[-1]["name"] == "bash"
-    assert seen["json"]["instructions"] == "Be brief."
+    # Client tool notice appends after client instructions.
+    assert seen["json"]["instructions"].startswith("Be brief.")
+    assert "'bash'" in seen["json"]["instructions"]
 
 
 def test_steering_redirects_genuine_calls(tmp_path):
@@ -398,8 +400,9 @@ def _steer_app_client(tmp_path, first_body: bytes, second_body: bytes):
 
 
 def test_client_named_genuine_tool_call_case_insensitive_passthrough(tmp_path):
-    """Client "Read" owns upstream "read": returned verbatim for the
-    client to resolve — no steer follow-up (exactly 1 upstream call)."""
+    """Client "Read" owns upstream "read":-owned name converts to the
+    declared casing for the client to resolve — no steer follow-up
+    (exactly 1 upstream call)."""
     from tests.conftest import TEST_HEADERS
 
     tc_ctx, calls = _steer_app_client(
@@ -430,7 +433,7 @@ def test_client_named_genuine_tool_call_case_insensitive_passthrough(tmp_path):
         i for i in r.json().get("output", []) if i.get("type") == "function_call"
     ]
     assert len(returned) == 1
-    assert returned[0]["name"] == "read"
+    assert returned[0]["name"] == "Read"
     assert returned[0]["call_id"] == "call_read1"
     assert returned[0]["arguments"] == '{"path":"notes.txt"}'
 
@@ -920,6 +923,184 @@ def test_streaming_steer_folds_undeclared_call_end_to_end(tmp_path):
     ]
     assert outputs and outputs[0]["call_id"] == "call_shell1"
     assert "exec_command" in outputs[0]["output"]
+
+
+def test_streaming_owned_name_converts_casing_and_passes_through(tmp_path):
+    """Client declares 'Shell'; model calls 'shell' with required keys:
+    downstream SSE carries the renamed 'Shell' call, exactly 1 upstream
+    call (streaming legs replay SSE bytes, not JSON)."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_shell1", "shell", '{"cmd":"echo hi"}'),
+        _text_sse("unreached"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "run echo",
+                "stream": True,
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "Shell",
+                        "description": "mine",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"cmd": {"type": "string"}},
+                            "required": ["cmd"],
+                        },
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    assert '"name": "Shell"' in r.text
+    assert '"name": "shell"' not in r.text
+    assert '"name":"Shell"' in r.text or '"name": "Shell"' in r.text
+    assert '"id": "call_shell1"' in r.text
+    assert "echo hi" in r.text
+
+
+def test_streaming_owned_name_missing_key_steers(tmp_path):
+    """Same setup but args lack required 'cmd': 2 upstream calls, redirect
+    lists 'Shell', followup function_call args are valid JSON upstream."""
+    import json as _json
+
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_shell1", "shell", '{"command":"echo hi"}'),
+        _text_sse("done"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "run echo",
+                "stream": True,
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "Shell",
+                        "description": "mine",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"cmd": {"type": "string"}},
+                            "required": ["cmd"],
+                        },
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 2
+    followup = calls[1]
+    outputs = [
+        i
+        for i in followup["input"]
+        if isinstance(i, dict) and i.get("type") == "function_call_output"
+    ]
+    assert outputs and "Shell" in outputs[0]["output"]
+    echoed = [
+        i
+        for i in followup["input"]
+        if isinstance(i, dict) and i.get("type") == "function_call"
+    ]
+    assert echoed
+    for item in echoed:
+        _json.loads(item["arguments"])  # never raw "" upstream
+
+
+def test_owned_name_converts_casing_and_passes_through_synthesize(tmp_path):
+    """Non-streaming mirror: declared 'Shell', model calls 'shell' with
+    required keys — converted name, exactly 1 upstream call."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_shell1", "shell", '{"cmd":"echo hi"}'),
+        _text_sse("unreached"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "run echo",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "Shell",
+                        "description": "mine",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"cmd": {"type": "string"}},
+                            "required": ["cmd"],
+                        },
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    returned = [
+        i for i in r.json().get("output", []) if i.get("type") == "function_call"
+    ]
+    assert len(returned) == 1
+    assert returned[0]["name"] == "Shell"
+    assert returned[0]["arguments"] == '{"cmd":"echo hi"}'
+
+
+def test_owned_name_missing_key_steers_synthesize(tmp_path):
+    """Non-streaming mirror: args lack required 'cmd' — steers with the
+    redirect listing 'Shell'."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_shell1", "shell", '{"command":"echo hi"}'),
+        _text_sse("done"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "run echo",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "Shell",
+                        "description": "mine",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"cmd": {"type": "string"}},
+                            "required": ["cmd"],
+                        },
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 2
+    followup = calls[1]
+    outputs = [
+        i
+        for i in followup["input"]
+        if isinstance(i, dict) and i.get("type") == "function_call_output"
+    ]
+    assert outputs and "Shell" in outputs[0]["output"]
 
 
 def _mixed_turn_sse() -> bytes:

@@ -12,6 +12,12 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from llms.proxy import dedup, sessions
 from llms.proxy.admin_hub import get_hub
 from llms.proxy.affinity import bucket_for
+from llms.proxy.client_tools import (
+    build_tool_notice,
+    convert_call_name,
+    missing_required_keys,
+    owned_tool_names,
+)
 from llms.proxy.config import Settings
 from llms.proxy.forward import forward, parse_body
 from llms.proxy.ir import RequestIR
@@ -25,7 +31,6 @@ from llms.proxy.stream_translate import (
     new_msg_id,
     new_resp_id,
 )
-from llms.proxy.client_tools import build_tool_notice
 from llms.proxy.translate import (
     from_chat,
     from_messages,
@@ -235,23 +240,76 @@ def _wrap_inflight(
     return response
 
 
-def _genuine_calls_in(response: Response, client_names: set[str]) -> list[dict]:
-    """Assistant function_calls the client did NOT declare (steer candidates).
+def _valid_json(args: str) -> bool:
+    """True when a steer-followup arguments string survives the upstream
+    validator (non-blank valid JSON). Shared with the streaming fold."""
+    if not isinstance(args, str) or not args.strip():
+        return False
+    try:
+        json.loads(args)
+        return True
+    except Exception:
+        return False
 
-    Matching is case-insensitive against the client's own set: a call
-    naming a client-declared tool — even one colliding with a genuine
-    tool name in a different case (client "Read" vs genuine "read") —
-    is the client's to resolve and is never steered. Only undeclared
-    names (undeclared genuine tools, hallucinations) steer.
+
+def _classify_calls(
+    calls: list[dict], owned: dict[str, str], client_defs: dict[str, object]
+) -> tuple[list[dict], list[dict]]:
+    """Split folded model calls into (passthrough, steer) by client ownership.
+
+    A call whose lowered name the client declared passes through with its
+    name converted to the declared casing — provided its arguments carry
+    the client's required keys. Owned-but-invalid calls (missing required
+    keys, unparseable/non-object args) steer like undeclared ones: the
+    client cannot execute them, so the redirect + re-request recovers.
+    Pure helper (shared semantics with the streaming fold in forward.py).
+    Takes folded call dicts (not a Response) so both the synthesize path
+    (via _genuine_calls_in) and the streaming fold (via fold_stream_calls)
+    share one classifier.
+    """
+    from llms.proxy.ir import ToolDef
+
+    passthrough: list[dict] = []
+    steer: list[dict] = []
+    for call in calls:
+        name = call.get("name")
+        lowered = name.lower() if isinstance(name, str) else None
+        if lowered is not None and lowered in owned:
+            tool = client_defs.get(lowered)
+            args = call.get("arguments", "")
+            if (
+                isinstance(tool, ToolDef)
+                and missing_required_keys(args if isinstance(args, str) else "", tool)
+                == []
+            ):
+                passthrough.append({**call, "name": convert_call_name(name, owned)})
+                continue
+        steer.append(call)
+    return passthrough, steer
+
+
+def _genuine_calls_in(
+    response: Response,
+    client_names: set[str],
+    *,
+    client_tools: tuple = (),
+) -> tuple[list[dict], list[dict]]:
+    """Split response function_calls into (passthrough, steer) candidates.
+
+    Backward-compatible detector plus ownership classification in one
+    pass: undeclared names steer (existing case-insensitive rule), while
+    client-declared names split further by required-keys validity via
+    _classify_calls (valid → passthrough with converted casing).
+    Without client_tools every call steers (legacy detector behavior).
     """
     if not isinstance(response, JSONResponse) or response.status_code >= 400:
-        return []
+        return [], []
     try:
         payload = json.loads(response.body.decode())
     except Exception:
-        return []
+        return [], []
     if not isinstance(payload, dict):
-        return []
+        return [], []
     calls = []
     lowered = {n.lower() for n in client_names if isinstance(n, str)}
     for item in payload.get("output", []) or []:
@@ -259,9 +317,16 @@ def _genuine_calls_in(response: Response, client_names: set[str]) -> list[dict]:
             continue
         name = item.get("name")
         if isinstance(name, str) and name.lower() in lowered:
+            if not client_tools:
+                continue
+            calls.append(item)
             continue
         calls.append(item)
-    return calls
+    if not client_tools:
+        return [], calls
+    owned = owned_tool_names(client_tools)
+    defs = {t.name.lower(): t for t in client_tools if t.name}
+    return _classify_calls(calls, owned, defs)
 
 
 async def _steer_genuine_calls(
@@ -274,21 +339,51 @@ async def _steer_genuine_calls(
     synthesize,
     trace_id: str,
     client_names: set[str],
+    client_tools: tuple = (),
 ) -> tuple[Response, dict]:
     """Answer undeclared tool calls with a redirect error and re-request.
 
-    Only calls naming tools the client did NOT declare steer (undeclared
-    genuine tools get a redirect listing client tools; hallucinations
-    with no client tools get an answer-directly nudge). A call naming a
-    client-declared tool — even one colliding with a genuine tool name
-    in a different case — passes straight back for the client to
-    resolve. Only for
+    Only calls the client cannot execute steer: undeclared names, plus
+    client-owned names whose arguments miss required keys or are not
+    valid JSON (the client would fail the turn, so the redirect +
+    re-request recovers). A call naming a client-declared tool with
+    valid args passes straight back with its name converted to the
+    declared casing — even one colliding with a genuine tool name in a
+    different case — for the client to resolve. Only for
     non-streaming downstream (streaming passes calls through —
     mid-stream steering is a follow-up). Bounded; usage attributes the
     final turn only.
     """
     for _ in range(STEER_MAX_ITERS):
-        calls = _genuine_calls_in(response, client_names)
+        passed, steer_calls = _genuine_calls_in(
+            response, client_names, client_tools=client_tools
+        )
+        if passed and not steer_calls:
+            # Every call is client-owned and valid: convert casing on the
+            # response body so the client dispatches its own declarations.
+            try:
+                payload = json.loads(response.body.decode())
+            except Exception:
+                break
+            by_id = {}
+            for item in payload.get("output", []) or []:
+                if isinstance(item, dict) and item.get("type") == "function_call":
+                    key = str(
+                        item.get("call_id")
+                        or item.get("id")
+                        or item.get("item_id")
+                        or ""
+                    )
+                    by_id[key] = item
+            for call in passed:
+                key = str(
+                    call.get("call_id") or call.get("id") or call.get("item_id") or ""
+                )
+                if key in by_id:
+                    by_id[key]["name"] = call["name"]
+            response = JSONResponse(status_code=200, content=payload)
+            break
+        calls = steer_calls
         if not calls:
             break
         names = sorted({str(c.get("name", "")) for c in calls})
@@ -300,12 +395,16 @@ async def _steer_genuine_calls(
         followups: list = []
         for call in calls:
             call_id = str(call.get("call_id") or call.get("id") or "")
+            args = call.get("arguments", "")
+            args = args if isinstance(args, str) else ""
             followups.append(
                 {
                     "type": "function_call",
                     "call_id": call_id,
                     "name": str(call.get("name", "")),
-                    "arguments": str(call.get("arguments", "")),
+                    # Steer followups replay upstream: never leak a raw ""
+                    # or non-JSON payload that the validator 400s.
+                    "arguments": args if _valid_json(args) else "{}",
                 }
             )
             followups.append(
@@ -686,9 +785,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                         }
                     )
                 elif outbound.get("instructions"):
-                    outbound["instructions"] = (
-                        f"{outbound['instructions']}\n\n{notice}"
-                    )
+                    outbound["instructions"] = f"{outbound['instructions']}\n\n{notice}"
                 else:
                     outbound["instructions"] = notice
     elif egress == "chat" and not settings.zen_api_key and not genuine:
@@ -1031,10 +1128,12 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             stream_usage_sink=stream_usage_cb,
             client_names=_client_names or None,
             steer_streaming=_steer_stream,
+            client_tool_defs=req.tools,
         )
         if synthesize is not None and egress == "responses":
-            # Steer any non-client tool call (genuine or hallucinated) back:
-            # with client tools list them, otherwise demand a direct answer.
+            # Steer any call the client cannot execute (undeclared, or
+            # owned-but-invalid args) back: with client tools list them,
+            # otherwise demand a direct answer.
             _response, _ = await _steer_genuine_calls(
                 _response,
                 client=client,
@@ -1044,6 +1143,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 synthesize=synthesize,
                 trace_id=trace_id,
                 client_names=_client_names,
+                client_tools=req.tools,
             )
         return _response
 
