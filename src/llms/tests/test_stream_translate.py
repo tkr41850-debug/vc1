@@ -537,3 +537,22 @@ def test_synthesize_fold_name_only_added_still_emits_call():
     calls = [i for i in out if i.get("type") == "function_call"]
     assert len(calls) == 1, out
     assert calls[0]["name"] == "shell"
+
+
+def test_responses_flat_usage_populates_stream_done():
+    """Responses SSE with flat (non-envelope) usage still reports tokens.
+
+    Regression: the parser only read event['response']['usage']; a
+    top-level 'usage' frame (OpenAI-style, same shape ChatParser
+    already accepts) left StreamDone at None, starving downstream
+    usage accounting on messages->responses translate legs.
+    """
+    from llms.proxy.stream_translate import ResponsesParser
+
+    p = ResponsesParser()
+    out = p.feed_payload(
+        '{"type":"response.completed","usage":{"input_tokens":10,"output_tokens":7}}'
+    )
+    done = [d for d in out if type(d).__name__ == "StreamDone"]
+    assert done and done[0].input_tokens == 10
+    assert done[0].output_tokens == 7

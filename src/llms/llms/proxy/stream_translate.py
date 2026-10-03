@@ -298,7 +298,12 @@ class ResponsesParser:
                 "response.completed": "completed",
                 "response.failed": "failed",
             }.get(kind, "incomplete")
-            usage = event.get("response", {}).get("usage", {})
+            usage = event.get("response", {}).get("usage", {}) or {}
+            if not usage and isinstance(event.get("usage"), dict):
+                # Flat usage frame (OpenAI-style, non-envelope): same
+                # shape ChatParser already accepts. Without this the
+                # translate leg reports None tokens downstream.
+                usage = event["usage"]
             in_tok, out_tok = _stream_tokens(
                 usage, ("input_tokens", "in"), ("output_tokens", "o")
             )
