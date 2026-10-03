@@ -38,10 +38,13 @@ def build_zen_headers(
         "x-opencode-client": settings.opencode_client,
         "x-opencode-project": settings.opencode_project,
         "x-opencode-session": session_id,
+        "x-opencode-session-id": session_id,
         "x-session-affinity": session_id,
         "x-session-id": session_id,
-        # NOTE: no x-opencode-request — genuine v2 omits it and Zen's
-        # free-tier gate 403s when it is present (verified by bisect).
+        # NOTE: no x-opencode-request — genuine now sends it (the user
+        # id), but the gate accepts omission (probed Oct 2026: old shape
+        # 200s, presence with a ses_ value 200s too). Omitted rather
+        # than fabricate a user id whose shape Zen might one day check.
         "Content-Type": "application/json",
     }
     headers["Authorization"] = f"Bearer {api_key}" if api_key else "Bearer public"

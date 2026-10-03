@@ -20,16 +20,29 @@ SESSION_ID_FIXTURE = """export const SessionID = Schema.String.check(Schema.isSt
 )
 """
 
-REQUEST_FIXTURE = """    ...(input.model.providerID.startsWith("opencode")
-      ? {
-          "x-opencode-project": opencodeProjectID,
-          "x-opencode-session": input.sessionID,
-          "x-session-affinity": input.sessionID,
-          "x-session-id": input.sessionID,
-          "x-opencode-client": input.flags.client,
-          "User-Agent": USER_AGENT,
-        }
-      : {}),
+REQUEST_FIXTURE = """    const opencodeProjectID = input.model.providerID.startsWith("opencode")
+      ? (yield* InstanceState.context).project.id
+      : undefined
+    return {
+      headers: {
+        "x-opencode-session-id": input.sessionID,
+        ...(input.parentSessionID ? { "x-opencode-parent-session-id": input.parentSessionID } : {}),
+        ...(input.model.providerID.startsWith("opencode")
+          ? {
+              "x-opencode-project": opencodeProjectID,
+              "x-opencode-session": input.sessionID,
+              "x-opencode-request": input.user.id,
+              "x-opencode-client": input.flags.client,
+              "User-Agent": USER_AGENT,
+            }
+          : {
+              "x-session-affinity": input.sessionID,
+              "X-Session-Id": input.sessionID,
+              "User-Agent": USER_AGENT,
+            }),
+        ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
+      },
+    }
 """
 
 TAGS_FIXTURE = (

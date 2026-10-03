@@ -21,12 +21,16 @@ def test_free_tier_sends_public_bearer_but_identity_headers():
     assert headers["x-opencode-client"] == "cli"
     assert headers["x-opencode-project"] == "global"
     assert headers["x-opencode-session"].startswith("ses_")
+    assert headers["x-opencode-session-id"] == headers["x-opencode-session"]
+    # Deliberately omitted: genuine sends the user id here, but the gate
+    # accepts omission (probed Oct 2026) — never fabricate a user id.
     assert "x-opencode-request" not in headers
 
 
 def test_session_id_override_shared_with_body():
     headers = build_zen_headers(make_settings(zen_api_key=""), session_id="ses_custom")
     assert headers["x-opencode-session"] == "ses_custom"
+    assert headers["x-opencode-session-id"] == "ses_custom"
     assert headers["x-session-affinity"] == "ses_custom"
     assert headers["x-session-id"] == "ses_custom"
 
@@ -54,6 +58,7 @@ def test_affinity_headers_mirror_session():
     headers = build_zen_headers(make_settings(zen_api_key=""))
     assert headers["x-session-affinity"] == headers["x-opencode-session"]
     assert headers["x-session-id"] == headers["x-opencode-session"]
+    assert headers["x-opencode-session-id"] == headers["x-opencode-session"]
 
 
 def test_incoming_credentials_never_forwarded():

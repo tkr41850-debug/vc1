@@ -1,14 +1,23 @@
 """Checked-in Zen fingerprint + GitHub-source refresh.
 
-Genuine opencode wire identity (captured + source-traced, Sep 2026):
+Genuine opencode wire identity (captured + source-traced, Oct 2026 —
+request.ts reshaped the opencode header block: ``x-opencode-request``
+is now sent as the user id, ``x-opencode-session-id`` always mirrors
+the session, and subagent turns add ``x-opencode-parent-session-id`` /
+``x-parent-session-id``):
 
 - ``Authorization: Bearer public`` (anonymous) — omitting it 403s.
 - ``User-Agent: opencode/<channel>/<version>/<client>`` — only released
   versions pass; stale (1.18.4) and unreleased (9.9.99) 403.
-- ``x-opencode-session`` / ``x-session-affinity`` / ``x-session-id`` all
-  carry a ``ses_`` + 12-hex + 14-base62 id (identifier.ts descending IDs).
+- ``x-opencode-session`` / ``x-opencode-session-id`` /
+  ``x-session-affinity`` / ``x-session-id`` all carry a ``ses_`` +
+  12-hex + 14-base62 id (identifier.ts descending IDs).
 - responses body ``prompt_cache_key`` must equal the session id.
-- No ``x-opencode-request`` — genuine v2 omits it and its presence 403s.
+- ``x-opencode-request`` (user id) is accepted but not required:
+  omission still passes the gate (probed Oct 2026), so the gateway
+  leaves it out rather than fabricate a user id. Parent-session ids
+  only exist on subagent turns; single-session traffic omits them,
+  matching genuine.
 
 ``EXPECTED`` is the checked-in snapshot. ``scripts/refresh_zen_fingerprint.py``
 re-fetches the upstream sources below and updates the snapshot (and the
@@ -41,12 +50,21 @@ EXPECTED = {
         "authorization",
         "user-agent",
         "x-opencode-client",
+        # Conditional upstream (subagent turns only): single-session
+        # traffic omits them, matching genuine — listed so the parser
+        # union stays drift-free, not because the gateway sends them.
+        "x-opencode-parent-session-id",
         "x-opencode-project",
+        # Accepted but not gate-required (probed Oct 2026): the gateway
+        # omits it rather than fabricate a user id.
+        "x-opencode-request",
         "x-opencode-session",
+        "x-opencode-session-id",
+        "x-parent-session-id",
         "x-session-affinity",
         "x-session-id",
     ),
-    "forbidden_headers": ("x-opencode-request",),
+    "forbidden_headers": (),
     "session_pattern": r"ses_[0-9a-f]{12}[0-9A-Za-z]{14}",
     "prompt_cache_key": "mirror-session",
     "title_prefix": TITLE_PREFIX,
@@ -101,7 +119,13 @@ def parse_expected(sources: dict[str, str]) -> dict:
     if at < 0:
         raise ValueError("request.ts opencode branch not found")
     window = branch[at : at + 1500]
-    headers = {h.lower() for h in re.findall(r'"(x-[a-z0-9-]+|User-Agent)"', window)}
+    # Case-insensitive: upstream spells the else-branch header
+    # "X-Session-Id" (same wire header as x-session-id — HTTP names
+    # are case-insensitive, and our gateway sends it lowercase).
+    headers = {
+        h.lower()
+        for h in re.findall(r'"(x-[a-z0-9-]+|User-Agent)"', window, re.IGNORECASE)
+    }
     headers.add("authorization")
     if "x-opencode-session" not in headers:
         raise ValueError("request.ts opencode branch lost x-opencode-session")
@@ -237,6 +261,7 @@ def probe_version_accepted(
             "x-opencode-client": "cli",
             "x-opencode-project": "global",
             "x-opencode-session": session,
+            "x-opencode-session-id": session,
             "x-session-affinity": session,
             "x-session-id": session,
         },
