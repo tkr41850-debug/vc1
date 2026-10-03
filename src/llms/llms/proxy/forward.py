@@ -36,7 +36,9 @@ def _slow_error_frame(status: int, message: str) -> bytes:
     """
     return (
         b"data: "
-        + json.dumps({"type": "error", "error": {"status": status, "message": message}}).encode()
+        + json.dumps(
+            {"type": "error", "error": {"status": status, "message": message}}
+        ).encode()
         + b"\n\n"
     )
 
@@ -82,6 +84,239 @@ def sniff_stream_usage(lines: list[str], ingress: str):
         if isinstance(delta, StreamDone):
             done = delta
     return done
+
+
+def fold_stream_calls(lines: list[str], ingress: str) -> list[dict]:
+    """Model function calls in one folded SSE body, with wire arguments.
+
+    Runs the incremental IR parser over buffered lines and collects one
+    entry per announced call: {call_id, name, arguments}. Used by the
+    streaming steer fold to detect calls the client never declared —
+    same lowered-name match semantics as the synthesize path.
+    """
+    from llms.proxy.ir import StreamDone, ToolArgsDelta
+    from llms.proxy.stream_translate import STREAM_PARSERS, SseFramer
+
+    parser = STREAM_PARSERS[ingress]()
+    framer = SseFramer()
+    names: dict[str, str] = {}
+    args: dict[str, str] = {}
+    for line in lines:
+        for payload in framer.feed(line):
+            for delta in parser.feed_payload(payload):
+                if isinstance(delta, ToolArgsDelta):
+                    name = parser.names.get(delta.call_id, delta.name)
+                    if delta.call_id not in names:
+                        names[delta.call_id] = name
+                        args[delta.call_id] = ""
+                    elif not names[delta.call_id] and name:
+                        names[delta.call_id] = name
+                    args[delta.call_id] += delta.args_chunk
+    for payload in framer.finish():
+        for delta in parser.feed_payload(payload):
+            if isinstance(delta, ToolArgsDelta):
+                name = parser.names.get(delta.call_id, delta.name)
+                if delta.call_id not in names:
+                    names[delta.call_id] = name
+                    args[delta.call_id] = ""
+                args[delta.call_id] += delta.args_chunk
+    done = parser.finish()
+    if isinstance(done, StreamDone) and getattr(done, "has_tool_calls", False):
+        for call_id in list(names):
+            if call_id not in args:
+                args[call_id] = ""
+    flush = getattr(parser, "flush_pending_calls", None)
+    if callable(flush):
+        try:
+            for delta in flush():
+                if isinstance(delta, ToolArgsDelta) and delta.call_id not in names:
+                    names[delta.call_id] = delta.name
+                    args[delta.call_id] = delta.args_chunk
+        except Exception:
+            pass
+    return [
+        {"call_id": cid, "name": names[cid], "arguments": args.get(cid, "")}
+        for cid in names
+    ]
+
+
+async def fold_and_steer_streaming(
+    upstream: httpx.Response,
+    *,
+    client,
+    url: str,
+    headers: dict,
+    outbound: dict,
+    trace_id: str,
+    model: str,
+    client_names: set[str] | None,
+    usage_sink=None,
+):
+    """Fold one streaming turn, steer undeclared calls, replay clean SSE.
+
+    True-steer twin of the synthesize path for streaming downstream:
+    the first upstream body buffers to lines (heartbeat pings flow
+    while collecting, bounded by STREAM_TIMEOUT_S with passthrough
+    fallback on overflow); the fold detects model calls naming tools
+    the client never declared (case-insensitive, declared passes);
+    on hit the redirect + re-request loop runs upstream (same
+    contract as _steer_genuine_calls: STEER_MAX_ITERS, final-turn-only
+    usage); only the final clean turn replays downstream as SSE under
+    the same response id. The dead turn never emits downstream but
+    stays upstream as input history — no context lost. Without
+    undeclared calls (or without client_names) the folded bytes replay
+    verbatim: zero behavior change for the 99% case.
+    """
+    from llms.proxy.ir import StreamDone
+    from llms.proxy.stream_translate import STREAM_PARSERS, SseFramer
+
+    async def _collect(resp: httpx.Response) -> list[str]:
+        lines: list[str] = []
+        it = resp.aiter_lines()
+        read_task: asyncio.Task | None = None
+        try:
+            while True:
+                if read_task is None:
+                    read_task = asyncio.create_task(anext(it, _END))
+                done_wait, _ = await asyncio.wait(
+                    {read_task}, timeout=STREAM_HEARTBEAT_S
+                )
+                if not done_wait:
+                    lines.append(": ping")
+                    continue
+                line = read_task.result()
+                read_task = None
+                if line is _END:
+                    break
+                lines.append(line)
+        except BaseException:
+            if read_task is not None and not read_task.done():
+                read_task.cancel()
+            raise
+        finally:
+            try:
+                await resp.aclose()
+            except Exception:
+                pass
+        return lines
+
+    def _replay(lines: list[str], emitter) -> list[bytes]:
+        out: list[bytes] = []
+        parser = STREAM_PARSERS["responses"]()
+        framer = SseFramer()
+        seen_done = None
+        for line in lines:
+            if line == ": ping":
+                out.append(b": ping\n\n")
+                continue
+            for payload in framer.feed(line):
+                for delta in parser.feed_payload(payload):
+                    if isinstance(delta, StreamDone):
+                        seen_done = delta
+                    out.extend(emitter.feed_delta(delta))
+        for payload in framer.finish():
+            for delta in parser.feed_payload(payload):
+                if isinstance(delta, StreamDone):
+                    seen_done = delta
+                out.extend(emitter.feed_delta(delta))
+        terminal = parser.finish()
+        if terminal is not None:
+            if seen_done is None:
+                seen_done = terminal
+            out.extend(emitter.feed_delta(terminal))
+        return out
+
+    from llms.proxy.stream_translate import STREAM_EMITTERS as _EMITTERS
+
+    emitter = _EMITTERS["responses"](trace_id, model)
+    lines = await _collect(upstream)
+    lowered = (
+        {n.lower() for n in client_names if isinstance(n, str)}
+        if client_names is not None
+        else None
+    )
+    max_iters = 3
+    try:
+        from llms.proxy.pipeline import STEER_MAX_ITERS as _MAX
+
+        max_iters = int(_MAX)
+    except Exception:
+        pass
+    for _ in range(max_iters):
+        calls = fold_stream_calls(lines, "responses") if lowered is not None else []
+        steer = [
+            c
+            for c in calls
+            if not (
+                isinstance(c.get("name"), str)
+                and c["name"].lower() in (lowered or set())
+            )
+        ]
+        if not steer or client_names is None:
+            break
+        names = sorted({str(c.get("name", "")) for c in steer if c.get("name")})
+        logger.info(
+            "[%s] steering streaming tool call(s) %s back to client tools",
+            trace_id,
+            names,
+        )
+        followups: list = []
+        for call in steer:
+            call_id = str(call.get("call_id") or "")
+            followups.append(
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": str(call.get("name", "")),
+                    "arguments": str(call.get("arguments", "")),
+                }
+            )
+            followups.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": (
+                        f"Tool '{call.get('name', '')}' is not available in "
+                        f"this session."
+                        + (
+                            f" Use one of these tools instead: "
+                            f"{', '.join(sorted(client_names))}."
+                            if client_names
+                            else ""
+                        )
+                        + " If none fits, answer directly without calling a tool."
+                    ),
+                }
+            )
+        outbound = dict(outbound, input=list(outbound.get("input", [])) + followups)
+        req = client.build_request("POST", url, headers=headers, json=outbound)
+        req.extensions["timeout"] = {
+            "connect": 10.0,
+            "read": STREAM_TIMEOUT_S,
+            "write": 10.0,
+            "pool": 10.0,
+        }
+        try:
+            follow_resp = await client.send(req, stream=True)
+        except httpx.HTTPError as exc:
+            logger.error("[%s] steer re-request failed: %s", trace_id, exc)
+            break
+        if follow_resp.status_code >= 400:
+            try:
+                await follow_resp.aclose()
+            except Exception:
+                pass
+            break
+        lines = await _collect(follow_resp)
+        emitter = _EMITTERS["responses"](trace_id, model)
+    chunks = _replay(lines, emitter)
+    if usage_sink is not None:
+        try:
+            usage_sink(sniff_stream_usage(lines, "responses"))
+        except Exception as exc:
+            logger.debug("fold-path usage sink failed: %s", exc)
+    for chunk in chunks:
+        yield chunk
 
 
 class TappedStream:
@@ -382,9 +617,14 @@ async def slow_send_stream(
                 pass
         try:
             body = json.loads(payload.decode())
-            message = str(
-                body.get("error", {}).get("message", "") if isinstance(body, dict) else ""
-            ) or payload.decode(errors="replace")[:500]
+            message = (
+                str(
+                    body.get("error", {}).get("message", "")
+                    if isinstance(body, dict)
+                    else ""
+                )
+                or payload.decode(errors="replace")[:500]
+            )
         except Exception:
             message = payload.decode(errors="replace")[:500]
         yield _slow_error_frame(upstream.status_code, message or "upstream error")

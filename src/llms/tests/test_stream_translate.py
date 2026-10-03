@@ -556,3 +556,76 @@ def test_responses_flat_usage_populates_stream_done():
     done = [d for d in out if type(d).__name__ == "StreamDone"]
     assert done and done[0].input_tokens == 10
     assert done[0].output_tokens == 7
+
+
+def test_streaming_fold_steers_undeclared_call(tmp_path):
+    """stream:true + model calls undeclared 'shell': fold steers, no raw call.
+
+    Refold (true steer): the first turn folds fully, the undeclared call
+    steers via redirect + re-request, and only the final clean turn
+    replays downstream — the dead call never emits as executable.
+    """
+    import asyncio as _asyncio
+
+    import httpx as _httpx
+
+    from llms.proxy import forward as _forward
+
+    seen: list = []
+
+    async def handler(request):
+        seen.append(request.content.decode())
+        if len(seen) == 1:
+            body = (
+                "event: response.output_item.added\n"
+                'data: {"type":"response.output_item.added","output_index":1,'
+                '"item":{"id":"c1","type":"function_call","name":"shell",'
+                '"arguments":""}}\n\n'
+                "event: response.function_call_arguments.delta\n"
+                'data: {"type":"response.function_call_arguments.delta",'
+                '"output_index":1,"item_id":"c1",'
+                '"delta":"{\\"command\\":\\"echo hi\\"}"}\n\n'
+                "event: response.completed\n"
+                'data: {"type":"response.completed","response":{"id":"r1",'
+                '"status":"completed","usage":{"input_tokens":1,'
+                '"output_tokens":1}}}\n\n'
+            )
+        else:
+            body = (
+                "event: response.output_text.delta\n"
+                'data: {"type":"response.output_text.delta","output_index":0,'
+                '"delta":"done"}\n\n'
+                "event: response.completed\n"
+                'data: {"type":"response.completed","response":{"id":"r2",'
+                '"status":"completed","usage":{"input_tokens":1,'
+                '"output_tokens":1}}}\n\n'
+            )
+        return _httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def scenario():
+        client = _httpx.AsyncClient(transport=_httpx.MockTransport(handler))
+        req = client.build_request("POST", "http://x", json={"model": "m"})
+        upstream = await client.send(req, stream=True)
+        out = []
+        async for chunk in _forward.fold_and_steer_streaming(
+            upstream,
+            client=client,
+            url="http://x",
+            headers={},
+            outbound={"model": "m", "input": []},
+            trace_id="t1",
+            model="m",
+            client_names={"exec_command"},
+        ):
+            out.append(chunk)
+        return b"".join(out).decode()
+
+    raw = _asyncio.run(scenario())
+    assert '"name":"shell"' not in raw
+    assert '"name": "shell"' not in raw
+    assert "done" in raw
+    assert len(seen) == 2
