@@ -37,6 +37,11 @@ def test_notice_empty_without_tools_marks_overrides():
     assert build_tool_notice((), GENUINE_TOOL_NAMES) == ""
     notice = build_tool_notice((SHELL,), GENUINE_TOOL_NAMES)
     assert "'Shell'" in notice and "override" in notice and '"cmd"' in notice
+    # The harness can only execute the tools below: the notice names the
+    # unroutable defaults (read/shell/write/...) so the model stops
+    # calling prepended genuine names its harness cannot dispatch.
+    assert "Only the tools listed below exist" in notice
+    assert "exec_command" not in notice  # generic guidance, not client names
 
 
 def test_redirect_owned_missing_keys_names_tool_and_shape():

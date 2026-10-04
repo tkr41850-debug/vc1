@@ -75,15 +75,22 @@ def build_tool_redirect(
 
 def build_tool_notice(tools: tuple[ToolDef, ...], genuine_names) -> str:
     genuine_lower = {str(n).lower() for n in genuine_names}
+    named = [t for t in tools if t.name]
+    if not named:
+        return ""
     lines = [
         (
             "Client tools (prefer these; where a name collides with a default tool, "
             "use the client tool and its parameter shape):"
-        )
+        ),
+        # The harness you run in can only execute the tools listed
+        # below. Default tool names you may know (read, shell, write,
+        # edit, glob, grep, skill, subagent, webfetch, websearch,
+        # execute, question) are NOT available here unless listed
+        # below — never call any other tool name.
+        "Only the tools listed below exist in this session — never call any other tool name.",
     ]
-    for t in tools:
-        if not t.name:
-            continue
+    for t in named:
         marker = (
             " (override — prefer over same-named default tool)"
             if t.name.lower() in genuine_lower
@@ -93,4 +100,4 @@ def build_tool_notice(tools: tuple[ToolDef, ...], genuine_names) -> str:
             f"- '{t.name}'{marker}: {t.description}\n"
             f"  Parameters: {json.dumps(t.parameters or {})}"
         )
-    return "\n".join(lines) if len(lines) > 1 else ""
+    return "\n".join(lines)

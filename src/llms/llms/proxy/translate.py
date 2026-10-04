@@ -305,6 +305,16 @@ def _responses_tool_to_ir(t: dict) -> ToolDef:
             str(t.get("name", "")),
             str(t.get("description", "")),
             dict(params or {}),
+            # Sibling keys (strict, and any future per-tool flags the
+            # client declared) ride in options so the responses emitter
+            # forwards them verbatim. Dropping them silently changed the
+            # tool contract the model was offered (seen live: codex
+            # exec_command/write_stdin arrived upstream without strict).
+            options={
+                k: v
+                for k, v in t.items()
+                if k not in ("type", "name", "description", "parameters")
+            },
         )
     params = t.get("parameters", {})
     tool_def = ToolDef(
@@ -601,14 +611,30 @@ def _responses_format_from_ir(structured: dict) -> dict:
 
 def _responses_tool_from_ir(t: ToolDef) -> dict:
     if t.kind == "function":
-        return {
+        tool = {
             "type": "function",
             "name": t.name,
             "description": t.description,
             "parameters": t.parameters,
         }
+        # Sibling keys the client declared on the definition (strict,
+        # and any future per-tool flags) forward verbatim — dropping
+        # them silently changed the offered tool contract (seen live:
+        # codex function tools arrived upstream without strict).
+        # cache_control never crosses dialects: an Anthropic breakpoint
+        # has no responses equivalent, and leaking it would change the
+        # tool contract the same way (cee3532 pins the drop in tests).
+        tool.update({k: v for k, v in t.options.items() if k != "cache_control"})
+        return tool
     if t.kind.startswith("web_search"):
-        return {"type": "web_search"}
+        # Built-in search tools forward verbatim (fail-open; upstream
+        # validates): codex declares {"type": "web_search",
+        # "external_web_access": ...}, and dropping that flag silently
+        # changed the offered tool contract. cache_control never
+        # crosses dialects (no responses equivalent).
+        tool: dict = {"type": t.kind}
+        tool.update({k: v for k, v in t.options.items() if k != "cache_control"})
+        return tool
     # Other built-in tools (file_search, computer, mcp, namespace, ...):
     # forward the definition as-is (fail-open; upstream validates).
     # description rides along ALWAYS (even empty): Zen 400s server tools

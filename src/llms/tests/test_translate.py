@@ -913,6 +913,31 @@ def test_responses_namespace_tool_keeps_description():
     assert out["tools"] == [{"type": "function", "name": "close_agent"}]
 
 
+def test_responses_function_tool_sibling_keys_round_trip():
+    # Seen live: codex declares function tools with sibling keys
+    # (strict, and per-tool flags like yield_time_ms nested in the
+    # schema). The round trip must forward the definition verbatim —
+    # dropping them silently changed the offered tool contract.
+    declared = {
+        "type": "function",
+        "name": "exec_command",
+        "description": "Runs a command.",
+        "strict": False,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cmd": {"type": "string"},
+                "yield_time_ms": {"type": "number"},
+            },
+            "required": ["cmd"],
+            "additionalProperties": False,
+        },
+    }
+    req = from_responses({"model": "m", "input": "hi", "tools": [declared]})
+    assert req.tools[0].kind == "function"
+    assert to_zen_responses(req)["tools"] == [declared]
+
+
 def test_responses_additional_tools_dissolve():
     # Live Zen 400 ("input[0] did not match any supported type"):
     # codex additional_tools items dissolve into top-level tools and
