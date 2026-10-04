@@ -37,3 +37,32 @@ def test_notice_empty_without_tools_marks_overrides():
     assert build_tool_notice((), GENUINE_TOOL_NAMES) == ""
     notice = build_tool_notice((SHELL,), GENUINE_TOOL_NAMES)
     assert "'Shell'" in notice and "override" in notice and '"cmd"' in notice
+
+
+def test_redirect_owned_missing_keys_names_tool_and_shape():
+    from llms.proxy.client_tools import build_tool_redirect, owned_tool_names
+
+    owned = owned_tool_names((SHELL,))
+    defs = {"shell": SHELL}
+    text = build_tool_redirect("shell", '{"command": "echo hi"}', owned, defs)
+    assert text is not None
+    assert "'Shell'" in text and "not available" not in text
+    assert "cmd" in text and '"cmd"' in text  # missing key + shape
+
+
+def test_redirect_owned_bad_json_says_args_not_tool():
+    from llms.proxy.client_tools import build_tool_redirect, owned_tool_names
+
+    owned = owned_tool_names((SHELL,))
+    text = build_tool_redirect("shell", "", owned, {"shell": SHELL})
+    assert text is not None
+    assert "not valid" in text and "not available" not in text
+
+
+def test_redirect_undeclared_returns_none():
+    from llms.proxy.client_tools import build_tool_redirect, owned_tool_names
+
+    owned = owned_tool_names((SHELL,))
+    assert (
+        build_tool_redirect("frobnicate", '{"x": 1}', owned, {"shell": SHELL}) is None
+    )

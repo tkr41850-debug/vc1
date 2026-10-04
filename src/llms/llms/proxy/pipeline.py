@@ -329,6 +329,30 @@ def _genuine_calls_in(
     return _classify_calls(calls, owned, defs)
 
 
+def _steer_output_for(call, args, client_names, owned, defs):
+    """Redirect text for one steered call.
+
+    Owned-but-invalid calls get an argument correction (the tool exists;
+    only the arguments were wrong). Undeclared names keep the
+    not-available text with the client tool list. Pure dispatch —
+    wording lives in client_tools.build_tool_redirect.
+    """
+    from llms.proxy.client_tools import build_tool_redirect
+
+    correction = build_tool_redirect(str(call.get("name", "")), args, owned, defs)
+    if correction is not None:
+        return correction
+    return (
+        f"Tool '{call.get('name', '')}' is not available in this session."
+        + (
+            f" Use one of these tools instead: {', '.join(sorted(client_names))}."
+            if client_names
+            else ""
+        )
+        + " If none fits, answer directly without calling a tool."
+    )
+
+
 async def _steer_genuine_calls(
     response: Response,
     *,
@@ -358,6 +382,8 @@ async def _steer_genuine_calls(
         passed, steer_calls = _genuine_calls_in(
             response, client_names, client_tools=client_tools
         )
+        owned = owned_tool_names(client_tools)
+        defs = {t.name.lower(): t for t in client_tools if t.name}
         if passed and not steer_calls:
             # Every call is client-owned and valid: convert casing on the
             # response body so the client dispatches its own declarations.
@@ -411,17 +437,7 @@ async def _steer_genuine_calls(
                 {
                     "type": "function_call_output",
                     "call_id": call_id,
-                    "output": (
-                        f"Tool '{call.get('name', '')}' is not available in "
-                        f"this session."
-                        + (
-                            f" Use one of these tools instead: "
-                            f"{', '.join(sorted(client_names))}."
-                            if client_names
-                            else ""
-                        )
-                        + " If none fits, answer directly without calling a tool."
-                    ),
+                    "output": _steer_output_for(call, args, client_names, owned, defs),
                 }
             )
         outbound = dict(outbound, input=list(outbound.get("input", [])) + followups)

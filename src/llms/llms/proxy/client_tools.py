@@ -33,6 +33,46 @@ def missing_required_keys(arguments: str, tool: ToolDef) -> list[str] | None:
     return [k for k in required if k not in parsed]
 
 
+def build_tool_redirect(
+    call_name: str, arguments: str, owned: dict[str, str], defs: dict
+) -> str | None:
+    """Actionable redirect for a steered call, or None when undeclared.
+
+    Owned-but-invalid calls (the client declared this name but the
+    arguments miss required keys or are not valid JSON) get a correction:
+    the tool exists, the *arguments* were wrong, with the missing keys
+    and the declared parameter shape named. Undeclared names return None
+    (callers fall back to the not-available text): claiming a missing
+    tool "exists" would contradict the tool list the model was given.
+    Pure helper (shared by the synthesize and streaming steer paths).
+    """
+    from llms.proxy.ir import ToolDef
+
+    lowered = call_name.lower() if isinstance(call_name, str) else None
+    if lowered is None or lowered not in owned:
+        return None
+    tool = defs.get(lowered)
+    if not isinstance(tool, ToolDef):
+        return None
+    missing = missing_required_keys(
+        arguments if isinstance(arguments, str) else "", tool
+    )
+    declared = owned[lowered]
+    params = json.dumps(tool.parameters or {})
+    if missing:
+        return (
+            f"Tool '{declared}' was called with the wrong arguments "
+            f"(missing required: {', '.join(missing)}). "
+            f"Its parameter shape is: {params}. "
+            f"Retry the call with corrected arguments."
+        )
+    return (
+        f"Tool '{declared}' was called with arguments that are not valid "
+        f"JSON. Its parameter shape is: {params}. "
+        f"Retry the call with corrected arguments."
+    )
+
+
 def build_tool_notice(tools: tuple[ToolDef, ...], genuine_names) -> str:
     genuine_lower = {str(n).lower() for n in genuine_names}
     lines = [

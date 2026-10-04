@@ -320,6 +320,7 @@ async def fold_and_steer_streaming(
     _steer_failed = False
     from llms.proxy.client_tools import owned_tool_names as _owned_names
     from llms.proxy.pipeline import _classify_calls as _classify
+    from llms.proxy.pipeline import _steer_output_for as _output_for
     from llms.proxy.pipeline import _valid_json as _valid_args
 
     _owned = _owned_names(client_tools)
@@ -407,17 +408,7 @@ async def fold_and_steer_streaming(
                 {
                     "type": "function_call_output",
                     "call_id": call_id,
-                    "output": (
-                        f"Tool '{call.get('name', '')}' is not available in "
-                        f"this session."
-                        + (
-                            f" Use one of these tools instead: "
-                            f"{', '.join(sorted(client_names))}."
-                            if client_names
-                            else ""
-                        )
-                        + " If none fits, answer directly without calling a tool."
-                    ),
+                    "output": _output_for(call, args, client_names, _owned, _defs),
                 }
             )
         outbound = dict(outbound, input=list(outbound.get("input", [])) + followups)

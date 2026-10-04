@@ -969,7 +969,8 @@ def test_streaming_owned_name_converts_casing_and_passes_through(tmp_path):
 
 def test_streaming_owned_name_missing_key_steers(tmp_path):
     """Same setup but args lack required 'cmd': 2 upstream calls, redirect
-    lists 'Shell', followup function_call args are valid JSON upstream."""
+    is an argument correction (not not-available), followup function_call
+    args are valid JSON upstream."""
     import json as _json
 
     from tests.conftest import TEST_HEADERS
@@ -1062,8 +1063,9 @@ def test_owned_name_converts_casing_and_passes_through_synthesize(tmp_path):
 
 
 def test_owned_name_missing_key_steers_synthesize(tmp_path):
-    """Non-streaming mirror: args lack required 'cmd' — steers with the
-    redirect listing 'Shell'."""
+    """Non-streaming mirror: args lack required 'cmd' — steers with an
+    argument correction naming 'Shell' and the missing key (not a
+    not-available redirect)."""
     from tests.conftest import TEST_HEADERS
 
     tc_ctx, calls = _steer_app_client(
@@ -1194,6 +1196,51 @@ def test_synthesize_empty_args_steer_coerces_to_empty_object(tmp_path):
     ]
     assert echoed
     assert all(item["arguments"] == "{}" for item in echoed)
+
+
+def test_owned_missing_key_redirect_corrects_arguments(tmp_path):
+    """Owned-but-wrong-keys redirect says the tool exists and names the
+    missing keys + declared shape — never 'not available' (which
+    contradicts the tool list the model was given)."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_shell1", "shell", '{"command": "echo hi"}'),
+        _text_sse("done"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "run echo",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "Shell",
+                        "description": "mine",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"cmd": {"type": "string"}},
+                            "required": ["cmd"],
+                        },
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 2
+    outputs = [
+        i
+        for i in calls[1]["input"]
+        if isinstance(i, dict) and i.get("type") == "function_call_output"
+    ]
+    assert outputs
+    text = outputs[0]["output"]
+    assert "'Shell'" in text and "not available" not in text
+    assert "cmd" in text and "Retry" in text
 
 
 def test_genuine_nonstreaming_valid_turn_never_steers(tmp_path):
