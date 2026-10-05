@@ -87,10 +87,12 @@ def sniff_stream_usage(lines: list[str], ingress: str):
 
 
 def fold_stream_calls(lines: list[str], ingress: str) -> list[dict]:
-    """Model function calls in one folded SSE body, with wire arguments.
+    """Model tool calls in one folded SSE body, with wire arguments.
 
     Runs the incremental IR parser over buffered lines and collects one
-    entry per announced call: {call_id, name, arguments}. Used by the
+    entry per announced call: {call_id, name, arguments} plus
+    `type: "custom_tool_call"` when the announced item is Custom (the
+    classifier re-types Custom-route calls on passthrough). Used by the
     streaming steer fold to detect calls the client never declared —
     same lowered-name match semantics as the synthesize path.
     """
@@ -101,25 +103,27 @@ def fold_stream_calls(lines: list[str], ingress: str) -> list[dict]:
     framer = SseFramer()
     names: dict[str, str] = {}
     args: dict[str, str] = {}
+    custom: dict[str, bool] = {}
+
+    def _accumulate(delta) -> None:
+        name = parser.names.get(delta.call_id, delta.name)
+        if delta.call_id not in names:
+            names[delta.call_id] = name
+            args[delta.call_id] = ""
+        elif not names[delta.call_id] and name:
+            names[delta.call_id] = name
+        args[delta.call_id] += delta.args_chunk
+        custom[delta.call_id] = custom.get(delta.call_id, False) or delta.custom
+
     for line in lines:
         for payload in framer.feed(line):
             for delta in parser.feed_payload(payload):
                 if isinstance(delta, ToolArgsDelta):
-                    name = parser.names.get(delta.call_id, delta.name)
-                    if delta.call_id not in names:
-                        names[delta.call_id] = name
-                        args[delta.call_id] = ""
-                    elif not names[delta.call_id] and name:
-                        names[delta.call_id] = name
-                    args[delta.call_id] += delta.args_chunk
+                    _accumulate(delta)
     for payload in framer.finish():
         for delta in parser.feed_payload(payload):
             if isinstance(delta, ToolArgsDelta):
-                name = parser.names.get(delta.call_id, delta.name)
-                if delta.call_id not in names:
-                    names[delta.call_id] = name
-                    args[delta.call_id] = ""
-                args[delta.call_id] += delta.args_chunk
+                _accumulate(delta)
     done = parser.finish()
     if isinstance(done, StreamDone) and getattr(done, "has_tool_calls", False):
         for call_id in list(names):
@@ -132,12 +136,16 @@ def fold_stream_calls(lines: list[str], ingress: str) -> list[dict]:
                 if isinstance(delta, ToolArgsDelta) and delta.call_id not in names:
                     names[delta.call_id] = delta.name
                     args[delta.call_id] = delta.args_chunk
+                    custom[delta.call_id] = delta.custom
         except Exception:
             pass
-    return [
-        {"call_id": cid, "name": names[cid], "arguments": args.get(cid, "")}
-        for cid in names
-    ]
+    out = []
+    for cid, cname in names.items():
+        entry = {"call_id": cid, "name": cname, "arguments": args.get(cid, "")}
+        if custom.get(cid):
+            entry["type"] = "custom_tool_call"
+        out.append(entry)
+    return out
 
 
 async def fold_and_steer_streaming(
@@ -318,6 +326,11 @@ async def fold_and_steer_streaming(
     except Exception:
         pass
     _steer_failed = False
+    # Terminal redirect text when the model repeats a steered call it
+    # already saw corrected (set in the loop below): emitted as a real
+    # model turn so the client surfaces the correction instead of the
+    # dead turn replaying as if the call ran.
+    _steer_terminal: list[bytes] | None = None
     from llms.proxy.client_tools import owned_tool_names as _owned_names
     from llms.proxy.pipeline import _classify_calls as _classify
     from llms.proxy.pipeline import _steer_output_for as _output_for
@@ -325,13 +338,22 @@ async def fold_and_steer_streaming(
 
     _owned = _owned_names(client_tools)
     _defs = {t.name.lower(): t for t in client_tools if t.name}
+    _route: dict = {}
+    try:
+        from llms.proxy.client_tools import dispatchable_names as _route_names
+        from llms.proxy.client_tools import nested_tool_defs as _nested_defs
+
+        _defs.update(_nested_defs(client_tools))
+        _route = _route_names(client_tools)
+    except Exception:
+        pass
     for _ in range(max_iters):
         calls = fold_stream_calls(lines, "responses") if lowered is not None else []
         # Shared classifier: owned-valid calls pass (converted casing),
         # owned-invalid and undeclared calls steer. Without client_tools
         # the legacy lowered-membership rule applies.
         if client_tools:
-            passthrough, steer = _classify(calls, _owned, _defs)
+            passthrough, steer = _classify(calls, _owned, _defs, _route)
         else:
             passthrough, steer = (
                 [],
@@ -346,19 +368,28 @@ async def fold_and_steer_streaming(
             )
         if passthrough and not steer:
             # Every call is client-owned and valid: rewrite the replayed
-            # lines' function_call name fields to the declared casing so
-            # the client dispatches its own declarations. Only data lines
-            # parse as JSON (pings/blank separators skip); frame bytes stay
-            # otherwise verbatim.
+            # lines' call name fields to the declared casing so the
+            # client dispatches its own declarations. A Custom-route
+            # call also re-types its frames to custom_tool_call (the
+            # harness dispatches by item type): the added frame's item
+            # type flips and its arguments move to input; delta/done
+            # frames follow the same rename the model used upstream.
+            # Only data lines parse as JSON (pings/blank separators
+            # skip); frame bytes stay otherwise verbatim.
             import json as _json
 
             for call in passthrough:
                 target = call["name"]
+                custom = call.get("type") == "custom_tool_call"
+                # The classifier split code-mode `ns__name` to the bare
+                # name: re-attach a non-default namespace on the replayed
+                # frames (the harness reads the item's own namespace
+                # field). The marker key never reaches the client.
+                route_ns = call.pop("__route_namespace__", "")
                 for i, line in enumerate(lines):
-                    # Rename only the function_call name field for this
-                    # call's frames (matched by call id in the same line).
-                    # Same frame grammar as SseFramer: "data:" with or
-                    # without the space.
+                    # Rewrite only this call's frames (matched by call
+                    # id in the same line). Same frame grammar as
+                    # SseFramer: "data:" with or without the space.
                     cid = call.get("call_id", "")
                     if cid and cid in line and f'"name":"{target}"' not in line:
                         if not line.startswith("data:"):
@@ -379,6 +410,12 @@ async def fold_and_steer_streaming(
                             and item["name"].lower() == target.lower()
                         ):
                             item["name"] = target
+                            if route_ns and "namespace" not in item:
+                                item["namespace"] = route_ns
+                            if custom and item.get("type") == "function_call":
+                                item["type"] = "custom_tool_call"
+                                if "arguments" in item:
+                                    item["input"] = item.pop("arguments")
                             lines[i] = "data: " + _json.dumps(payload)
             break
         if not steer or client_names is None:
@@ -390,10 +427,55 @@ async def fold_and_steer_streaming(
             names,
         )
         followups: list = []
+        # Steer budget accounting: repeated re-requests against a model
+        # that ignores the redirect burn upstream turns without progress
+        # (live: 3x `exec_command {}` then codex gave up client-side).
+        # Only redirects the model has not yet seen can change its next
+        # turn, so cap followups at one redirect per lowered call name:
+        # a repeat steers the same name again with no new text.
+        seen_redirects: set[str] = set()
+        for _line in outbound.get("input", []):
+            if (
+                isinstance(_line, dict)
+                and _line.get("type") == "function_call_output"
+                and isinstance(_line.get("output"), str)
+            ):
+                _out = _line["output"]
+                if _out.startswith("Tool '") and _out != _out[:8]:
+                    seen_redirects.add(_out.split("'", 2)[1].lower())
         for call in steer:
             call_id = str(call.get("call_id") or call.get("id") or "")
             args = call.get("arguments", "")
             args = args if isinstance(args, str) else ""
+            redirect = _output_for(
+                call, args, client_names, _owned, _defs, client_tools
+            )
+            lowered = (
+                call.get("name", "").lower()
+                if isinstance(call.get("name"), str)
+                else ""
+            )
+            if lowered in seen_redirects:
+                # The model already saw this redirect and re-emitted the
+                # same call: another identical re-request cannot help.
+                # Fail closed with the redirect as a terminal error so
+                # the client surfaces it instead of hanging (live: codex
+                # spun 3 identical turns then gave up client-side with
+                # the dead turn replayed as if it ran).
+                from llms.proxy.ir import StreamDone as _Done
+                from llms.proxy.ir import TextDelta as _Text
+                from llms.proxy.stream_translate import (
+                    emit_responses_sse as _emit_sse,
+                )
+
+                lines = []
+                _steer_failed = True
+                _steer_terminal = list(
+                    _emit_sse(
+                        [_Text(redirect), _Done(status="completed")], trace_id, ""
+                    )
+                )
+                break
             followups.append(
                 {
                     "type": "function_call",
@@ -408,7 +490,7 @@ async def fold_and_steer_streaming(
                 {
                     "type": "function_call_output",
                     "call_id": call_id,
-                    "output": _output_for(call, args, client_names, _owned, _defs),
+                    "output": redirect,
                 }
             )
         outbound = dict(outbound, input=list(outbound.get("input", [])) + followups)
@@ -478,8 +560,64 @@ async def fold_and_steer_streaming(
             lines = []
             _steer_failed = True
             break
+        # Loop fell through without break: the re-requested turn still
+        # carries steered calls and the budget is spent. The
+        # post-loop check below fails closed on that state.
+    # Budget exhaustion without a clean turn: the last folded turn still
+    # carries undeclared calls (live: model emitted a fresh undeclared
+    # name every turn, so the budget died without a repeat). Replaying
+    # it would emit an unjudged dead turn the client fails client-side
+    # (`unsupported call`) — fail closed with the last redirect text
+    # instead so the client surfaces the correction.
+    if not _steer_failed:
+        _tail_calls = (
+            fold_stream_calls(lines, "responses") if lowered is not None else []
+        )
+        if client_tools:
+            _, _tail_steer = _classify(_tail_calls, _owned, _defs, _route)
+        else:
+            # Legacy lowered-membership rule (same as the loop body).
+            _tail_steer = [
+                c
+                for c in _tail_calls
+                if not (
+                    isinstance(c.get("name"), str)
+                    and c["name"].lower() in (lowered or set())
+                )
+            ]
+        if _tail_steer and client_names is not None:
+            from llms.proxy.ir import StreamDone as _Done
+            from llms.proxy.ir import TextDelta as _Text
+            from llms.proxy.stream_translate import (
+                emit_responses_sse as _emit_sse,
+            )
+
+            _tail_redirect = _output_for(
+                _tail_steer[0],
+                _tail_steer[0].get("arguments", "")
+                if isinstance(_tail_steer[0].get("arguments", ""), str)
+                else "",
+                client_names,
+                _owned,
+                _defs,
+                client_tools,
+            )
+            logger.warning(
+                "[%s] streaming steer budget exhausted; failing closed",
+                trace_id,
+            )
+            _steer_failed = True
+            _steer_terminal = list(
+                _emit_sse(
+                    [_Text(_tail_redirect), _Done(status="completed")], trace_id, ""
+                )
+            )
     if _steer_failed:
-        chunks = [_slow_error_frame(502, "steer re-request failed")]
+        chunks = (
+            _steer_terminal
+            if _steer_terminal is not None
+            else [_slow_error_frame(502, "steer re-request failed")]
+        )
     else:
         chunks = _replay(lines)
     if usage_sink is not None:

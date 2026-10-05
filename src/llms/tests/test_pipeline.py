@@ -163,9 +163,11 @@ def test_genuine_opencode_chat_passthrough(app_client):
 
 
 def test_nongenuine_overlapping_tools_client_definition_wins(app_client):
-    # Exact-name collision: genuine stays in slot AND client def rides as
-    # a verbatim extra (no slot-substitution); true extras append after.
-    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+    # Exact-name collision: outbound is genuine-12 ONLY — the client
+    # variant rides the notice (instructions), never the wire. The
+    # steer paths still classify against req.tools, so a model call
+    # naming the client tool resolves client-side.
+    from llms.proxy.zen_tools import GENUINE_TOOLS
 
     tc, seen = app_client
     r = tc.post(
@@ -191,25 +193,27 @@ def test_nongenuine_overlapping_tools_client_definition_wins(app_client):
         headers=TEST_HEADERS,
     )
     assert r.status_code == 200
-    tools = seen["json"]["tools"]
-    reads = [t for t in tools if t.get("name") == "read"]
-    assert len(reads) == 2
-    assert reads[0]["description"] != "mine"
-    assert reads[1]["description"] == "mine"
-    assert GENUINE_TOOL_NAMES <= {t.get("name") for t in tools}
-    assert tools[-1]["name"] == "mine"
+    assert seen["json"]["tools"] == GENUINE_TOOLS
     # Notice carries the collision: client instructions + full schemas.
     instructions = seen["json"].get("instructions", "")
     assert "'read'" in instructions and "override" in instructions
+    assert "'mine'" in instructions
 
 
 def test_is_genuine_opencode_detection():
     from llms.proxy.pipeline import is_genuine_opencode
 
     assert is_genuine_opencode({"user-agent": "opencode/latest/2.0.12/cli"})
-    assert is_genuine_opencode({"x-opencode-client": "cli"})
     assert not is_genuine_opencode({"user-agent": "claude-cli/2.1.0"})
     assert not is_genuine_opencode({})
+    # x-opencode-* headers alone never count: the proxy itself sets
+    # them upstream, and codex echoes them back downstream. Honoring
+    # them here silently disabled the notice + tool shaping on every
+    # codex turn (live luna probe: no notice in egress instructions).
+    assert not is_genuine_opencode({"x-opencode-client": "cli"})
+    assert not is_genuine_opencode(
+        {"x-opencode-client": "cli", "x-opencode-project": "global"}
+    )
 
 
 def test_genuine_calls_in_never_steers_client_named_calls():
@@ -282,10 +286,51 @@ def test_genuine_calls_in_splits_owned_by_required_keys():
     assert [c["name"] for c in steer] == ["shell"]
 
 
+def test_genuine_calls_in_custom_route_passes_raw_input():
+    """Custom-route calls (freeform nested tools) pass through re-typed
+    with raw input — never steered on JSON required-keys."""
+    from fastapi.responses import JSONResponse
+
+    from llms.proxy.pipeline import _genuine_calls_in
+    from tests.test_client_tools import _luna_namespace
+
+    def resp(*output):
+        return JSONResponse(status_code=200, content={"output": list(output)})
+
+    ns = _luna_namespace()
+    raw = {
+        "type": "function_call",
+        "call_id": "c1",
+        "name": "apply_patch",
+        "arguments": "*** Begin Patch ***",
+    }
+    passed, steer = _genuine_calls_in(resp(raw), set(), client_tools=(ns,))
+    assert steer == []
+    assert passed[0]["type"] == "custom_tool_call"
+    assert passed[0]["input"] == "*** Begin Patch ***"
+    assert "arguments" not in passed[0]
+    # Function-route nested calls still validate args-object shape:
+    # valid args pass, bare calls steer with a correction.
+    good = dict(
+        raw,
+        call_id="c2",
+        name="exec_command",
+        arguments='{"args": {"cmd": "cat f"}}',
+    )
+    passed, steer = _genuine_calls_in(resp(good), set(), client_tools=(ns,))
+    assert steer == [] and passed[0]["type"] == "function_call"
+    bare = dict(raw, call_id="c3", name="exec_command", arguments="")
+    passed, steer = _genuine_calls_in(resp(bare), set(), client_tools=(ns,))
+    assert passed == [] and [c["name"] for c in steer] == ["exec_command"]
+
+
 def test_server_tool_specs_forwarded_never_500(app_client):
     # Their curl repros #5/#6 against our proxy: unknown server-tool
-    # shapes (web_fetch, server_tool_use-as-tool) forward verbatim for
-    # upstream to judge — JSON downstream, never a plaintext 500.
+    # shapes (web_fetch, server_tool_use-as-tool) on the messages leg
+    # no longer ride the wire (outbound is genuine-12 ONLY — any client
+    # extra can fail the upstream validator and 400 the request).
+    # They live in the notice instead; downstream stays JSON, never a
+    # plaintext 500.
     tc, seen = app_client
     r = tc.post(
         "/v1/messages",
@@ -303,8 +348,10 @@ def test_server_tool_specs_forwarded_never_500(app_client):
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("application/json")
     kinds = [t.get("type") for t in seen["json"]["tools"] if isinstance(t, dict)]
-    assert "web_fetch_20260209" in kinds
-    assert "server_tool_use" in kinds
+    assert "web_fetch_20260209" not in kinds
+    assert "server_tool_use" not in kinds
+    instructions = seen["json"].get("instructions", "")
+    assert "'web_fetch'" in instructions and "'web_search'" in instructions
 
 
 def test_same_dialect_passes_through_untouched(app_client):
@@ -543,9 +590,13 @@ def test_malformed_tool_specs_are_json_never_plaintext_500(app_client):
 
 
 def test_codex_web_search_tool_forwarded(app_client):
-    # Codex equivalent of the web_search report: the declaration must
-    # reach upstream (execution is the backend's job, never the proxy's
-    # to fake by dropping).
+    # Outbound is genuine-12 ONLY: the client web_search declaration
+    # rides the notice (instructions), never the wire — any client
+    # extra can fail the upstream validator and 400 the request.
+    # Execution stays the backend's job: the model still sees the
+    # genuine websearch definition in the tool array.
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+
     tc, seen = app_client
     r = tc.post(
         "/v1/responses",
@@ -557,7 +608,7 @@ def test_codex_web_search_tool_forwarded(app_client):
         headers=TEST_HEADERS,
     )
     assert r.status_code == 200
-    assert seen["json"]["tools"][-1] == {"type": "web_search"}
+    assert {t.get("name") for t in seen["json"]["tools"]} == GENUINE_TOOL_NAMES
 
 
 def test_distinct_codex_threads_get_distinct_sessions(app_client):
@@ -648,13 +699,12 @@ def test_messages_rebuild_is_byte_stable_across_turns(app_client):
 
 
 def test_case_variant_client_tool_appends_beside_genuine(app_client):
-    # Client "Read" vs genuine "read": the gate needs the 12 genuine
-    # definitions byte-identical, so genuine "read" stays untouched and
-    # the client tool appends after as an extra (never replaces, never
-    # dedups). Steering still treats them as the same name (see
-    # _genuine_calls_in case-insensitive rule), so the call passes
-    # back for the client to resolve.
-    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES, GENUINE_TOOLS
+    # Client "Read" vs genuine "read": outbound is genuine-12 ONLY —
+    # the client variant rides the notice, never the wire. Steering
+    # still treats them as the same name (see _genuine_calls_in
+    # case-insensitive rule), so the call passes back for the client
+    # to resolve.
+    from llms.proxy.zen_tools import GENUINE_TOOLS
 
     tc, seen = app_client
     r = tc.post(
@@ -675,22 +725,18 @@ def test_case_variant_client_tool_appends_beside_genuine(app_client):
     )
     assert r.status_code == 200
     tools = seen["json"]["tools"]
-    names = [t.get("name") for t in tools]
-    # All 12 genuine names present with genuine definitions, in order...
-    assert names[:12] == [t["name"] for t in GENUINE_TOOLS]
-    assert GENUINE_TOOL_NAMES <= set(names)
-    genuine_read = next(t for t in tools if t.get("name") == "read")
-    assert genuine_read["description"] != "mine"
-    # ...and the client variant rides after as an extra.
-    assert names[12:] == ["Read"]
+    assert tools == GENUINE_TOOLS
+    # The client variant rides the notice, never the wire.
+    assert "'Read'" in seen["json"].get("instructions", "")
 
 
 def test_genuine_tool_order_and_identity_preserved(app_client):
-    """The 12 genuine definitions go out byte-identical, in order, first.
+    """The 12 genuine definitions go out byte-identical, in order, ONLY.
 
-    Fingerprint contract: Zen's free-tier gate fuzzy-matches the set, so
-    no reorder, no rename, no client definition in a genuine slot unless
-    the client used the EXACT same name.
+    Fingerprint contract: Zen's free-tier gate fuzzy-matches the set,
+    and any client extra can fail the upstream validator (seen live as
+    `tools[12].description` length), so client extras never ride the
+    wire — they live in the notice instead.
     """
     from llms.proxy.zen_tools import GENUINE_TOOLS
 
@@ -713,19 +759,17 @@ def test_genuine_tool_order_and_identity_preserved(app_client):
     )
     assert r.status_code == 200
     tools = seen["json"]["tools"]
-    assert tools[:12] == GENUINE_TOOLS
-    assert [t.get("name") for t in tools][12:] == ["mine"]
+    assert tools == GENUINE_TOOLS
+    assert [t.get("name") for t in tools] == [t["name"] for t in GENUINE_TOOLS]
 
 
 def test_overlay_keeps_genuine_and_client_same_name_verbatim(app_client):
-    """Exact-name collision: genuine stays in slot AND client def rides as
-    extra, both byte-identical (no slot-substitution).
+    """Exact-name collision: outbound is genuine-12 ONLY.
 
-    The outbound tools array is never renamed or swapped: collision
-    handling moved to the tool notice (model-facing) and response-side
-    convert/validate (client-facing).
+    The client variant rides the notice (model-facing); response-side
+    convert/validate still classifies against it (client-facing).
     """
-    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+    from llms.proxy.zen_tools import GENUINE_TOOLS
 
     tc, seen = app_client
     r = tc.post(
@@ -752,23 +796,22 @@ def test_overlay_keeps_genuine_and_client_same_name_verbatim(app_client):
     )
     assert r.status_code == 200
     tools = seen["json"]["tools"]
-    shells = [t for t in tools if t.get("name") == "shell"]
-    assert len(shells) == 2
-    assert shells[0]["description"] != "codex shell"
-    assert shells[1]["description"] == "codex shell"
-    # Gate safety: genuine set rides byte-identical first, client extras after.
-    assert {t.get("name") for t in tools[:12]} == GENUINE_TOOL_NAMES
-    assert tools.index(shells[1]) < tools.index(
-        next(t for t in tools if t.get("name") == "exec_command")
-    )
+    assert tools == GENUINE_TOOLS
+    # Collision handling lives in the notice, not the wire.
+    instructions = seen["json"].get("instructions", "")
+    assert "'shell'" in instructions and "override" in instructions
+    assert "'exec_command'" in instructions
 
 
 def test_overlay_case_variant_keeps_genuine_and_appends_client(app_client):
-    """Client 'Read' vs genuine 'read': genuine untouched, client appends.
+    """Client 'Read' vs genuine 'read': outbound is genuine-12 ONLY.
 
-    Case-insensitive skip must not collapse the variant: renaming the
-    genuine definition breaks the gate, so both ride (existing contract).
+    The client variant rides the notice; steering still treats the
+    names as one (case-insensitive rule), so the call passes back for
+    the client to resolve.
     """
+    from llms.proxy.zen_tools import GENUINE_TOOLS
+
     tc, seen = app_client
     r = tc.post(
         "/v1/responses",
@@ -788,6 +831,34 @@ def test_overlay_case_variant_keeps_genuine_and_appends_client(app_client):
     )
     assert r.status_code == 200
     tools = seen["json"]["tools"]
-    sent_read = next(t for t in tools if t.get("name") == "read")
-    assert sent_read["description"] != "mine"
-    assert next(t for t in tools if t.get("name") == "Read")["description"] == "mine"
+    assert tools == GENUINE_TOOLS
+    assert "'Read'" in seen["json"].get("instructions", "")
+
+
+def test_classify_namespaced_owned_call_passes_with_route_marker():
+    """Code-mode `ns__name` classifies on the bare name (the harness
+    fills its default namespace when absent) and carries the namespace
+    for the dispatch replay."""
+    from llms.proxy.client_tools import dispatchable_names
+    from llms.proxy.ir import ToolDef
+    from llms.proxy.pipeline import _classify_calls, owned_tool_names
+
+    shell = ToolDef(
+        "exec_command",
+        "run",
+        {"type": "object", "properties": {"cmd": {}}, "required": ["cmd"]},
+    )
+    owned = owned_tool_names((shell,))
+    defs = {"exec_command": shell}
+    calls = [
+        {
+            "type": "function_call",
+            "call_id": "c1",
+            "name": "default.exec_command",
+            "arguments": '{"cmd": "cat f"}',
+        }
+    ]
+    passed, steer = _classify_calls(calls, owned, defs, dispatchable_names((shell,)))
+    assert steer == []
+    assert passed[0]["name"] == "exec_command"
+    assert passed[0]["__route_namespace__"] == "default"

@@ -132,7 +132,11 @@ def test_anonymous_dialogue_without_tools_gets_genuine_tools(app_client):
     ]
 
 
-def test_anonymous_tooled_turn_sends_genuine_superset(app_client):
+def test_anonymous_tooled_turn_sends_genuine_only(app_client):
+    # Outbound is genuine-12 ONLY: client extras never ride the wire
+    # (any one can fail the upstream validator and 400 the whole
+    # request — seen live as `tools[12].description` length on a codex
+    # session). The client tool lives in the notice instead.
     from llms.proxy.zen_tools import GENUINE_TOOLS
 
     tc, seen = app_client
@@ -155,10 +159,8 @@ def test_anonymous_tooled_turn_sends_genuine_superset(app_client):
     )
     assert r.status_code == 200
     sent_tools = seen["json"]["tools"]
-    assert [t["name"] for t in sent_tools[: len(GENUINE_TOOLS)]] == [
-        t["name"] for t in GENUINE_TOOLS
-    ]
-    assert sent_tools[-1]["name"] == "bash"
+    assert [t["name"] for t in sent_tools] == [t["name"] for t in GENUINE_TOOLS]
+    assert sent_tools == GENUINE_TOOLS
     # Client tool notice appends after client instructions.
     assert seen["json"]["instructions"].startswith("Be brief.")
     assert "'bash'" in seen["json"]["instructions"]
@@ -441,7 +443,8 @@ def test_client_named_genuine_tool_call_case_insensitive_passthrough(tmp_path):
 def test_client_named_genuine_tool_call_passes_through_unsteered(tmp_path):
     """A call naming a client-declared tool colliding with a genuine name
     (read) is returned verbatim: no steer follow-up (exactly 1 upstream
-    call), and upstream saw the CLIENT's read definition."""
+    call). Outbound is genuine-12 ONLY — the client variant rides the
+    notice (model-facing) and the response convert (client-facing)."""
     from tests.conftest import TEST_HEADERS
 
     tc_ctx, calls = _steer_app_client(
@@ -474,9 +477,10 @@ def test_client_named_genuine_tool_call_passes_through_unsteered(tmp_path):
         )
     assert r.status_code == 200
     assert len(calls) == 1
-    sent = {t.get("name"): t for t in calls[0]["tools"]}
-    assert sent["read"]["description"] == "mine"
-    assert sent["mine"]["description"] == "extra"
+    from llms.proxy.zen_tools import GENUINE_TOOLS
+
+    assert calls[0]["tools"] == GENUINE_TOOLS
+    assert "'read'" in calls[0].get("instructions", "")
     returned = [
         i for i in r.json().get("output", []) if i.get("type") == "function_call"
     ]
@@ -1337,13 +1341,15 @@ def test_deferred_only_tools_notice_lists_them_e2e(app_client):
         for i in seen["json"].get("input", [])
         if isinstance(i, dict) and i.get("type") == "additional_tools"
     ]
-    # ...but the dissolved tool is in tools and named in the notice.
+    # ...but the dissolved tool is named in the notice (instructions),
+    # never in outbound tools (genuine-12 ONLY — client extras must not
+    # ride the wire where the upstream validator can 400 them).
     names = [
         t.get("name")
         for t in seen["json"].get("tools", [])
         if isinstance(t, dict) and t.get("name")
     ]
-    assert "deferred_exec" in names
+    assert "deferred_exec" not in names
     assert "'deferred_exec'" in seen["json"]["instructions"]
 
 
@@ -1647,3 +1653,179 @@ def test_streaming_steer_rerequest_error_signals_not_replays(tmp_path):
     usage = tc.app.state.usage.snapshot()["keys"][TEST_SECRET]
     assert usage["input_tokens"] == 0
     assert usage["output_tokens"] == 0
+
+
+def _undeclared_turn_sse(call_id: str, name: str) -> bytes:
+    """Upstream SSE emitting one undeclared function_call turn (test helper)."""
+    return _tool_call_sse(call_id, name, "{}")
+
+
+def test_streaming_steer_exhaustion_fails_closed_with_redirect_text(tmp_path):
+    """Steer budget spent on fresh undeclared names: no unjudged turn replays.
+
+    Live shape: the model emits a NEW undeclared name every turn (shell,
+    execute, read, glob), so the loop never sees a repeat and the budget
+    dies — the 4th turn must not replay downstream (the client fails it
+    with `unsupported call`). Instead the client gets the last redirect
+    text as a terminal turn.
+    """
+    import httpx
+
+    from tests.conftest import TEST_HEADERS, TEST_SECRET, build_app_client
+    from tests.conftest import make_settings as _make_settings
+
+    names = ["shell", "execute", "read", "glob"]
+    calls: list = []
+
+    async def handler(request):
+        import json as _json
+
+        calls.append(_json.loads(request.content.decode()))
+        idx = len(calls) - 1
+        body = _undeclared_turn_sse(f"call_ex{idx}", names[min(idx, 3)])
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    with build_app_client(
+        _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "run echo",
+                "stream": True,
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "exec_command",
+                        "description": "run",
+                        "parameters": {"type": "object"},
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    # No unjudged dead turn reaches the client: no function_call frames.
+    assert "function_call" not in r.text
+    # The client surfaces the last correction instead.
+    assert "not available in this session" in r.text
+    # Budget honored: 1 initial + STEER_MAX_ITERS re-requests.
+    from llms.proxy.pipeline import STEER_MAX_ITERS
+
+    assert len(calls) == 1 + STEER_MAX_ITERS
+
+
+def test_synthesize_steer_exhaustion_fails_closed_with_redirect_json(tmp_path):
+    """Synthesize-path mirror: budget exhaustion returns redirect text.
+
+    The JSON body carries the last redirect as the assistant message —
+    never a dead turn with calls the client cannot execute.
+    """
+    import httpx
+
+    from tests.conftest import TEST_HEADERS, TEST_SECRET, build_app_client
+    from tests.conftest import make_settings as _make_settings
+
+    names = ["shell", "execute", "read", "glob"]
+    calls: list = []
+
+    async def handler(request):
+        import json as _json
+
+        calls.append(_json.loads(request.content.decode()))
+        idx = len(calls) - 1
+        body = _undeclared_turn_sse(f"call_ex{idx}", names[min(idx, 3)])
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    with build_app_client(
+        _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "run echo",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "exec_command",
+                        "description": "run",
+                        "parameters": {"type": "object"},
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert not [i for i in body.get("output", []) if i.get("type") == "function_call"]
+    texts = [
+        c.get("text", "")
+        for i in body.get("output", [])
+        if i.get("type") == "message"
+        for c in i.get("content", [])
+    ]
+    assert texts and "not available in this session" in texts[0]
+    from llms.proxy.pipeline import STEER_MAX_ITERS
+
+    assert len(calls) == 1 + STEER_MAX_ITERS
+
+
+def test_steer_redirect_plain_leg_omits_nested_channel(tmp_path):
+    """Plain function leg: the undeclared-name redirect must not teach
+    the `exec` custom_tool_call channel (that harness exposes no `exec`
+    — the text would contradict the usable tool list)."""
+    from llms.proxy.ir import ToolDef
+    from llms.proxy.pipeline import _steer_output_for, owned_tool_names
+
+    shell = ToolDef(
+        "exec_command",
+        "run",
+        {"type": "object", "properties": {"cmd": {}}, "required": ["cmd"]},
+    )
+    tools = (shell,)
+    text = _steer_output_for(
+        {"name": "glob", "call_id": "c1"},
+        "{}",
+        {"exec_command"},
+        owned_tool_names(tools),
+        {"exec_command": shell},
+        tools,
+    )
+    assert "not available in this session" in text
+    assert "custom_tool_call" not in text
+    assert "answer directly without calling a tool" in text
+
+
+def test_steer_redirect_nested_leg_keeps_exec_channel():
+    """Deferred-namespace leg: the redirect keeps the `exec` channel
+    guidance (the harness runs nested tools through it)."""
+    from llms.proxy.pipeline import _steer_output_for, owned_tool_names
+    from tests.test_client_tools import _luna_namespace
+
+    ns = (_luna_namespace(),)
+    text = _steer_output_for(
+        {"name": "glob", "call_id": "c1"},
+        "{}",
+        {"exec_command"},
+        owned_tool_names(ns),
+        {},
+        ns,
+    )
+    assert "not available in this session" in text
+    assert "custom_tool_call" in text and "`exec`" in text

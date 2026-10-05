@@ -977,6 +977,8 @@ def test_responses_additional_tools_dissolve():
 
 
 def test_tool_choice_canonicalized_across_dialects():
+    from dataclasses import replace
+
     from llms.proxy.translate import (
         from_chat,
         from_messages,
@@ -1000,6 +1002,12 @@ def test_tool_choice_canonicalized_across_dialects():
         "function": {"name": "bash"},
     }
     assert to_zen_messages(req)["tool_choice"] == {"type": "tool", "name": "bash"}
+    # Responses outbound is genuine-12 ONLY (client extras never ride the
+    # wire): a name pin dangles upstream, so it drops. "none"/"auto"
+    # (naming no tool) still forward.
+    assert "tool_choice" not in to_zen_responses(req)
+    assert to_zen_responses(replace(req, tool_choice="none"))["tool_choice"] == "none"
+    assert to_zen_responses(replace(req, tool_choice="auto"))["tool_choice"] == "auto"
 
     # chat function-form choice degrades to auto no longer: it maps by name
     req2 = from_messages(
@@ -1185,3 +1193,75 @@ def test_responses_notice_lists_full_client_set_with_schemas():
     assert body["instructions"].startswith("be nice")
     assert "'Shell'" in body["instructions"] and '"cmd"' in body["instructions"]
     assert "override" in body["instructions"]
+
+
+def test_custom_tool_call_round_trips_through_ir():
+    # Custom-route items (exec JS orchestrator) parse into custom IR
+    # blocks and emit back as custom_tool_call/custom_tool_call_output
+    # — never coerced to the Function shape (matches_kind fatals).
+    from llms.proxy.ir import (
+        ROLE_ASSISTANT,
+        ROLE_TOOL,
+        LlmMessage,
+        ToolCallBlock,
+        ToolResultBlock,
+    )
+    from llms.proxy.translate import (
+        ir_messages_to_responses_output,
+        responses_output_to_ir_messages,
+        to_zen_responses,
+    )
+
+    output = [
+        {"type": "custom_tool_call", "call_id": "c1", "name": "exec",
+         "input": "await tools.exec_command({cmd: \"x\"})"},
+        {"type": "custom_tool_call_output", "call_id": "c1",
+         "output": "done"},
+    ]
+    msgs = responses_output_to_ir_messages(output)
+    calls = [b for m in msgs for b in m.blocks if isinstance(b, ToolCallBlock)]
+    results = [b for m in msgs for b in m.blocks if isinstance(b, ToolResultBlock)]
+    assert calls and calls[0].custom and calls[0].arguments.startswith("await tools")
+    assert results and results[0].custom
+    back = ir_messages_to_responses_output(msgs)
+    assert back[0]["type"] == "custom_tool_call"
+    assert back[0]["input"].startswith("await tools")
+    assert "arguments" not in back[0]
+    # (Output carries assistant calls only; tool results ride the next
+    # turn's input — asserted below, not in the output list.)
+    assert len(back) == 1
+    # Egress input history keeps the Custom shape too.
+    req_msgs = (
+        LlmMessage(role=ROLE_ASSISTANT, blocks=(calls[0],)),
+        LlmMessage(role=ROLE_TOOL, blocks=(results[0],)),
+    )
+    from llms.proxy.ir import RequestIR
+
+    out = to_zen_responses(RequestIR(model="m", messages=req_msgs))
+    kinds = [i.get("type") for i in out["input"]]
+    assert kinds == ["custom_tool_call", "custom_tool_call_output"]
+
+
+def test_tool_notice_also_appends_to_developer_message():
+    # Codex sends the harness-guidance system prompt top-level AND
+    # per-turn skills/permissions context as a developer input item;
+    # from_responses maps both to ROLE_SYSTEM, but the live model kept
+    # calling overlay names while the notice sat in only one half.
+    # The notice must land in both.
+    from llms.proxy.ir import LlmMessage, ROLE_USER, ROLE_SYSTEM, TextBlock
+    from llms.proxy.translate import to_zen_responses
+    from llms.proxy.ir import RequestIR
+
+    req = RequestIR(
+        model="m",
+        messages=(
+            LlmMessage(role=ROLE_SYSTEM, blocks=(TextBlock("sys"),)),
+            LlmMessage(role="developer", blocks=(TextBlock("skills ctx"),)),
+            LlmMessage(role=ROLE_USER, blocks=(TextBlock("hi"),)),
+        ),
+    )
+    out = to_zen_responses(req, tool_notice="NOTICE")
+    assert out["instructions"].endswith("NOTICE")
+    dev = [i for i in out["input"] if i.get("role") == "developer"]
+    assert len(dev) == 1
+    assert dev[0]["content"][-1]["text"].endswith("NOTICE")

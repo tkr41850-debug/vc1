@@ -303,6 +303,7 @@ def deltas_to_response_ir(deltas, model: str) -> ResponseIR:
     thinking: list[str] = []
     tool_args: dict[str, list[str]] = {}
     tool_names: dict[str, str] = {}
+    tool_custom: dict[str, bool] = {}
     order: list[str] = []
     status = "completed"
     in_tok: int | None = None
@@ -318,9 +319,11 @@ def deltas_to_response_ir(deltas, model: str) -> ResponseIR:
             if delta.call_id not in tool_args:
                 tool_args[delta.call_id] = []
                 tool_names[delta.call_id] = delta.name
+                tool_custom[delta.call_id] = delta.custom
                 order.append(delta.call_id)
             if not tool_names[delta.call_id] and delta.name:
                 tool_names[delta.call_id] = delta.name
+            tool_custom[delta.call_id] = tool_custom[delta.call_id] or delta.custom
             tool_args[delta.call_id].append(delta.args_chunk)
         elif isinstance(delta, StreamDone):
             status = delta.status
@@ -336,7 +339,14 @@ def deltas_to_response_ir(deltas, model: str) -> ResponseIR:
     for call_id in order:
         args = "".join(tool_args[call_id])
         if args or tool_names[call_id]:
-            blocks.append(ToolCallBlock(call_id, tool_names[call_id], args))
+            blocks.append(
+                ToolCallBlock(
+                    call_id,
+                    tool_names[call_id],
+                    args,
+                    custom=tool_custom.get(call_id, False),
+                )
+            )
     return ResponseIR(
         model=model,
         status=status,

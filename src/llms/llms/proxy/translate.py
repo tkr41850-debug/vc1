@@ -375,6 +375,21 @@ def from_responses(body: dict) -> RequestIR:
                     ),
                 )
             )
+        elif kind == "custom_tool_call":
+            call_id = str(item.get("call_id", item.get("id", "")))
+            messages.append(
+                LlmMessage(
+                    role=ROLE_ASSISTANT,
+                    blocks=(
+                        ToolCallBlock(
+                            call_id,
+                            str(item.get("name", "")),
+                            str(item.get("input", "")),
+                            custom=True,
+                        ),
+                    ),
+                )
+            )
         elif kind == "function_call_output":
             text, images = _responses_output_to_blocks(item.get("output"))
             messages.append(
@@ -382,6 +397,19 @@ def from_responses(body: dict) -> RequestIR:
                     role=ROLE_TOOL,
                     blocks=(
                         ToolResultBlock(str(item.get("call_id", "")), text),
+                        *images,
+                    ),
+                )
+            )
+        elif kind == "custom_tool_call_output":
+            text, images = _responses_output_to_blocks(item.get("output"))
+            messages.append(
+                LlmMessage(
+                    role=ROLE_TOOL,
+                    blocks=(
+                        ToolResultBlock(
+                            str(item.get("call_id", "")), text, custom=True
+                        ),
                         *images,
                     ),
                 )
@@ -700,7 +728,11 @@ def to_zen_responses(req: RequestIR, *, tool_notice: str = "") -> dict:
                 if isinstance(b, ToolResultBlock):
                     body["input"].append(
                         {
-                            "type": "function_call_output",
+                            "type": (
+                                "custom_tool_call_output"
+                                if b.custom
+                                else "function_call_output"
+                            ),
                             "call_id": b.call_id,
                             "output": b.output,
                         }
@@ -726,18 +758,32 @@ def to_zen_responses(req: RequestIR, *, tool_notice: str = "") -> dict:
                 # Neither: unresolvable reference — drop the part rather
                 # than emitting an empty image_url upstream.
             elif isinstance(b, ToolCallBlock):
-                body["input"].append(
-                    {
-                        "type": "function_call",
-                        "call_id": b.call_id,
-                        "name": b.name,
-                        "arguments": b.wire_arguments(),
-                    }
-                )
+                if b.custom:
+                    body["input"].append(
+                        {
+                            "type": "custom_tool_call",
+                            "call_id": b.call_id,
+                            "name": b.name,
+                            "input": b.arguments,
+                        }
+                    )
+                else:
+                    body["input"].append(
+                        {
+                            "type": "function_call",
+                            "call_id": b.call_id,
+                            "name": b.name,
+                            "arguments": b.wire_arguments(),
+                        }
+                    )
             elif isinstance(b, ToolResultBlock):
                 body["input"].append(
                     {
-                        "type": "function_call_output",
+                        "type": (
+                            "custom_tool_call_output"
+                            if b.custom
+                            else "function_call_output"
+                        ),
                         "call_id": b.call_id,
                         "output": b.output,
                     }
@@ -756,10 +802,19 @@ def to_zen_responses(req: RequestIR, *, tool_notice: str = "") -> dict:
         # Responses mirrors the chat wire shape (string or function-form
         # dict); a messages-shaped {"type": "tool"} choice canonicalized
         # at ingress into {"name": ...} would otherwise leak through.
+        # Outbound carries genuine-12 ONLY (client extras never ride the
+        # wire — any one can fail the upstream validator and 400 the
+        # whole request), so a choice pinning a client tool is dropped:
+        # pinning a name the model was never offered reads as a dangling
+        # reference upstream. "none" (tool ban) still forwards — it names
+        # no tool, so nothing dangles.
         choice = req.tool_choice
         if isinstance(choice, dict) and choice.get("type") == "tool":
             choice = {"name": choice.get("name", "")}
-        body["tool_choice"] = choice
+        if isinstance(choice, dict):
+            choice = None
+        if choice is not None:
+            body["tool_choice"] = choice
     if req.params.temperature is not None:
         body["temperature"] = req.params.temperature
     if req.params.top_p is not None:
@@ -787,11 +842,36 @@ def to_zen_responses(req: RequestIR, *, tool_notice: str = "") -> dict:
         # after client instructions. Live A/B verdict 2026-10-03: the
         # message-append variant steers no better (model still calls
         # overlay names first, then self-heals via redirect), so the
-        # instructions placement wins on prompt-cache stability.
+        # instructions placement wins on prompt-cache stability. But
+        # instructions only carry what from_responses mapped to
+        # ROLE_SYSTEM — top-level `instructions` plus `developer` input
+        # items (codex sends BOTH: the harness-guidance system prompt
+        # rides top-level, per-turn skills/permissions context rides a
+        # developer message). A notice visible in only one half loses
+        # to whichever half the model weights: observed live, the
+        # model kept calling `default.exec_command` while the notice
+        # sat 5KB deep in the other half. Belt and suspenders: append
+        # to instructions AND to the first developer message.
         if body.get("instructions"):
             body["instructions"] = f"{body['instructions']}\n\n{tool_notice}"
         else:
             body["instructions"] = tool_notice
+        for item in body.get("input", []):
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "message"
+                and item.get("role") == "developer"
+            ):
+                content = item.get("content")
+                if isinstance(content, list) and content:
+                    last = content[-1]
+                    if (
+                        isinstance(last, dict)
+                        and last.get("type") == "input_text"
+                        and isinstance(last.get("text"), str)
+                    ):
+                        last["text"] = f"{last['text']}\n\n{tool_notice}"
+                        break
     return body
 
 
@@ -836,6 +916,35 @@ def responses_output_to_ir_messages(output: list) -> tuple:
                             str(item.get("name", "")),
                             str(item.get("arguments", "")),
                         ),
+                    ),
+                )
+            )
+        elif kind == "custom_tool_call":
+            messages.append(
+                LlmMessage(
+                    role=ROLE_ASSISTANT,
+                    blocks=(
+                        ToolCallBlock(
+                            str(item.get("call_id", item.get("id", ""))),
+                            str(item.get("name", "")),
+                            str(item.get("input", "")),
+                            custom=True,
+                        ),
+                    ),
+                )
+            )
+        elif kind == "custom_tool_call_output":
+            text, images = _responses_output_to_blocks(item.get("output"))
+            messages.append(
+                LlmMessage(
+                    role=ROLE_TOOL,
+                    blocks=(
+                        ToolResultBlock(
+                            str(item.get("call_id", item.get("id", ""))),
+                            text,
+                            custom=True,
+                        ),
+                        *images,
                     ),
                 )
             )
@@ -929,14 +1038,24 @@ def ir_messages_to_responses_output(messages: tuple) -> list:
                     }
                 )
             elif isinstance(b, ToolCallBlock):
-                output.append(
-                    {
-                        "type": "function_call",
-                        "call_id": b.call_id,
-                        "name": b.name,
-                        "arguments": b.wire_arguments(),
-                    }
-                )
+                if b.custom:
+                    output.append(
+                        {
+                            "type": "custom_tool_call",
+                            "call_id": b.call_id,
+                            "name": b.name,
+                            "input": b.arguments,
+                        }
+                    )
+                else:
+                    output.append(
+                        {
+                            "type": "function_call",
+                            "call_id": b.call_id,
+                            "name": b.name,
+                            "arguments": b.wire_arguments(),
+                        }
+                    )
             elif isinstance(b, OpaqueBlock):
                 output.append(dict(b.item))
     return output

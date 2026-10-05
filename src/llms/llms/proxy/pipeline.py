@@ -253,28 +253,62 @@ def _valid_json(args: str) -> bool:
 
 
 def _classify_calls(
-    calls: list[dict], owned: dict[str, str], client_defs: dict[str, object]
+    calls: list[dict],
+    owned: dict[str, str],
+    client_defs: dict[str, object],
+    route: dict[str, tuple[str, str]] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Split folded model calls into (passthrough, steer) by client ownership.
 
     A call whose lowered name the client declared passes through with its
     name converted to the declared casing — provided its arguments carry
-    the client's required keys. Owned-but-invalid calls (missing required
-    keys, unparseable/non-object args) steer like undeclared ones: the
-    client cannot execute them, so the redirect + re-request recovers.
-    Pure helper (shared semantics with the streaming fold in forward.py).
-    Takes folded call dicts (not a Response) so both the synthesize path
-    (via _genuine_calls_in) and the streaming fold (via fold_stream_calls)
-    share one classifier.
+    the client's required keys. Calls whose dispatch route is
+    `custom_tool_call` pass through re-typed (via rewrite_steered_call):
+    the harness dispatches by item type, so a Custom-route call arriving
+    as `function_call` would fail lookup client-side. Owned-but-invalid
+    calls (missing required keys, unparseable/non-object args) steer
+    like undeclared ones: the client cannot execute them, so the
+    redirect + re-request recovers. Pure helper (shared semantics with
+    the streaming fold in forward.py). Takes folded call dicts (not a
+    Response) so both the synthesize path (via _genuine_calls_in) and
+    the streaming fold (via fold_stream_calls) share one classifier.
     """
+    from llms.proxy.client_tools import rewrite_steered_call, split_call_name
     from llms.proxy.ir import ToolDef
 
     passthrough: list[dict] = []
     steer: list[dict] = []
     for call in calls:
         name = call.get("name")
-        lowered = name.lower() if isinstance(name, str) else None
+        # Code-mode `ns__name` calls split to the bare name first: the
+        # harness dispatches by ToolName (with_default_namespace), so
+        # `default.exec_command` is `exec_command` in the default
+        # namespace — ownership, routing, and casing all key on the
+        # bare name (live: `default.exec_command` steered forever as
+        # undeclared). A non-default namespace rides
+        # `__route_namespace__` so the replay can re-attach it (the
+        # harness reads the item's own namespace field).
+        ns, bare = split_call_name(name) if isinstance(name, str) else ("", None)
+        lowered = bare.lower() if isinstance(bare, str) else None
         if lowered is not None and lowered in owned:
+            # Custom-route calls (raw-string payload: patch text, JS
+            # source) skip the JSON required-keys check — it would
+            # always reject them. Re-type and pass through with the
+            # input preserved verbatim.
+            item_type = (
+                route.get(lowered, ("function_call", lowered))[0]
+                if route
+                else "function_call"
+            )
+            if item_type == "custom_tool_call":
+                fixed = {**call, "name": convert_call_name(name, owned)}
+                rewritten = rewrite_steered_call(
+                    fixed,
+                    call.get("arguments", ""),
+                    route if route is not None else {},
+                )
+                passthrough.append(rewritten if rewritten is not None else fixed)
+                continue
             tool = client_defs.get(lowered)
             args = call.get("arguments", "")
             if (
@@ -282,7 +316,16 @@ def _classify_calls(
                 and missing_required_keys(args if isinstance(args, str) else "", tool)
                 == []
             ):
-                passthrough.append({**call, "name": convert_call_name(name, owned)})
+                fixed = {**call, "name": convert_call_name(name, owned)}
+                if ns:
+                    fixed["__route_namespace__"] = ns
+                if route is not None:
+                    rewritten = rewrite_steered_call(
+                        fixed, args if isinstance(args, str) else "", route
+                    )
+                    if rewritten is not None:
+                        fixed = rewritten
+                passthrough.append(fixed)
                 continue
         steer.append(call)
     return passthrough, steer
@@ -324,33 +367,44 @@ def _genuine_calls_in(
         calls.append(item)
     if not client_tools:
         return [], calls
+    from llms.proxy.client_tools import dispatchable_names, nested_tool_defs
+
     owned = owned_tool_names(client_tools)
     defs = {t.name.lower(): t for t in client_tools if t.name}
-    return _classify_calls(calls, owned, defs)
+    defs.update(nested_tool_defs(client_tools))
+    return _classify_calls(calls, owned, defs, dispatchable_names(client_tools))
 
 
-def _steer_output_for(call, args, client_names, owned, defs):
+def _steer_output_for(call, args, client_names, owned, defs, client_tools=()):
     """Redirect text for one steered call.
 
     Owned-but-invalid calls get an argument correction (the tool exists;
     only the arguments were wrong). Undeclared names keep the
     not-available text with the client tool list. Pure dispatch —
-    wording lives in client_tools.build_tool_redirect.
+    wording lives in client_tools.build_tool_redirect. The nested-tool
+    (`exec` orchestrator) guidance appends only on legs whose harness
+    actually exposes that channel — on plain function legs it would
+    contradict the usable tool list in the same message.
     """
-    from llms.proxy.client_tools import build_tool_redirect
+    from llms.proxy.client_tools import build_tool_redirect, has_nested_exec_channel
 
     correction = build_tool_redirect(str(call.get("name", "")), args, owned, defs)
     if correction is not None:
         return correction
-    return (
-        f"Tool '{call.get('name', '')}' is not available in this session."
-        + (
-            f" Use one of these tools instead: {', '.join(sorted(client_names))}."
-            if client_names
-            else ""
-        )
-        + " If none fits, answer directly without calling a tool."
+    text = f"Tool '{call.get('name', '')}' is not available in this session." + (
+        f" Use one of these tools instead: {', '.join(sorted(client_names))}."
+        if client_names
+        else ""
     )
+    if has_nested_exec_channel(client_tools):
+        text += (
+            " To run a nested tool (exec_command, apply_patch, ...), emit "
+            + "ONE `custom_tool_call` item named `exec` whose `input` is "
+            + "JavaScript calling it on the `tools` object "
+            + '(e.g. `"input": "await tools.exec_command({cmd: "cat '
+            + 'FILE"})"`).'
+        )
+    return text + " If none fits, answer directly without calling a tool."
 
 
 async def _steer_genuine_calls(
@@ -384,9 +438,15 @@ async def _steer_genuine_calls(
         )
         owned = owned_tool_names(client_tools)
         defs = {t.name.lower(): t for t in client_tools if t.name}
+        from llms.proxy.client_tools import nested_tool_defs as _nested_defs
+
+        defs.update(_nested_defs(client_tools))
         if passed and not steer_calls:
             # Every call is client-owned and valid: convert casing on the
             # response body so the client dispatches its own declarations.
+            # A Custom-route call also re-types to custom_tool_call with
+            # its arguments moved to input (the harness dispatches by
+            # item type — a Function-typed apply_patch fails lookup).
             try:
                 payload = json.loads(response.body.decode())
             except Exception:
@@ -407,6 +467,19 @@ async def _steer_genuine_calls(
                 )
                 if key in by_id:
                     by_id[key]["name"] = call["name"]
+                    # The classifier split code-mode `ns__name` to the
+                    # bare name for ownership: re-attach a non-default
+                    # namespace for the dispatch replay (the harness
+                    # reads the item's own namespace field — a bare
+                    # replay would land in the wrong namespace). The
+                    # marker key never reaches the client (popped).
+                    ns = call.pop("__route_namespace__", "")
+                    if ns:
+                        by_id[key]["namespace"] = ns
+                    if call.get("type") == "custom_tool_call":
+                        by_id[key]["type"] = "custom_tool_call"
+                        if "arguments" in by_id[key]:
+                            by_id[key]["input"] = by_id[key].pop("arguments")
             response = JSONResponse(status_code=200, content=payload)
             break
         calls = steer_calls
@@ -437,9 +510,17 @@ async def _steer_genuine_calls(
                 {
                     "type": "function_call_output",
                     "call_id": call_id,
-                    "output": _steer_output_for(call, args, client_names, owned, defs),
+                    "output": _steer_output_for(
+                        call, args, client_names, owned, defs, client_tools
+                    ),
                 }
             )
+        # Steered calls replay upstream as the client's own history so
+        # the re-request sees the dead turn verbatim. Model output on
+        # this path is Function-typed by construction (JSON body), so
+        # the dead turn replays verbatim — no route re-typing needed
+        # (contrast the streaming fold, which re-types Custom-marked
+        # folded frames).
         outbound = dict(outbound, input=list(outbound.get("input", [])) + followups)
         response = await forward(
             client,
@@ -449,6 +530,50 @@ async def _steer_genuine_calls(
             trace_id,
             synthesize_json=synthesize,
         )
+    else:
+        # Budget exhaustion without a clean turn: the last response still
+        # carries calls the client cannot execute (live: model emitted a
+        # fresh undeclared name every turn, so the loop died without a
+        # repeat or a pass). Returning it would replay an unjudged dead
+        # turn the client fails client-side (`unsupported call`) — fail
+        # closed with the first steered call's redirect as the assistant
+        # message instead, so the client surfaces the correction.
+        tail_passed, tail_steer = _genuine_calls_in(
+            response, client_names, client_tools=client_tools
+        )
+        if not (tail_passed and not tail_steer) and tail_steer:
+            tail_call = tail_steer[0]
+            tail_args = tail_call.get("arguments", "")
+            tail_args = tail_args if isinstance(tail_args, str) else ""
+            logger.warning("[%s] steer budget exhausted; failing closed", trace_id)
+            response = JSONResponse(
+                status_code=200,
+                content={
+                    "id": f"resp_{trace_id}",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": _steer_output_for(
+                                        tail_call,
+                                        tail_args,
+                                        client_names,
+                                        owned,
+                                        defs,
+                                        client_tools,
+                                    ),
+                                    "annotations": [],
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
     return response, outbound
 
 
@@ -458,27 +583,33 @@ def is_genuine_opencode(headers) -> bool:
     Genuine opencode already carries the exact wire identity Zen's gate
     wants (canonical instructions + genuine tool set), so the anonymous
     shaping below (tool injection, chat sysprompt prefix) must not
-    mangle it — passthrough instead. Other clients (Claude Code, Codex,
-    DSH) send no opencode product headers and keep the shaping.
+    mangle it — passthrough instead. Only the opencode User-Agent
+    counts: x-opencode-client/project/session headers are ones the
+    proxy itself sets on the upstream leg, so honoring them here
+    misfires whenever a client echoes proxied headers back (codex
+    does exactly this — live: every codex turn arrived with
+    x-opencode-client/project/session and lost its notice + tools).
     """
     ua = headers.get("user-agent", "")
-    return ua.startswith("opencode/") or bool(headers.get("x-opencode-client"))
+    return ua.startswith("opencode/")
 
 
 def _with_genuine_tools(outbound: dict) -> None:
-    """Prepend the genuine tool set ahead of client extras, verbatim.
+    """Replace outbound tools with the genuine set, verbatim.
 
-    The free-tier gate fuzzy-matches the set: the 12 genuine definitions
-    must go out byte-identical, in order, ahead of any extras. The
-    outbound tools array is never renamed or slot-substituted — a client
-    tool reusing a genuine name rides as a verbatim extra alongside the
-    genuine definition. Collision handling lives in the tool notice
-    (model-facing, built in translate) and in response-side
-    convert/validate (client-facing, in the steer paths).
+    Outbound carries ONLY the 12 genuine opencode definitions (byte-
+    identical, in order): the free-tier gate fuzzy-matches the set, and
+    client-declared extras must never ride the wire — any one of them
+    can fail the upstream validator (seen live: gpt-5.6-luna codex
+    session 400ing on `tools[12].description` length) and break
+    inference before a single model turn runs. Client tools live in
+    the system prompt instead (tool notice, built in translate from
+    req.tools), which no validator checks. Response-side steering
+    still classifies against req.tools, so unknown genuine-named
+    calls steer back to the client's own declarations.
     Mutates outbound in place.
     """
-    extras = [t for t in outbound.get("tools", []) or []]
-    outbound["tools"] = [*GENUINE_TOOLS, *extras]
+    outbound["tools"] = [*GENUINE_TOOLS]
 
 
 def _ensure_chat_system(outbound: dict) -> None:
@@ -792,13 +923,17 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     if egress == "responses":
         outbound["prompt_cache_key"] = session_id
         # Anonymous free tier matches the genuine tool set (bisected
-        # live: full set + any client extras passes; bare/renamed
-        # sets 403). Genuine keeps exact fidelity (passthrough, no
+        # live: full set passes; bare/renamed sets 403). Outbound is
+        # genuine-12 ONLY: client extras never ride the wire (any one
+        # can fail the upstream validator and 400 the whole request —
+        # seen live as `tools[12].description` length on a codex
+        # session). Genuine keeps exact fidelity (passthrough, no
         # notice); keyed operators likewise. The client tool notice
         # (model-facing collision handling, appended after client
         # instructions by to_zen_responses) is computed above from the
         # full set — req.tools already includes deferred
-        # `additional_tools` names (dissolved in from_responses).
+        # `additional_tools` names (dissolved in from_responses) — and
+        # the steer paths below still classify against req.tools.
         if not settings.zen_api_key and not genuine:
             _with_genuine_tools(outbound)
     elif egress == "chat" and not settings.zen_api_key and not genuine:

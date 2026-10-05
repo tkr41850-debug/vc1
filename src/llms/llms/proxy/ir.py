@@ -28,6 +28,11 @@ class ToolCallBlock:
     name: str
     arguments: str
     cache: str | None = None
+    # Custom-route dispatch: the harness resolves a Custom payload only
+    # from a `custom_tool_call` item (raw-string `input`, never JSON
+    # arguments). Set for freeform nested/top-level custom declarations;
+    # emitters render the Custom wire shape when true.
+    custom: bool = False
 
     def wire_arguments(self) -> str:
         """Arguments as they go onto the upstream wire (valid JSON).
@@ -55,6 +60,10 @@ class ToolResultBlock:
     call_id: str
     output: str
     cache: str | None = None
+    # True when the result answers a `custom_tool_call` item: emits
+    # `custom_tool_call_output` (harness matches output type to call
+    # type; a Function-typed output for a Custom call misroutes).
+    custom: bool = False
 
 
 @dataclass(frozen=True)
@@ -150,6 +159,11 @@ class ToolArgsDelta:
     call_id: str
     name: str
     args_chunk: str
+    # True when the announced item is a `custom_tool_call` (Custom
+    # payload): the chunk accumulates into raw `input`, not JSON
+    # arguments. Carried on the delta so the fold and the emitters
+    # agree without re-deriving the route.
+    custom: bool = False
 
 
 @dataclass(frozen=True)

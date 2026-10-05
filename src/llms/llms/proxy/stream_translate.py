@@ -251,6 +251,7 @@ class ResponsesParser:
     def __init__(self) -> None:
         self.names: dict[str, str] = {}
         self.pending_calls: dict[str, str] = {}
+        self.custom_items: set[str] = set()
         self.saw_calls = False
         self._done = False
 
@@ -276,6 +277,10 @@ class ResponsesParser:
                 # otherwise the client never sees the call and loops
                 # re-issuing the turn (live codex session finding).
                 self.pending_calls[item.get("id", "")] = item.get("name", "")
+            elif item.get("type") == "custom_tool_call":
+                self.names[item.get("id", "")] = item.get("name", "")
+                self.custom_items.add(item.get("id", ""))
+                self.pending_calls[item.get("id", "")] = item.get("name", "")
             return deltas
         if kind == "response.output_text.delta":
             deltas.append(TextDelta(event.get("delta", "")))
@@ -290,6 +295,19 @@ class ResponsesParser:
             deltas.append(
                 ToolArgsDelta(
                     item_id, self.names.get(item_id, ""), event.get("delta", "")
+                )
+            )
+            return deltas
+        if kind == "response.custom_tool_call_input.delta":
+            item_id = event.get("item_id", "")
+            self.saw_calls = True
+            self.pending_calls.pop(item_id, None)
+            deltas.append(
+                ToolArgsDelta(
+                    item_id,
+                    self.names.get(item_id, ""),
+                    event.get("delta", ""),
+                    custom=True,
                 )
             )
             return deltas
@@ -354,7 +372,9 @@ class ResponsesParser:
         """
         out = []
         for call_id, name in self.pending_calls.items():
-            out.append(ToolArgsDelta(call_id, name, ""))
+            out.append(
+                ToolArgsDelta(call_id, name, "", custom=call_id in self.custom_items)
+            )
         self.pending_calls.clear()
         self.saw_calls = self.saw_calls or bool(out)
         return out
@@ -632,6 +652,7 @@ class ResponsesEmitter:
         self.tool_items: dict[str, int] = {}
         self.tool_names: dict[str, str] = {}
         self.tool_args: dict[str, str] = {}
+        self.tool_custom: dict[str, bool] = {}
 
     def _begin_chunks(self) -> list[bytes]:
         if self.started:
@@ -705,32 +726,61 @@ class ResponsesEmitter:
                 self.tool_items[delta.call_id] = len(self.tool_items) + 1
                 self.tool_names[delta.call_id] = delta.name
                 self.tool_args[delta.call_id] = ""
-                out.append(
-                    _resp_event(
-                        {
-                            "type": "response.output_item.added",
-                            "output_index": self.tool_items[delta.call_id],
-                            "item": {
-                                "id": delta.call_id,
-                                "type": "function_call",
-                                "name": delta.name,
-                                "arguments": "",
-                            },
-                        }
+                self.tool_custom[delta.call_id] = delta.custom
+                if delta.custom:
+                    out.append(
+                        _resp_event(
+                            {
+                                "type": "response.output_item.added",
+                                "output_index": self.tool_items[delta.call_id],
+                                "item": {
+                                    "id": delta.call_id,
+                                    "type": "custom_tool_call",
+                                    "name": delta.name,
+                                    "input": "",
+                                },
+                            }
+                        )
                     )
-                )
+                else:
+                    out.append(
+                        _resp_event(
+                            {
+                                "type": "response.output_item.added",
+                                "output_index": self.tool_items[delta.call_id],
+                                "item": {
+                                    "id": delta.call_id,
+                                    "type": "function_call",
+                                    "name": delta.name,
+                                    "arguments": "",
+                                },
+                            }
+                        )
+                    )
             if delta.args_chunk:
                 self.tool_args[delta.call_id] += delta.args_chunk
-                out.append(
-                    _resp_event(
-                        {
-                            "type": "response.function_call_arguments.delta",
-                            "output_index": self.tool_items[delta.call_id],
-                            "item_id": delta.call_id,
-                            "delta": delta.args_chunk,
-                        }
+                if self.tool_custom.get(delta.call_id):
+                    out.append(
+                        _resp_event(
+                            {
+                                "type": "response.custom_tool_call_input.delta",
+                                "output_index": self.tool_items[delta.call_id],
+                                "item_id": delta.call_id,
+                                "delta": delta.args_chunk,
+                            }
+                        )
                     )
-                )
+                else:
+                    out.append(
+                        _resp_event(
+                            {
+                                "type": "response.function_call_arguments.delta",
+                                "output_index": self.tool_items[delta.call_id],
+                                "item_id": delta.call_id,
+                                "delta": delta.args_chunk,
+                            }
+                        )
+                    )
             return out
         if isinstance(delta, ReasoningDelta):
             if not self.reasoning_open:
@@ -824,6 +874,35 @@ class ResponsesEmitter:
                     )
                 )
             for call_id, index in self.tool_items.items():
+                if self.tool_custom.get(call_id):
+                    # Custom input is a raw string: complete means taken
+                    # verbatim (no JSON coercion — it is never JSON).
+                    custom_input = self.tool_args[call_id]
+                    out.append(
+                        _resp_event(
+                            {
+                                "type": "response.custom_tool_call_input.done",
+                                "output_index": index,
+                                "item_id": call_id,
+                                "input": custom_input,
+                            }
+                        )
+                    )
+                    out.append(
+                        _resp_event(
+                            {
+                                "type": "response.output_item.done",
+                                "output_index": index,
+                                "item": {
+                                    "id": call_id,
+                                    "type": "custom_tool_call",
+                                    "name": self.tool_names[call_id],
+                                    "input": custom_input,
+                                },
+                            }
+                        )
+                    )
+                    continue
                 # Terminal frames carry COMPLETE arguments only; a truncated
                 # stream (upstream cut mid-args) must not emit a partial
                 # object that fails JSON validation downstream. Coerce at
