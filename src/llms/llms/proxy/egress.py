@@ -13,6 +13,20 @@ class EgressProvider(Protocol):
     async def aclose(self) -> None: ...
 
 
+def ipv4_transport() -> httpx.AsyncHTTPTransport:
+    """Upstream transport pinned to IPv4 outbound.
+
+    Live 2026-10-06: this box resolves opencode.ai to IPv6 first and
+    IPv6 egress is dead (forced `-6` times out, `-4` answers 200 in
+    ~0.4s), so httpx's default Happy-Eyeballs dial fails the whole
+    connection (`upstream connect failed: All connection attempts
+    failed` → downstream 502 `upstream unreachable`). Binding the
+    local end to 0.0.0.0 forces the IPv4 path. Pure constructor —
+    callers own the client lifetime as before.
+    """
+    return httpx.AsyncHTTPTransport(local_address="0.0.0.0")
+
+
 class DirectEgress:
     def __init__(self, client: httpx.AsyncClient) -> None:
         self._client = client

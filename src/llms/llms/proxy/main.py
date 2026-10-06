@@ -12,7 +12,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from llms.proxy.buckets import BucketTable
 from llms.proxy.config import Settings, get_settings
-from llms.proxy.egress import DirectEgress, ProviderEgress
+from llms.proxy.egress import DirectEgress, ProviderEgress, ipv4_transport
 from llms.proxy.logging import setup_logging
 from llms.proxy.middleware import GateMiddleware
 from llms.proxy.providers import ProviderRegistry
@@ -107,7 +107,9 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("warp supervisor boot failed: %s", exc)
     async with httpx.AsyncClient(
-        base_url=settings.zen_base_url, timeout=settings.request_timeout_s
+        base_url=settings.zen_base_url,
+        timeout=settings.request_timeout_s,
+        transport=ipv4_transport(),
     ) as client:
         app.state.egress = ProviderEgress(
             DirectEgress(client), registry=app.state.providers

@@ -533,6 +533,22 @@ def test_publish_throttled_never_blocks_caller():
         assert got == 3, got
 
 
+def test_ipv4_transport_pins_local_address():
+    # Live 2026-10-06: this box resolves opencode.ai to IPv6 first and
+    # IPv6 egress is dead, so the default Happy-Eyeballs dial fails the
+    # whole connection (downstream 502 `upstream unreachable`) while a
+    # forced `-4` curl answers 200. The direct upstream transport must
+    # bind 0.0.0.0 so it takes the IPv4 path.
+    import httpx as _httpx
+
+    from llms.proxy.egress import ipv4_transport
+
+    transport = ipv4_transport()
+    assert isinstance(transport, _httpx.AsyncHTTPTransport)
+    # httpcore stashes the bind address on the pool: assert it took.
+    assert transport._pool._local_address == "0.0.0.0"
+
+
 def test_publish_throttled_coalesces_burst():
     import asyncio as _asyncio
     import time as _time
