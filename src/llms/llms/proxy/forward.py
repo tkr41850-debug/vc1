@@ -701,11 +701,23 @@ async def fold_and_steer_streaming(
             break
         if not steer or client_names is None:
             break
-        names = sorted({str(c.get("name", "")) for c in steer if c.get("name")})
+        # Probe evidence needs the steered payload, not just the name:
+        # a name-only line left the live execute->exec rewrap's silence
+        # unanswerable (empty `code` vs populated `code`). Truncate —
+        # a patch payload can run kilobytes.
+        detail = sorted(
+            {
+                str(c.get("name", ""))
+                + " "
+                + str(c.get("arguments", "") or c.get("input", ""))[:200]
+                for c in steer
+                if c.get("name")
+            }
+        )
         logger.info(
             "[%s] steering streaming tool call(s) %s back to client tools",
             trace_id,
-            names,
+            detail,
         )
         followups: list = []
         # Steer budget accounting: repeated re-requests against a model

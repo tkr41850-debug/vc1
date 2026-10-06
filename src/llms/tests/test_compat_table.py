@@ -237,3 +237,87 @@ def test_dispatch_shell_to_cmd_runner_all_families():
         )
         is None
     )
+
+
+def test_streaming_steer_log_records_call_arguments(caplog):
+    # Live luna apply_patch probes (2026-10-06, probes 3-4): the steer
+    # INFO named the call (`execute`) but not its arguments, so the
+    # pointed execute->exec rewrap's silence live was unanswerable —
+    # empty `code` (correct generic) vs populated `code` (arm should
+    # have fired). The log must carry truncated arguments so the next
+    # live probe answers that question from the log alone.
+    import json as _json
+    import logging as _logging
+
+    import httpx as _httpx
+
+    from tests.conftest import TEST_HEADERS, TEST_SECRET, build_app_client
+    from tests.conftest import make_settings as _make_settings
+
+    code = "await tools.apply_patch('*** Begin Patch ***')"
+    seen: list = []
+
+    async def handler(request):
+        seen.append(_json.loads(request.content.decode()))
+        if len(seen) == 1:
+            body = (
+                'data: {"type":"response.output_item.added","output_index":1,'
+                '"item":{"id":"call_ex1","type":"function_call","name":"execute",'
+                '"arguments":"{}",'
+                + '"call_id":"call_ex1","status":"in_progress"}}\n\n'
+                + 'data: {"type":"response.function_call_arguments.delta",'
+                '"output_index":1,"item_id":"call_ex1",'
+                '"delta":'
+                + _json.dumps(_json.dumps({"code": code}))
+                + "}\n\n"
+                + 'data: {"type":"response.completed",'
+                '"response":{"id":"resp_dead1","status":"completed"}}\n\n'
+            )
+        else:
+            body = (
+                'data: {"type":"response.completed",'
+                '"response":{"id":"resp_clean1","status":"completed"}}\n\n'
+            )
+        return _httpx.Response(
+            200, content=body.encode(), headers={"content-type": "text/event-stream"}
+        )
+
+    client = _httpx.AsyncClient(
+        transport=_httpx.MockTransport(handler),
+        base_url="https://opencode.ai/zen/v1",
+    )
+    tools = [
+        {
+            "type": "namespace",
+            "name": "functions",
+            "description": "",
+            "tools": [{"type": "custom", "name": "exec", "description": "Run JS"}],
+        }
+    ]
+    with (
+        caplog.at_level(_logging.INFO, logger="zen_proxy"),
+        build_app_client(
+            _make_settings(data_dir="/tmp/pytest-steer-log"),
+            client,
+            seed_key=TEST_SECRET,
+        ) as tc,
+    ):
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.6-luna",
+                "input": "do it",
+                "stream": True,
+                "tools": tools,
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    steer_lines = [
+        rec.getMessage()
+        for rec in caplog.records
+        if "steering streaming tool call" in rec.getMessage()
+    ]
+    assert steer_lines, "expected a streaming steer log line"
+    assert "execute" in steer_lines[0]
+    assert "apply_patch" in steer_lines[0]

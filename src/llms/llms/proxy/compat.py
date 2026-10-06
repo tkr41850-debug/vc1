@@ -133,13 +133,14 @@ def translate_to_client(
 def log_untranslatable(trace_id: str, name: str, family: str) -> None:
     """Fail-open breadcrumb for a name no table row covers.
 
-    The call passes through unchanged; this error log is the signal to
-    add a proven 1:1 row later (schema audit reviews these lines).
+    The call steers with the generic correction (not a table
+    translation); this error log is the signal to add a proven 1:1
+    row later (schema audit reviews these lines).
     """
     import logging as _logging
 
     _logging.getLogger("zen_proxy").error(
-        "[%s] no compat entry: %s (family=%s) — passing through",
+        "[%s] no compat entry: %s (family=%s) — generic steer",
         trace_id,
         name,
         family,
