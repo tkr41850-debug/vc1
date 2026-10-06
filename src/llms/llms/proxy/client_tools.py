@@ -344,6 +344,7 @@ def steer_to_equivalent(
     owned: dict[str, str],
     defs: dict,
     genuine_names: tuple = (),
+    client_tools: tuple = (),
 ) -> str | None:
     """Directed correction for an undeclared genuine-overlay name, or None.
 
@@ -364,7 +365,7 @@ def steer_to_equivalent(
 
     _, bare = split_call_name(call_name) if isinstance(call_name, str) else ("", None)
     lowered = bare.lower() if isinstance(bare, str) else None
-    if lowered is None or lowered not in ("read", "shell", "write", "edit"):
+    if lowered is None or lowered not in ("read", "shell", "write", "edit", "execute"):
         return None
     if lowered in owned:
         return None
@@ -374,6 +375,7 @@ def steer_to_equivalent(
         return None
     if not isinstance(payload, dict):
         return None
+    genuine_lower = {str(n).lower() for n in genuine_names}
     if lowered == "read":
         # No client tool reads files by path (a shared `path` key is
         # not a file reader — see _translate_genuine_args), but a
@@ -390,12 +392,29 @@ def steer_to_equivalent(
         # None so the generic list + exec-channel guidance applies
         # (it names apply_patch AND the custom_tool_call form).
         return None
+    if lowered == "execute" and "execute" in genuine_lower:
+        # Genuine Code Mode JS runtime (live luna 2026-10-06: the model
+        # emits `execute {"code": "await tools.apply_patch(...)"}`
+        # instead of the harness's `custom_tool_call exec` channel).
+        # The inner call ALREADY names the nested tool and payload —
+        # point at the channel with the payload quoted back, so the
+        # retry is a re-wrap, not a re-derivation. Only on legs whose
+        # harness exposes the exec orchestrator; elsewhere the generic
+        # list applies (no channel to teach).
+        inner = _execute_inner_source(payload)
+        if inner is not None and has_nested_exec_channel(client_tools):
+            return (
+                f"Tool '{bare}' is not available in this session — run "
+                "that JavaScript through the `exec` custom tool instead: "
+                f"emit ONE `custom_tool_call` item named `exec` with "
+                f"`input` exactly `{inner}`. Retry the call as 'exec'."
+            )
+        return None
     # Upstream `shell` with the alias sanctioned: steer onto the alias
     # itself (it rides the wire with its schema), not the client runner
     # name (notice text alone — the model cannot fill from it; live
     # spark A/B 2026-10-06). Falls through to the client-name match
     # below only when unsanctioned.
-    genuine_lower = {str(n).lower() for n in genuine_names}
     if lowered == "shell":
         for client_lower, alias, alias_key in _ALIASES:
             if alias not in genuine_lower:
@@ -434,6 +453,21 @@ def steer_to_equivalent(
         f"'{declared}' instead with these arguments: {translated}. "
         f"Retry the call as '{declared}'."
     )
+
+
+def _execute_inner_source(payload: dict) -> str | None:
+    """The JS source inside a genuine `execute {"code"}` call, or None.
+
+    The model already derived the nested invocation (e.g. `await
+    tools.apply_patch('...')`) — the retry only re-wraps it as the
+    harness's `custom_tool_call exec` input, so quote it back verbatim
+    instead of asking the model to re-derive it. Non-string or missing
+    `code`: None (no guess — the generic guidance applies).
+    """
+    code = payload.get("code")
+    if not isinstance(code, str) or not code.strip():
+        return None
+    return code.strip()
 
 
 def _read_via_shell_redirect(

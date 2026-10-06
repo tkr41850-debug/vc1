@@ -562,7 +562,7 @@ def _steer_output_for(
     )
 
     equivalent = steer_to_equivalent(
-        str(call.get("name", "")), args, owned, defs, genuine_names
+        str(call.get("name", "")), args, owned, defs, genuine_names, client_tools
     )
     if equivalent is not None:
         return equivalent
@@ -822,12 +822,18 @@ def is_genuine_opencode(headers) -> bool:
     return ua.startswith("opencode/")
 
 
-def _family_for(request: Request, ingress: str, req: RequestIR) -> str:
+def _family_for(
+    request: Request, ingress: str, req: RequestIR, requested: str = ""
+) -> str:
     """Compat family for one downstream request (Task 1 detector).
 
     Downstream UA prefix first, else leg+tool-shape fallback; genuine
     opencode reports "unknown" (compat never renames its traffic —
     the table's `*` rows would otherwise rewrite its own calls).
+    The requested (pre-alias) model name breaks the UA tie the alias
+    mapping creates: `gpt-*` rides spark upstream but is the luna
+    harness (deferred `functions` namespace), so a luna request behind
+    a codex UA still detects luna when its tools carry the namespace.
     Failure degrades to "unknown" (today's behavior, `*` rows only).
     """
     try:
@@ -835,7 +841,13 @@ def _family_for(request: Request, ingress: str, req: RequestIR) -> str:
 
         if is_genuine_opencode(request.headers):
             return "unknown"
-        return _detect_family(request.headers.get("user-agent"), ingress, req.tools)
+        family = _detect_family(request.headers.get("user-agent"), ingress, req.tools)
+        if family == "codex-plain" and (requested or "").lower().startswith("gpt-"):
+            from llms.proxy.client_tools import _namespace_exec_desc
+
+            if any(_namespace_exec_desc(t) for t in req.tools):
+                return "luna"
+        return family
     except Exception:
         return "unknown"
 
@@ -1141,7 +1153,9 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         )
     outbound = (
         to_zen_responses(
-            req, tool_notice=notice, family=_family_for(request, ingress, req)
+            req,
+            tool_notice=notice,
+            family=_family_for(request, ingress, req, requested),
         )
         if egress == "responses"
         else TO[egress](req)
@@ -1535,7 +1549,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         # else leg+tool-shape fallback. Unknown degrades to today's
         # behavior (`*` all-family rows only — never a wrong-family
         # rewrite). Genuine opencode keeps exact fidelity regardless.
-        _family = _family_for(request, ingress, req)
+        _family = _family_for(request, ingress, req, requested)
         _response = await forward(
             client,
             url,
