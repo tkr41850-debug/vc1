@@ -58,3 +58,89 @@ def detect_family(user_agent: str | None, ingress: str, tools: tuple = ()) -> st
     if declared:
         return CODEX_PLAIN
     return UNKNOWN
+
+
+def _shell_to_cmd(payload: dict, required: list) -> str | None:
+    """shell {"command"} onto a cmd-shaped client runner, or None.
+
+    Capability-exact: only a ``cmd`` key among the client required keys
+    (same contract as client_tools._translate_genuine_args). Extra
+    genuine keys (workdir/timeout/...) are dropped — the client schema
+    is the contract. Pure helper.
+    """
+    import json as _json
+
+    if "command" not in payload:
+        return None
+    if "cmd" in set(required or []):
+        return _json.dumps({"cmd": payload["command"]})
+    return None
+
+
+# Dispatch table: (genuine name, family ["*" = any], client lowered name,
+# argument translator). Family-specific rows require positive detection
+# (Task 1); unknown families get ``*`` rows only — never a wrong-family
+# rewrite.
+TO_CLIENT: tuple = (
+    ("shell", "*", "exec_command", _shell_to_cmd),
+)
+
+
+def translate_to_client(
+    genuine_name: str,
+    arguments: str,
+    family: str,
+    owned: dict,
+    client_defs: dict,
+) -> tuple[str, str] | None:
+    """Genuine name + usable args -> (client tool name, client args), or None.
+
+    Returns None when untranslatable (same-name ownership wins, bad
+    payload, no table row, client missing): callers fail open (pass
+    through + error log), never synthesize a guessed call. Pure helper.
+    """
+    import json as _json
+
+    from llms.proxy.ir import ToolDef
+
+    lowered = genuine_name.lower() if isinstance(genuine_name, str) else ""
+    # Same-name ownership wins: when the client declared the genuine name
+    # itself, the owned path validates it — the translation must not
+    # shadow the client's own declaration (its redirect corrects
+    # arguments; a rewrite would bypass it).
+    if lowered in owned:
+        return None
+    try:
+        payload = _json.loads(arguments) if isinstance(arguments, str) else None
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    for genuine, fam, client_lower, convert in TO_CLIENT:
+        if genuine != lowered or (fam != "*" and fam != family):
+            continue
+        declared = owned.get(client_lower)
+        tool = client_defs.get(client_lower)
+        if declared is None or not isinstance(tool, ToolDef):
+            continue
+        required = (tool.parameters or {}).get("required") or []
+        converted = convert(payload, required)
+        if converted is not None:
+            return declared, converted
+    return None
+
+
+def log_untranslatable(trace_id: str, name: str, family: str) -> None:
+    """Fail-open breadcrumb for a name no table row covers.
+
+    The call passes through unchanged; this error log is the signal to
+    add a proven 1:1 row later (schema audit reviews these lines).
+    """
+    import logging as _logging
+
+    _logging.getLogger("zen_proxy").error(
+        "[%s] no compat entry: %s (family=%s) — passing through",
+        trace_id,
+        name,
+        family,
+    )

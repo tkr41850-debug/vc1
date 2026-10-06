@@ -36,3 +36,52 @@ def test_detect_family_prefers_ua_prefix_falls_back_to_shape():
     assert detect_family(None, "messages", ()) == "claude"
     # Nothing recognizable -> unknown (today's behavior, *-only entries).
     assert detect_family("", "responses", ()) == "unknown"
+
+
+def test_dispatch_shell_to_cmd_runner_all_families():
+    # shell{"command"} -> exec_command{"cmd"} on every family owning a
+    # cmd-shaped runner (live spark leg, zero-steer turn 2026-10-06).
+    from llms.proxy.compat import translate_to_client
+    from llms.proxy.ir import ToolDef
+
+    runner = ToolDef(
+        "exec_command",
+        "run",
+        {"type": "object", "properties": {"cmd": {}}, "required": ["cmd"]},
+    )
+    owned = {"exec_command": "exec_command"}
+    defs = {"exec_command": runner}
+    assert translate_to_client(
+        "shell", '{"command": "cat /tmp/hi"}', "codex-plain", owned, defs
+    ) == ("exec_command", '{"cmd": "cat /tmp/hi"}')
+    assert translate_to_client(
+        "shell", '{"command": "cat /tmp/hi"}', "unknown", owned, defs
+    ) == ("exec_command", '{"cmd": "cat /tmp/hi"}')
+    # Missing payload key or no cmd-runner: None (fail open, never guess).
+    assert (
+        translate_to_client(
+            "shell", '{"workdir": "/tmp"}', "codex-plain", owned, defs
+        )
+        is None
+    )
+    assert (
+        translate_to_client("shell", '{"command": "x"}', "codex-plain", {}, {})
+        is None
+    )
+    # Same-name ownership wins: the client declared `shell` itself, so the
+    # owned argument-correction path applies, not a rewrite.
+    own_shell = ToolDef(
+        "Shell",
+        "mine",
+        {"type": "object", "properties": {"cmd": {}}, "required": ["cmd"]},
+    )
+    assert (
+        translate_to_client(
+            "shell",
+            '{"command": "x"}',
+            "codex-plain",
+            {"shell": "Shell"},
+            {"shell": own_shell},
+        )
+        is None
+    )
