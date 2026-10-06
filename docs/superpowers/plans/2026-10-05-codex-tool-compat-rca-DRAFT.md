@@ -1,10 +1,12 @@
 # Codex tool-compat RCA — FINAL (live-verified 2026-10-06)
 
-> **Status: FINAL.** Stop condition met: live `exec_command` (cat) and
-> the full compat path proven on both spark and luna legs (details
-> below), hermetic suite 520 passed, ruff clean on touched files,
-> worktree committed. The `apply_patch` file-write itself is NOT
-> proven — blocked harness-side (mechanism 10), not proxy-side.
+> **Status: FINAL.** Stop condition met asymmetrically: live
+> `exec_command` (cat) proven on BOTH legs, luna-leg `apply_patch`
+> Add-File proven byte-exact (details below), hermetic suite 520
+> passed, ruff clean on touched files, worktree committed. The
+> spark-leg `apply_patch` file-write is NOT provable: the codex-plain
+> leg offers no exec channel (mechanisms 10, 12) — a harness
+> capability gap, not a proxy bug.
 
 ## Symptom
 
@@ -102,17 +104,24 @@ live spark shape.
    (luna rewrites, blank code steers, spark steers);
    `test_streaming_steer_log_records_call_arguments` (steer INFO
    carries truncated args/input).
-10. **Harness-side newline double-encoding (NOT a proxy bug).** The
-    19:31 probe emitted a CORRECT `custom_tool_call exec` on the first
-    try (real newlines) and the harness failed it with `SyntaxError:
-    Invalid or unexpected token`; the retry with `\\n` escapes failed
-    patch verification (`The first line of the patch must be '***
-    Begin Patch'`). Neither encoding satisfies both layers. Same
-    session: the notice HOW-TO example shows the patch with `\\n`
-    escapes (`client_tools.py` notice builder) — the harness rejects
-    exactly that form. The notice example must show whatever encoding
-    direct channel probing proves works; until then the
-    write→apply_patch table entry stays absent (Task 3 gate holds —
+10. **Wrong patch markers taught by the notice (proxy-side doc bug,
+    now fixed).** The 19:31 probe's `\\n`-escaped retry failed patch
+    verification (`The first line of the patch must be '*** Begin
+    Patch'`) — but the failure was the TRAILING `***`, not the
+    encoding: the notice HOW-TO and probe candidates taught `***
+    Begin Patch ***` / `*** End Patch ***` with bare content, while
+    the harness requires `*** Begin Patch` / `*** End Patch` (no
+    trailing `***`) with `+`-prefixed added lines. Corrected form
+    proven live on the luna leg (round 3): `await
+    tools.apply_patch('*** Begin Patch\n*** Add File:
+    grammar-add.txt\n+hello-grammar\n*** End Patch')` → harness
+    `Script completed`, file byte-exact `hello-grammar\n` (14 bytes,
+    od-verified). The earlier "harness-side newline double-encoding"
+    framing was wrong — no double-encoding exists; real newlines in
+    the JS string work. Fixed: notice HOW-TO + probe candidates show
+    the proven form (commit 518e327); the write→apply_patch table
+    entry still stays absent until Update/Delete grammars verify
+    (Task 3 gate holds —
     `test_write_to_apply_patch_needs_live_grammar_proof` still pins
     None).
 11. **Empty exec outputs are a harness display artifact, not empty
@@ -124,6 +133,40 @@ live spark shape.
     through tool results — only through terminal display or
     single-token echoes (earlier `Helllo world!!!` byte-exact cat on
     both legs remains the output-content proof).
+12. **Spark-leg `apply_patch` is structurally impossible (harness
+    capability gap, not routable).** The codex-plain leg declares only
+    the `exec_command` function runner — no `exec` channel, so the
+    classifier correctly has no `execute`→`exec` row there (`no
+    compat entry: execute (family=codex-plain) — generic steer`, and
+    the model confirms: "Tool `execute` is not available in this
+    session"). The notice's "do NOT call `exec_command` directly; run
+    via `shell`" line is ignored by the model (harmlessly): the
+    "shell tool" rollout shows 11 genuine `exec_command {"cmd":
+    "echo trying-shell"}` emissions, each executed fine by the
+    harness. File-write on this leg would need a harness-declared
+    channel that does not exist — both-legs `apply_patch` is
+    unachievable without a harness change, which is out of scope.
+
+## Live verification 2026-10-06, round 3 (20:10–20:45 UTC, manual proxy :8793)
+
+- Luna `apply_patch` Add-File: PASS. First file-creation attempt
+  with the corrected grammar returned harness `Script completed`
+  and `/tmp/manual10-ws/grammar-add.txt` byte-exact
+  `hello-grammar\n` (14 bytes, `od -c` verified). This is the
+  `apply_patch` proof the stop condition required — on the leg
+  that has the channel.
+- Spark `exec_command` cat via exec channel: DONE, zero steers on
+  the emission path (the 11-call repeat in the "shell tool" probe
+  is model-side looping — history echo is healthy, 14/45 upstream
+  POSTs carried `function_call_output`; the model re-ran a
+  succeeded command instead of replying DONE).
+- Spark `apply_patch` via shell-worded channel: DONE with no file
+  (`/tmp/spark-ws` holds only `probe.txt`) — expected per
+  mechanism 12: two `execute` steers with the CORRECT grammar, then
+  stop. The grammar is right; the channel does not exist.
+- Upstream instability 20:42 UTC: relayed `upstream status=429`
+  plus 504/503 flaps and direct-probe 502s — quota/cooldown window,
+  retried on the next tick.
 
 ## Live verification 2026-10-06 (quota cleared ~05:00 UTC)
 
