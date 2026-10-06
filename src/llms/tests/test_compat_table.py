@@ -286,12 +286,14 @@ def test_streaming_steer_log_records_call_arguments(caplog):
         transport=_httpx.MockTransport(handler),
         base_url="https://opencode.ai/zen/v1",
     )
+    from tests.test_client_tools import _luna_namespace
+
     tools = [
         {
             "type": "namespace",
             "name": "functions",
             "description": "",
-            "tools": [{"type": "custom", "name": "exec", "description": "Run JS"}],
+            "options": _luna_namespace().options,
         }
     ]
     with (
@@ -321,3 +323,65 @@ def test_streaming_steer_log_records_call_arguments(caplog):
     assert steer_lines, "expected a streaming steer log line"
     assert "execute" in steer_lines[0]
     assert "apply_patch" in steer_lines[0]
+
+
+def test_execute_rewrites_onto_nested_exec_channel():
+    # Live luna apply_patch probes (2026-10-06, manual probe 8): the
+    # model emits genuine `execute {"code": "await
+    # tools.apply_patch(...)"}` — the SAME JavaScript the harness exec
+    # orchestrator runs. The classifier must rewrite it onto the exec
+    # channel (passthrough with the __exec_rewrite__ marker the replay
+    # paths apply), not steer it: steering taught the channel three
+    # turns running and the model never re-wrapped. Plain function
+    # legs (spark: no exec channel) still steer generic.
+    import json as _json
+
+    from llms.proxy.client_tools import (
+        dispatchable_names,
+        nested_tool_defs,
+        owned_tool_names,
+    )
+    from llms.proxy.compat import translate_to_client
+    from llms.proxy.pipeline import _classify_calls
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+    from tests.test_client_tools import _luna_namespace, _spark_runner
+
+    js = "await tools.apply_patch('*** Begin Patch ***')"
+    args = _json.dumps({"code": js})
+
+    ns = (_luna_namespace(),)
+    owned = owned_tool_names(ns)
+    defs = {t.name.lower(): t for t in ns if t.name}
+    defs.update(nested_tool_defs(ns))
+    # Table level: inner JS replays verbatim as the channel input.
+    assert translate_to_client("execute", args, "luna", owned, defs) == (
+        "exec",
+        js,
+    )
+    # Classifier level: passthrough with the exec-rewrite marker.
+    route = dispatchable_names(ns)
+    (call,) = [{"call_id": "c1", "name": "execute", "arguments": args}]
+    passed, steer = _classify_calls(
+        [call], owned, defs, route, ns, GENUINE_TOOL_NAMES, "luna", "t1"
+    )
+    assert steer == []
+    assert [c["name"] for c in passed] == ["exec"]
+    assert passed[0]["__exec_rewrite__"] == {"name": "exec", "input": js}
+    # Blank code: no payload to re-wrap — generic steer, never a guess.
+    blank = {"call_id": "c2", "name": "execute", "arguments": "{}"}
+    passed, steer = _classify_calls(
+        [blank], owned, defs, route, ns, GENUINE_TOOL_NAMES, "luna", "t1"
+    )
+    assert passed == []
+    assert [c["name"] for c in steer] == ["execute"]
+    # Plain leg: no exec channel — generic steer.
+    runner = (_spark_runner(),)
+    owned = owned_tool_names(runner)
+    defs = {t.name.lower(): t for t in runner if t.name}
+    defs.update(nested_tool_defs(runner))
+    route = dispatchable_names(runner)
+    passed, steer = _classify_calls(
+        [dict(call)], owned, defs, route, runner, GENUINE_TOOL_NAMES, "codex-plain", "t1"
+    )
+    assert passed == []
+    assert [c["name"] for c in steer] == ["execute"]

@@ -77,12 +77,32 @@ def _shell_to_cmd(payload: dict, required: list) -> str | None:
     return None
 
 
+def _execute_to_exec_channel(payload: dict, required: list) -> str | None:
+    """execute {"code"} onto the nested exec channel, or None.
+
+    The genuine Code Mode JS runtime and the harness exec orchestrator
+    run the SAME JavaScript (live luna 2026-10-06: the model emits
+    `execute {"code": "await tools.apply_patch(...)"}` instead of the
+    harness's `custom_tool_call exec` channel). The inner source
+    replays verbatim as the channel input — no re-derivation, no
+    guess. The `required` contract is unused (the channel takes raw
+    input, not JSON keys); the client-missing check in the dispatcher
+    below still gates. Non-string or blank `code`: None (no guess —
+    the generic steer applies).
+    """
+    code = payload.get("code")
+    if not isinstance(code, str) or not code.strip():
+        return None
+    return code.strip()
+
+
 # Dispatch table: (genuine name, family ["*" = any], client lowered name,
 # argument translator). Family-specific rows require positive detection
 # (Task 1); unknown families get ``*`` rows only — never a wrong-family
 # rewrite.
 TO_CLIENT: tuple = (
     ("shell", "*", "exec_command", _shell_to_cmd),
+    ("execute", "*", "exec", _execute_to_exec_channel),
 )
 
 

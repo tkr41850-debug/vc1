@@ -455,6 +455,16 @@ def _classify_calls(
             # (the replay's argument-swap branches apply the translated
             # payload, which the JS input already carries — keeping both
             # renames the done frame and refolds a Frankenstein call).
+            # The channel target itself (`exec`) is already the
+            # orchestrator: its input IS the payload (a genuine
+            # `execute {"code"}` table translation lands here with the
+            # JS as arguments — no nested name to derive it from, and
+            # feeding it back through exec_channel_source would ask
+            # for a nested tool named `exec` that does not exist).
+            if declared.lower() == "exec" and isinstance(new_args, str):
+                passed["__exec_rewrite__"] = {"name": "exec", "input": new_args}
+                passthrough.append(passed)
+                continue
             source = exec_channel_source(passed.get("name", ""), new_args, client_tools)
             if source is not None:
                 passed["__exec_rewrite__"] = {"name": "exec", "input": source}

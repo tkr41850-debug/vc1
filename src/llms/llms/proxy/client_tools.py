@@ -633,7 +633,7 @@ def translate_genuine_call(
     from llms.proxy.ir import ToolDef
 
     lowered = call_name.lower() if isinstance(call_name, str) else ""
-    if lowered not in ("read", "shell", "write", "edit"):
+    if lowered not in ("read", "shell", "write", "edit", "execute"):
         return None
     # Same-name ownership wins: when the client declared the genuine
     # name itself (casing-insensitive), the owned path validates it —
