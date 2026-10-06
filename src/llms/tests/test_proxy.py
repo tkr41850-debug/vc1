@@ -915,8 +915,11 @@ def test_streaming_steer_folds_undeclared_call_end_to_end(tmp_path):
     assert r.status_code == 200
     assert '"name":"shell"' not in r.text
     assert '"name": "shell"' not in r.text
-    # Verbatim replay: the clean turn's own call bytes (not re-framed).
-    assert '"call_id":"call_exec1"' in r.text
+    # Clean-turn replay: the call id and upstream response id survive
+    # (a fresh emitter drops those fields and codex cannot dispatch
+    # the call). Frame bytes normalize through the JSON round-trip
+    # (`"call_id": "..."` spacing), so match the spaced form.
+    assert '"call_id": "call_exec1"' in r.text
     assert "resp_clean1" in r.text
     assert len(calls) == 2
     followup = calls[1]
@@ -1786,6 +1789,184 @@ def test_synthesize_steer_exhaustion_fails_closed_with_redirect_json(tmp_path):
     assert len(calls) == 1 + STEER_MAX_ITERS
 
 
+def test_genuine_shell_translates_onto_client_exec_command(tmp_path):
+    """Genuine-overlay `shell` with usable args translates onto the
+    client's `exec_command` (same capability, client name) instead of
+    steering: downstream SSE carries the renamed call, exactly 1
+    upstream call (no steer follow-up)."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_shell1", "shell", '{"command": "echo hi"}'),
+        _text_sse("done"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "run echo",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "exec_command",
+                        "description": "run",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"cmd": {"type": "string"}},
+                            "required": ["cmd"],
+                        },
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    returned = [
+        i for i in r.json().get("output", []) if i.get("type") == "function_call"
+    ]
+    assert len(returned) == 1
+    assert returned[0]["name"] == "exec_command"
+    assert returned[0]["arguments"] == '{"cmd": "echo hi"}'
+
+
+def test_streaming_nested_exec_command_replays_as_exec_custom_call(tmp_path):
+    """Streaming mirror: the same nested-call replay applies frame by
+    frame — the added item frame re-types to custom_tool_call named
+    `exec` with the JS input, and the delta/done frames follow."""
+    import httpx
+
+    from tests.conftest import TEST_HEADERS, TEST_SECRET, build_app_client
+    from tests.conftest import make_settings as _make_settings
+    from tests.test_client_tools import _luna_namespace
+
+    ns = _luna_namespace()
+    nested = ns.options["tools"]
+    exec_desc = next(t["description"] for t in nested if t["name"] == "exec")
+    # Live luna shape: the deferred namespace rides the input as an
+    # additional_tools item (dissolved into req.tools by from_responses),
+    # not as a top-level tool.
+    tools = [
+        {
+            "type": "additional_tools",
+            "id": "at_1",
+            "role": "developer",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "functions",
+                    "description": "",
+                    "tools": [
+                        {"type": "custom", "name": "exec", "description": exec_desc},
+                        {
+                            "type": "function",
+                            "name": "wait",
+                            "description": "Wait.",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    ],
+                }
+            ],
+        }
+    ]
+    calls: list = []
+
+    async def handler(request):
+        import json as _json
+
+        calls.append(_json.loads(request.content.decode()))
+        body = (
+            'data: {"type":"response.output_item.added","output_index":1,'
+            '"item":{"id":"call_n1","type":"function_call",'
+            '"name":"exec_command",'
+            '"arguments":"{\\"cmd\\": \\"echo hi\\"}",'
+            '"call_id":"call_n1","status":"in_progress"}}\n\n'
+            'data: {"type":"response.completed",'
+            '"response":{"id":"resp_n1","status":"completed",'
+            '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+        return httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    with build_app_client(
+        _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.6-luna",
+                "input": ["run echo", tools[0]],
+                "stream": True,
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    assert '"name": "exec"' in r.text
+    assert '"type": "custom_tool_call"' in r.text
+    assert "await tools.exec_command" in r.text
+
+
+def test_nested_exec_command_replays_as_exec_custom_call(tmp_path):
+    """Luna leg: a valid nested `exec_command` call replays downstream
+    as ONE `custom_tool_call` named `exec` whose input is the JS
+    invocation (the harness only executes nested tools through the
+    `exec` orchestrator — a bare nested call fails lookup)."""
+    from tests.conftest import TEST_HEADERS
+    from tests.test_client_tools import _luna_namespace
+
+    ns = _luna_namespace()
+    nested = ns.options["tools"]
+    exec_desc = next(t["description"] for t in nested if t["name"] == "exec")
+    tools = [
+        {
+            "type": "namespace",
+            "name": "functions",
+            "description": "",
+            "tools": [
+                {"type": "custom", "name": "exec", "description": exec_desc},
+                {
+                    "type": "function",
+                    "name": "wait",
+                    "description": "Wait.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            ],
+        }
+    ]
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_nested1", "exec_command", '{"cmd": "echo hi"}'),
+        _text_sse("done"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.6-luna",
+                "input": "run echo",
+                "tools": tools,
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    customs = [
+        i for i in r.json().get("output", []) if i.get("type") == "custom_tool_call"
+    ]
+    assert len(customs) == 1
+    assert customs[0]["name"] == "exec"
+    assert "await tools.exec_command" in customs[0]["input"]
+
+
 def test_steer_redirect_plain_leg_omits_nested_channel(tmp_path):
     """Plain function leg: the undeclared-name redirect must not teach
     the `exec` custom_tool_call channel (that harness exposes no `exec`
@@ -1829,3 +2010,278 @@ def test_steer_redirect_nested_leg_keeps_exec_channel():
     )
     assert "not available in this session" in text
     assert "custom_tool_call" in text and "`exec`" in text
+
+
+def test_genuine_read_steers_with_cat_redirect_not_view_image(tmp_path):
+    """Spark-leg regression (live probe): undeclared `read` must NOT
+    rename onto `view_image` (an image-path viewer — the harness
+    fails it client-side). It steers, and the follow-up upstream turn
+    carries the directed shell/command redirect (1 steer re-request,
+    then the clean turn replays — the client runner has no wire
+    schema, so the redirect names upstream `shell`; live spark A/B
+    2026-10-06)."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_read1", "read", '{"path": "/tmp/f.txt"}'),
+        _tool_call_sse("call_exec1", "exec_command", '{"cmd": "cat /tmp/f.txt"}')
+        + _text_sse("done"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "read file",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "exec_command",
+                        "description": "run",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"cmd": {"type": "string"}},
+                            "required": ["cmd"],
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "name": "view_image",
+                        "description": "view",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    # Steer re-request happened (dead turn + redirect replayed
+    # upstream), and the redirect named the cat invocation — never a
+    # view_image rename.
+    assert len(calls) == 2
+    followup = calls[1]
+    outputs = [
+        i for i in followup.get("input", []) if i.get("type") == "function_call_output"
+    ]
+    assert len(outputs) == 1
+    assert "shell" in outputs[0]["output"]
+    assert '"command"' in outputs[0]["output"]
+    assert "cat /tmp/f.txt" in outputs[0]["output"]
+    assert "view_image" not in outputs[0]["output"]
+    assert "Retry the call as 'shell'" in outputs[0]["output"]
+    returned = [
+        i for i in r.json().get("output", []) if i.get("type") == "function_call"
+    ]
+    assert len(returned) == 1
+    assert returned[0]["name"] == "exec_command"
+
+
+def test_streaming_delta_shell_translates_without_steer(tmp_path):
+    """Live spark shape (resp-45 turn 1): added frame announces with
+    arguments:"", then delta frame(s) carry the genuine payload, then
+    the done frame repeats it. The fold prefers the deltas — so the
+    replay must swap the delta payload too, not just added + done:
+    stale `command` deltas refold as exec_command + `{"command":...}`
+    (missing `cmd`) and the tail check fails closed after a clean
+    first fold. Exactly 1 upstream call (no steer follow-up)."""
+    import httpx
+
+    from tests.conftest import TEST_HEADERS, TEST_SECRET, build_app_client
+    from tests.conftest import make_settings as _make_settings
+
+    calls: list = []
+    body = (
+        'data: {"type":"response.output_item.added","output_index":2,'
+        '"item":{"id":"fc_live1","type":"function_call","status":"in_progress",'
+        '"name":"shell","call_id":"call_live1","arguments":""}}\n\n'
+        'data: {"type":"response.function_call_arguments.delta",'
+        '"output_index":2,"item_id":"fc_live1",'
+        '"delta":"{\\"command\\":\\"cat /tmp/f.txt\\"}"}\n\n'
+        'data: {"type":"response.function_call_arguments.done",'
+        '"output_index":2,"item_id":"fc_live1",'
+        '"arguments":"{\\"command\\":\\"cat /tmp/f.txt\\"}","name":"shell"}\n\n'
+        'data: {"type":"response.completed",'
+        '"response":{"id":"resp_live1","status":"completed",'
+        '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+    )
+
+    async def handler(request):
+        import json as _json
+
+        calls.append(_json.loads(request.content.decode()))
+        return httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    with build_app_client(
+        _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "read file",
+                "stream": True,
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "exec_command",
+                        "description": "run",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"cmd": {"type": "string"}},
+                            "required": ["cmd"],
+                        },
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    # Translated replay: added + delta + done frames all carry the
+    # translated arguments, and no stale genuine payload survives.
+    assert '"name": "exec_command"' in r.text
+    assert "cat /tmp/f.txt" in r.text
+    assert "command" not in r.text.replace("exec_command", "")
+    assert '"name":"shell"' not in r.text
+    assert '"name": "shell"' not in r.text
+
+
+def test_streaming_done_only_shell_translates_without_steer(tmp_path):
+    """Live Zen shape (resp-26): added frame announces with
+    arguments:"", NO delta frames, payload rides solely the done
+    frame. The fold must judge the done payload (shell+command ->
+    exec_command/cmd translation) — not steer a valid call as
+    owned-but-invalid. Exactly 1 upstream call (no steer follow-up)."""
+    import httpx
+
+    from tests.conftest import TEST_HEADERS, TEST_SECRET, build_app_client
+    from tests.conftest import make_settings as _make_settings
+
+    calls: list = []
+    body = (
+        'data: {"type":"response.output_item.added","output_index":2,'
+        '"item":{"id":"fc_live1","type":"function_call","status":"in_progress",'
+        '"name":"shell","call_id":"call_live1","arguments":""}}\n\n'
+        'data: {"type":"response.function_call_arguments.done",'
+        '"output_index":2,"item_id":"fc_live1",'
+        '"arguments":"{\\"command\\":\\"cat /tmp/f.txt\\"}","name":"shell"}\n\n'
+        'data: {"type":"response.completed",'
+        '"response":{"id":"resp_live1","status":"completed",'
+        '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+    )
+
+    async def handler(request):
+        import json as _json
+
+        calls.append(_json.loads(request.content.decode()))
+        return httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    with build_app_client(
+        _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "read file",
+                "stream": True,
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "exec_command",
+                        "description": "run",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"cmd": {"type": "string"}},
+                            "required": ["cmd"],
+                        },
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    # Translated replay: the added frame's name flips to the client
+    # tool (re-serialized frames use the spaced form), the done
+    # frame is renamed with the translated payload too (it carries
+    # no `item` object, so the added-frame branch never matches it),
+    # and no shell frame survives.
+    assert '"name": "exec_command"' in r.text
+    assert "cat /tmp/f.txt" in r.text
+    assert '"name":"shell"' not in r.text
+    assert '"name": "shell"' not in r.text
+
+
+def test_streaming_namespaced_emitter_gets_argument_correction(tmp_path):
+    """Live spark shape: declared bare `exec_command`, model emits
+    `default.exec_command` with `{}`. The classifier must treat it as
+    owned-but-invalid (argument correction naming the upstream `shell`
+    alias + `command` — the client runner has no wire schema, so a
+    retry-as-`exec_command` names keys the model cannot fill; live
+    spark A/B 2026-10-06), NOT as an undeclared name (generic
+    not-available text): the generic text never converted the live
+    emitter, which repeated `{}` x3 then the budget died. Exactly 2
+    upstream calls on the mock leg."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_ns1", "default.exec_command", "{}"),
+        _text_sse("done"),
+    )
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "print file",
+                "stream": True,
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "exec_command",
+                        "description": "run",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"cmd": {"type": "string"}},
+                            "required": ["cmd"],
+                        },
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 2
+    outputs = [
+        i
+        for i in calls[1]["input"]
+        if isinstance(i, dict) and i.get("type") == "function_call_output"
+    ]
+    assert outputs
+    text = outputs[0]["output"]
+    # Owned-but-invalid flavor: names the emitted form + missing key,
+    # never the generic undeclared text.
+    assert "'default.exec_command'" in text
+    assert "Retry as 'shell'" in text and '"command"' in text
+    assert "not available" not in text

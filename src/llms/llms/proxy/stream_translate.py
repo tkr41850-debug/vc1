@@ -254,6 +254,13 @@ class ResponsesParser:
         self.custom_items: set[str] = set()
         self.saw_calls = False
         self._done = False
+        # Full arguments payloads from `function_call_arguments.done`
+        # frames, keyed by item id. The done frame repeats the payload
+        # the deltas already carried — the fold must not concatenate
+        # it — but on turns where Zen omits the delta frames it is the
+        # ONLY copy. The fold prefers accumulated deltas and falls back
+        # here (never both). Cleared per parser instance (one turn).
+        self.done_args: dict[str, str] = {}
 
     def feed_payload(
         self, payload: str
@@ -297,6 +304,29 @@ class ResponsesParser:
                     item_id, self.names.get(item_id, ""), event.get("delta", "")
                 )
             )
+            return deltas
+        if kind == "response.function_call_arguments.done":
+            # The done frame REPEATS the full arguments string already
+            # carried by the delta frames (live: identical payload in
+            # both) — emitting it as a chunk would double the payload
+            # into invalid JSON. The fold judges arguments from the
+            # deltas; the done frame's only fold-relevant signal is the
+            # call name (the added frame may announce before the name
+            # resolves). Record the name, clear pending, mark the call
+            # seen — emit no chunk. Callers needing the payload when NO
+            # delta arrived read the added frame's own arguments
+            # snapshot (forward._remember_announced_arguments) — except
+            # Zen announces with arguments:"", so ALSO seed from the
+            # done payload (the one frame guaranteed to carry it).
+            item_id = event.get("item_id", "")
+            name = event.get("name", "") or self.names.get(item_id, "")
+            if name:
+                self.names[item_id] = name
+            self.saw_calls = True
+            self.pending_calls.pop(item_id, None)
+            arguments = event.get("arguments", "")
+            if isinstance(arguments, str) and arguments:
+                self.done_args[item_id] = arguments
             return deltas
         if kind == "response.custom_tool_call_input.delta":
             item_id = event.get("item_id", "")

@@ -37,6 +37,21 @@ def test_conversation_ref_ignores_foreign_session_id():
     assert conversation_ref("responses", {}, {}) is None
 
 
+def test_conversation_ref_codex_client_metadata_thread():
+    # Live codex-exec shape: thread identity rides in the BODY
+    # (client_metadata.thread_id == session_id per turn) because
+    # body-only relays strip the thread-id/session-id headers. Without
+    # this, every codex turn mints a fresh session and the upstream
+    # prompt cache never warms across turns.
+    body = {
+        "client_metadata": {"thread_id": "01a10b8b-xyz", "session_id": "01a10b8b-xyz"}
+    }
+    assert conversation_ref("responses", body, {}) == "codex-thread:01a10b8b-xyz"
+    # previous_response_id still wins when present.
+    chained = dict(body, previous_response_id="resp_9")
+    assert conversation_ref("responses", chained, {}) == "chain:resp_9"
+
+
 def test_tracker_lookup_remember_expiry():
     tracker = SessionTracker(ttl_s=0.05)
     assert tracker.lookup("k", "chain:r1") is None

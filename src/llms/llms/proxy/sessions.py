@@ -52,9 +52,19 @@ def conversation_ref(ingress: str, body: dict, headers) -> str | None:
     if isinstance(prev, str) and prev:
         return "chain:" + prev
     get = headers.get if hasattr(headers, "get") else (lambda _k: None)
+    # Codex thread identity arrives two ways: stable thread-id/session-id
+    # HEADERS on direct ingress, or (through body-only relays that strip
+    # headers) the client_metadata.thread_id the harness itself embeds in
+    # the request body (live: codex exec sends thread_id == session_id
+    # per turn in client_metadata, and the relay captures bodies only).
     originator = str(get("originator") or "")
     if originator.startswith("codex") or get("x-codex-turn-metadata") is not None:
         thread = get("thread-id") or get("session-id")
+        if thread:
+            return "codex-thread:" + str(thread).strip()
+    md = body.get("client_metadata")
+    if isinstance(md, dict):
+        thread = md.get("thread_id") or md.get("session_id")
         if thread:
             return "codex-thread:" + str(thread).strip()
     claude_sid = get("x-claude-code-session-id")

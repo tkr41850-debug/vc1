@@ -1213,10 +1213,13 @@ def test_custom_tool_call_round_trips_through_ir():
     )
 
     output = [
-        {"type": "custom_tool_call", "call_id": "c1", "name": "exec",
-         "input": "await tools.exec_command({cmd: \"x\"})"},
-        {"type": "custom_tool_call_output", "call_id": "c1",
-         "output": "done"},
+        {
+            "type": "custom_tool_call",
+            "call_id": "c1",
+            "name": "exec",
+            "input": 'await tools.exec_command({cmd: "x"})',
+        },
+        {"type": "custom_tool_call_output", "call_id": "c1", "output": "done"},
     ]
     msgs = responses_output_to_ir_messages(output)
     calls = [b for m in msgs for b in m.blocks if isinstance(b, ToolCallBlock)]
@@ -1242,15 +1245,76 @@ def test_custom_tool_call_round_trips_through_ir():
     assert kinds == ["custom_tool_call", "custom_tool_call_output"]
 
 
+def test_history_genuine_call_replays_translated():
+    # A dead genuine call echoed in history (`shell` the model emitted
+    # turn 1, failed harness-side) must replay upstream under its
+    # rewritten name/args (`exec_command`/`cmd`): the harness executed
+    # the REWRITTEN frames, so verbatim history re-teaches the dead
+    # name (live luna: `shell` + `unsupported call: shell` replayed
+    # for 3 turns while the redirect said exec_command — the model
+    # obeyed the history, not the redirect).
+    from llms.proxy.translate import from_responses, to_zen_responses
+
+    req = from_responses(
+        {
+            "model": "m",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "shell",
+                    "arguments": '{"command": "cat f"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "c1",
+                    "output": "unsupported call: shell",
+                },
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "description": "r",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"cmd": {}},
+                        "required": ["cmd"],
+                    },
+                }
+            ],
+        }
+    )
+    out = to_zen_responses(req, tool_notice="")
+    calls = [i for i in out["input"] if i.get("type") == "function_call"]
+    assert len(calls) == 1
+    assert calls[0]["name"] == "exec_command"
+    assert calls[0]["arguments"] == '{"cmd": "cat f"}'
+
+
 def test_tool_notice_also_appends_to_developer_message():
     # Codex sends the harness-guidance system prompt top-level AND
     # per-turn skills/permissions context as a developer input item;
-    # from_responses maps both to ROLE_SYSTEM, but the live model kept
-    # calling overlay names while the notice sat in only one half.
-    # The notice must land in both.
-    from llms.proxy.ir import LlmMessage, ROLE_USER, ROLE_SYSTEM, TextBlock
+    # from_responses maps both to ROLE_SYSTEM, and to_zen_responses
+    # folds every system message into `instructions` (roles
+    # canonicalized — a "developer"-role match on the rebuilt input
+    # never fires). The notice must ALSO land on the rebuilt input's
+    # first message, adjacent to the guidance the model weights most
+    # (live luna: trailing-instructions notice sat 20KB deep, model
+    # kept calling overlay names write/read/skill).
+    from llms.proxy.ir import (
+        ROLE_SYSTEM,
+        ROLE_USER,
+        LlmMessage,
+        RequestIR,
+        TextBlock,
+    )
     from llms.proxy.translate import to_zen_responses
-    from llms.proxy.ir import RequestIR
 
     req = RequestIR(
         model="m",
@@ -1262,6 +1326,37 @@ def test_tool_notice_also_appends_to_developer_message():
     )
     out = to_zen_responses(req, tool_notice="NOTICE")
     assert out["instructions"].endswith("NOTICE")
-    dev = [i for i in out["input"] if i.get("role") == "developer"]
-    assert len(dev) == 1
-    assert dev[0]["content"][-1]["text"].endswith("NOTICE")
+    first = out["input"][0]
+    assert first["type"] == "message"
+    assert first["content"][-1]["text"].endswith("NOTICE")
+
+
+def test_tool_notice_first_message_match_live_codex_shape():
+    # Live codex/luna shape (req-63): NO top-level instructions —
+    # everything rides developer input items, which from_responses
+    # maps to ROLE_SYSTEM and to_zen_responses folds into
+    # instructions. The rebuilt input's first message is the
+    # environment context; the notice must append there too (not
+    # only 20KB deep in instructions).
+    from llms.proxy.translate import from_responses, to_zen_responses
+
+    req = from_responses(
+        {
+            "model": "m",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "harness guidance"}],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}],
+                },
+            ],
+        }
+    )
+    out = to_zen_responses(req, tool_notice="NOTICE")
+    assert out["instructions"].endswith("NOTICE")
+    assert out["input"][0]["content"][-1]["text"].endswith("NOTICE")
