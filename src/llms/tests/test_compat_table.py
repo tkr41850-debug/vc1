@@ -385,3 +385,34 @@ def test_execute_rewrites_onto_nested_exec_channel():
     )
     assert passed == []
     assert [c["name"] for c in steer] == ["execute"]
+
+
+def test_write_to_shell_redirect_needs_live_proof():
+    # Spark-leg file-write gate: NO write->exec_command table entry
+    # ships until the shell-redirect synthesis is verified live
+    # against the harness (2026-10-06: the proxy would synthesize a
+    # heredoc command the harness has never executed — still a
+    # guess). This test pins the CURRENT contract —
+    # translate_to_client("write", ...) is None on codex-plain (fail
+    # open, never synthesize) — so a future entry must update this
+    # test with the live proof, not slip in silently.
+    from llms.proxy.compat import translate_to_client
+    from llms.proxy.ir import ToolDef
+
+    runner = ToolDef(
+        "exec_command",
+        "run",
+        {"type": "object", "properties": {"cmd": {}}, "required": ["cmd"]},
+    )
+    owned = {"exec_command": "exec_command"}
+    defs = {"exec_command": runner}
+    assert (
+        translate_to_client(
+            "write",
+            '{"path": "shell-write.txt", "content": "hello-shell\\n"}',
+            "codex-plain",
+            owned,
+            defs,
+        )
+        is None
+    )
