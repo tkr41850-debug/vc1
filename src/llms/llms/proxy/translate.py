@@ -678,7 +678,9 @@ def _responses_tool_from_ir(t: ToolDef) -> dict:
     return tool
 
 
-def to_zen_responses(req: RequestIR, *, tool_notice: str = "") -> dict:
+def to_zen_responses(
+    req: RequestIR, *, tool_notice: str = "", family: str = "unknown"
+) -> dict:
     body: dict = {"model": req.model, "input": []}
     systems = [
         b.text
@@ -768,12 +770,51 @@ def to_zen_responses(req: RequestIR, *, tool_notice: str = "") -> dict:
                         }
                     )
                 else:
+                    # History call blocks echo back verbatim EXCEPT the
+                    # genuine->client translation applies: the call the
+                    # harness executed was the REWRITTEN one (the replay
+                    # renamed the frames), so the echoed history must
+                    # carry the rewritten name/args too. Otherwise the
+                    # model sees its dead genuine call (`shell`) in
+                    # history and re-emits it, and the "unsupported
+                    # call" failure output teaches the wrong lesson
+                    # (live luna: `shell` + `unsupported call: shell`
+                    # replayed upstream verbatim for 3 turns while the
+                    # redirect said exec_command — the model obeyed the
+                    # history, not the redirect). The failure output
+                    # follows the same rule: it answers the rewritten
+                    # call (a bare genuine name with Success output
+                    # would re-teach the dead name as working).
+                    from llms.proxy.client_tools import (
+                        nested_tool_defs as _nested_defs,
+                    )
+                    from llms.proxy.client_tools import (
+                        owned_tool_names as _owned_names,
+                    )
+                    from llms.proxy.client_tools import (
+                        translate_genuine_call as _translate,
+                    )
+
+                    _owned = _owned_names(req.tools)
+                    _defs = {t.name.lower(): t for t in req.tools if t.name}
+                    _defs.update(_nested_defs(req.tools))
+                    _hist = _translate(b.name, b.arguments, _owned, _defs, family)
+                    if _hist is not None:
+                        _name, _args = _hist
+                    else:
+                        _name, _args = b.name, b.wire_arguments()
+                        try:
+                            import json as _json
+
+                            _json.loads(_args)
+                        except Exception:
+                            _args = "{}"
                     body["input"].append(
                         {
                             "type": "function_call",
                             "call_id": b.call_id,
-                            "name": b.name,
-                            "arguments": b.wire_arguments(),
+                            "name": _name,
+                            "arguments": _args,
                         }
                     )
             elif isinstance(b, ToolResultBlock):
@@ -843,35 +884,43 @@ def to_zen_responses(req: RequestIR, *, tool_notice: str = "") -> dict:
         # message-append variant steers no better (model still calls
         # overlay names first, then self-heals via redirect), so the
         # instructions placement wins on prompt-cache stability. But
-        # instructions only carry what from_responses mapped to
-        # ROLE_SYSTEM — top-level `instructions` plus `developer` input
-        # items (codex sends BOTH: the harness-guidance system prompt
-        # rides top-level, per-turn skills/permissions context rides a
-        # developer message). A notice visible in only one half loses
-        # to whichever half the model weights: observed live, the
-        # model kept calling `default.exec_command` while the notice
-        # sat 5KB deep in the other half. Belt and suspenders: append
-        # to instructions AND to the first developer message.
+        # from_responses maps BOTH top-level `instructions` and
+        # `developer` input items to ROLE_SYSTEM, and to_zen_responses
+        # folds every system message into `instructions` (roles
+        # canonicalized, developer never re-emitted) — so the second
+        # half below matches the input's FIRST message regardless of
+        # role. On the codex leg that first message is the
+        # harness-guidance system prompt: appending the notice there
+        # puts it adjacent to the text the model weights most (live
+        # luna: the trailing-instructions notice sat 20KB deep and the
+        # model kept calling overlay names write/read/skill). The
+        # second half targets the first NON-SYSTEM message: every
+        # system message already folded into `instructions`, so the
+        # rebuilt input's first message is per-turn context (codex
+        # skills/permissions, then environment, then the user
+        # prompt) — the text the model acts on. A notice there
+        # survives prompt-cache prefix stability (the system prompt
+        # is the stable prefix; per-turn context changes anyway).
         if body.get("instructions"):
             body["instructions"] = f"{body['instructions']}\n\n{tool_notice}"
         else:
             body["instructions"] = tool_notice
-        for item in body.get("input", []):
-            if (
-                isinstance(item, dict)
-                and item.get("type") == "message"
-                and item.get("role") == "developer"
-            ):
-                content = item.get("content")
-                if isinstance(content, list) and content:
-                    last = content[-1]
-                    if (
-                        isinstance(last, dict)
-                        and last.get("type") == "input_text"
-                        and isinstance(last.get("text"), str)
-                    ):
-                        last["text"] = f"{last['text']}\n\n{tool_notice}"
-                        break
+        candidates = [
+            item
+            for item in body.get("input", [])
+            if isinstance(item, dict) and item.get("type") == "message"
+        ]
+        for item in [c for c in candidates if c.get("role") != "system"] or candidates:
+            content = item.get("content")
+            if isinstance(content, list) and content:
+                last = content[-1]
+                if (
+                    isinstance(last, dict)
+                    and last.get("type") == "input_text"
+                    and isinstance(last.get("text"), str)
+                ):
+                    last["text"] = f"{last['text']}\n\n{tool_notice}"
+                    break
     return body
 
 

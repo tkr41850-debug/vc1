@@ -259,6 +259,8 @@ def _classify_calls(
     route: dict[str, tuple[str, str]] | None = None,
     client_tools: tuple = (),
     genuine_names: tuple = (),
+    family: str = "unknown",
+    trace_id: str = "",
 ) -> tuple[list[dict], list[dict]]:
     """Split folded model calls into (passthrough, steer) by client ownership.
 
@@ -333,6 +335,17 @@ def _classify_calls(
                 fixed = {**call, "name": convert_call_name(name, owned)}
                 args_text = call.get("arguments", "")
                 args_text = args_text if isinstance(args_text, str) else ""
+                # Empty Custom-route payload (live luna, 2026-10-06: the
+                # model emits `custom_tool_call exec` with EMPTY input
+                # for an apply_patch turn, and a stray done frame folds
+                # it as `default.exec {}`): the client cannot execute an
+                # input-less orchestrator call — steer with the
+                # exec-channel correction so the retry carries a real
+                # payload. Falls through to the steer path below.
+                payload_text = call.get("input", args_text)
+                if not (isinstance(payload_text, str) and payload_text.strip()):
+                    steer.append(call)
+                    continue
                 # Nested names documented in the exec description only
                 # execute through the `exec` orchestrator — even
                 # Custom-route ones (apply_patch): a bare nested call
@@ -405,7 +418,11 @@ def _classify_calls(
         args_text = call.get("arguments", "")
         args_text = args_text if isinstance(args_text, str) else ""
         translated = translate_genuine_call(
-            bare if isinstance(bare, str) else "", args_text, owned, client_defs
+            bare if isinstance(bare, str) else "",
+            args_text,
+            owned,
+            client_defs,
+            family,
         )
         if translated is not None:
             declared, new_args = translated
@@ -430,12 +447,36 @@ def _classify_calls(
                 steer.append(call)
                 continue
             passed = {**call, "name": declared, "arguments": new_args}
-            # The replay swaps frame arguments only when the call was
-            # renamed (genuine name -> client name): verbatim
-            # passthrough keeps the frames' own payload.
-            passed["__translated_args__"] = new_args
+            # Nested names documented in the exec description only
+            # execute through the `exec` orchestrator — even a
+            # genuine->client translation landing on one (luna: `shell`
+            # onto nested `exec_command`): a bare function_call fails
+            # lookup. The marker rides instead of __translated_args__
+            # (the replay's argument-swap branches apply the translated
+            # payload, which the JS input already carries — keeping both
+            # renames the done frame and refolds a Frankenstein call).
+            source = exec_channel_source(passed.get("name", ""), new_args, client_tools)
+            if source is not None:
+                passed["__exec_rewrite__"] = {"name": "exec", "input": source}
+            else:
+                # The replay swaps frame arguments only when the call
+                # was renamed (genuine name -> client name): verbatim
+                # passthrough keeps the frames' own payload.
+                passed["__translated_args__"] = new_args
             passthrough.append(passed)
             continue
+        # Untranslatable genuine-overlay name: fail open (steer with
+        # the existing correction) + error breadcrumb so the table
+        # gains a proven 1:1 row later (schema audit reviews these).
+        try:
+            from llms.proxy.compat import log_untranslatable as _log_no_entry
+        except Exception:
+            _log_no_entry = None
+        if _log_no_entry is not None:
+            gname = bare if isinstance(bare, str) else ""
+            gnames = {str(n).lower() for n in (genuine_names or ())}
+            if gname.lower() in gnames:
+                _log_no_entry(trace_id, gname, family)
         steer.append(call)
     return passthrough, steer
 
@@ -446,6 +487,8 @@ def _genuine_calls_in(
     *,
     client_tools: tuple = (),
     genuine_names: tuple = (),
+    family: str = "unknown",
+    trace_id: str = "",
 ) -> tuple[list[dict], list[dict]]:
     """Split response function_calls into (passthrough, steer) candidates.
 
@@ -489,6 +532,8 @@ def _genuine_calls_in(
         dispatchable_names(client_tools),
         client_tools,
         genuine_names,
+        family,
+        trace_id,
     )
 
 
@@ -555,6 +600,7 @@ async def _steer_genuine_calls(
     client_names: set[str],
     client_tools: tuple = (),
     genuine_names: tuple = (),
+    family: str = "unknown",
 ) -> tuple[Response, dict]:
     """Answer undeclared tool calls with a redirect error and re-request.
 
@@ -575,6 +621,8 @@ async def _steer_genuine_calls(
             client_names,
             client_tools=client_tools,
             genuine_names=genuine_names,
+            family=family,
+            trace_id=trace_id,
         )
         owned = owned_tool_names(client_tools)
         defs = {t.name.lower(): t for t in client_tools if t.name}
@@ -717,6 +765,8 @@ async def _steer_genuine_calls(
             client_names,
             client_tools=client_tools,
             genuine_names=genuine_names,
+            family=family,
+            trace_id=trace_id,
         )
         if not (tail_passed and not tail_steer) and tail_steer:
             tail_call = tail_steer[0]
@@ -770,6 +820,24 @@ def is_genuine_opencode(headers) -> bool:
     """
     ua = headers.get("user-agent", "")
     return ua.startswith("opencode/")
+
+
+def _family_for(request: Request, ingress: str, req: RequestIR) -> str:
+    """Compat family for one downstream request (Task 1 detector).
+
+    Downstream UA prefix first, else leg+tool-shape fallback; genuine
+    opencode reports "unknown" (compat never renames its traffic —
+    the table's `*` rows would otherwise rewrite its own calls).
+    Failure degrades to "unknown" (today's behavior, `*` rows only).
+    """
+    try:
+        from llms.proxy.compat import detect_family as _detect_family
+
+        if is_genuine_opencode(request.headers):
+            return "unknown"
+        return _detect_family(request.headers.get("user-agent"), ingress, req.tools)
+    except Exception:
+        return "unknown"
 
 
 def _with_genuine_tools(outbound: dict) -> None:
@@ -1072,7 +1140,9 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             shell_alias=not has_nested_exec_channel(req.tools),
         )
     outbound = (
-        to_zen_responses(req, tool_notice=notice)
+        to_zen_responses(
+            req, tool_notice=notice, family=_family_for(request, ingress, req)
+        )
         if egress == "responses"
         else TO[egress](req)
     )
@@ -1461,6 +1531,11 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             and outbound.get("stream") is True
             and bool(_client_names)
         )
+        # Compat family (Task 1 detector): downstream UA prefix first,
+        # else leg+tool-shape fallback. Unknown degrades to today's
+        # behavior (`*` all-family rows only — never a wrong-family
+        # rewrite). Genuine opencode keeps exact fidelity regardless.
+        _family = _family_for(request, ingress, req)
         _response = await forward(
             client,
             url,
@@ -1479,6 +1554,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             steer_streaming=_steer_stream,
             client_tool_defs=req.tools,
             genuine_names=() if genuine else GENUINE_TOOL_NAMES,
+            family=_family,
         )
         if synthesize is not None and egress == "responses":
             # Steer any call the client cannot execute (undeclared, or
@@ -1496,6 +1572,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 client_names=_client_names,
                 client_tools=() if genuine else req.tools,
                 genuine_names=() if genuine else GENUINE_TOOL_NAMES,
+                family=_family,
             )
         return _response
 

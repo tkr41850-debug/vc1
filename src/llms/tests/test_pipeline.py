@@ -287,8 +287,8 @@ def test_genuine_calls_in_splits_owned_by_required_keys():
 
 
 def test_genuine_calls_in_custom_route_passes_raw_input():
-    """Custom-route calls (freeform nested tools) pass through re-typed
-    with raw input — never steered on JSON required-keys."""
+    """Custom-route calls (freeform nested tools) pass through into the
+    exec channel with raw input — never steered on JSON required-keys."""
     from fastapi.responses import JSONResponse
 
     from llms.proxy.pipeline import _genuine_calls_in
@@ -306,19 +306,25 @@ def test_genuine_calls_in_custom_route_passes_raw_input():
     }
     passed, steer = _genuine_calls_in(resp(raw), set(), client_tools=(ns,))
     assert steer == []
-    assert passed[0]["type"] == "custom_tool_call"
-    assert passed[0]["input"] == "*** Begin Patch ***"
-    assert "arguments" not in passed[0]
+    # Exec-channel rewrite rides a marker (the replay paths match
+    # frames by the emitted name, then apply it): input preserved
+    # verbatim for the freeform patch text.
+    assert passed[0]["__exec_rewrite__"] == {
+        "name": "exec",
+        "input": "*** Begin Patch ***",
+    }
     # Function-route nested calls still validate args-object shape:
-    # valid args pass, bare calls steer with a correction.
+    # valid args pass (into the exec channel), bare calls steer with
+    # a correction.
     good = dict(
         raw,
         call_id="c2",
         name="exec_command",
-        arguments='{"args": {"cmd": "cat f"}}',
+        arguments='{"cmd": "cat f"}',
     )
     passed, steer = _genuine_calls_in(resp(good), set(), client_tools=(ns,))
     assert steer == [] and passed[0]["type"] == "function_call"
+    assert passed[0]["__exec_rewrite__"]["name"] == "exec"
     bare = dict(raw, call_id="c3", name="exec_command", arguments="")
     passed, steer = _genuine_calls_in(resp(bare), set(), client_tools=(ns,))
     assert passed == [] and [c["name"] for c in steer] == ["exec_command"]
@@ -835,10 +841,13 @@ def test_overlay_case_variant_keeps_genuine_and_appends_client(app_client):
     assert "'Read'" in seen["json"].get("instructions", "")
 
 
-def test_classify_namespaced_owned_call_passes_with_route_marker():
-    """Code-mode `ns__name` classifies on the bare name (the harness
-    fills its default namespace when absent) and carries the namespace
-    for the dispatch replay."""
+def test_classify_namespaced_owned_call_passes_without_default_marker():
+    """Code-mode `default.exec_command` classifies on the bare name and
+    passes WITHOUT a route marker: the harness fills its own default
+    namespace when absent, and a foreign `default` value poisons lookup
+    client-side (live: replayed `default.exec_command` failed with
+    `unsupported call`). Non-default namespaces still ride the
+    marker for the dispatch replay."""
     from llms.proxy.client_tools import dispatchable_names
     from llms.proxy.ir import ToolDef
     from llms.proxy.pipeline import _classify_calls, owned_tool_names
@@ -861,4 +870,88 @@ def test_classify_namespaced_owned_call_passes_with_route_marker():
     passed, steer = _classify_calls(calls, owned, defs, dispatchable_names((shell,)))
     assert steer == []
     assert passed[0]["name"] == "exec_command"
-    assert passed[0]["__route_namespace__"] == "default"
+    assert "__route_namespace__" not in passed[0]
+
+
+def test_shell_retransmit_same_call_id_steers_not_replays():
+    """Same-call_id retransmit dedup (live spark harness 2026-10-06):
+    the model emits the translated `shell` AND the client runner name
+    for one action under one call_id. The duplicate steers (never
+    replays): a same-call_id double-execution would run the command
+    twice, and the client rejects the retransmit as a duplicate."""
+    from llms.proxy.ir import ToolDef
+    from llms.proxy.pipeline import _classify_calls
+
+    runner = ToolDef(
+        "exec_command",
+        "run",
+        {"type": "object", "properties": {"cmd": {}}, "required": ["cmd"]},
+    )
+    owned = {"exec_command": "exec_command"}
+    defs = {"exec_command": runner}
+    calls = [
+        {"call_id": "c1", "name": "shell", "arguments": '{"command": "cat f"}'},
+        {"call_id": "c1", "name": "shell", "arguments": '{"command": "cat f"}'},
+    ]
+    passed, steer = _classify_calls(calls, owned, defs, None, (runner,))
+    assert len(passed) == 1
+    assert len(steer) == 1
+    assert steer[0]["name"] == "shell"
+    # Distinct call ids are independent actions: both pass.
+    calls = [
+        {"call_id": "c1", "name": "shell", "arguments": '{"command": "cat f"}'},
+        {"call_id": "c2", "name": "shell", "arguments": '{"command": "cat f"}'},
+    ]
+    passed, steer = _classify_calls(calls, owned, defs, None, (runner,))
+    assert len(passed) == 2 and not steer
+
+
+def test_classify_shell_rewrites_with_family_threaded():
+    """Family-threaded genuine->client rewrite (compat Task 4): a `shell`
+    emission on the luna leg rewrites onto the nested exec_command AND
+    rides the exec-channel marker (a bare function_call exec_command
+    fails lookup — only custom_tool_call exec dispatches). On a plain
+    function leg the same rewrite is a bare rename with no marker."""
+    from llms.proxy.client_tools import (
+        dispatchable_names,
+        nested_tool_defs,
+        owned_tool_names,
+    )
+    from llms.proxy.ir import ToolDef
+    from llms.proxy.pipeline import _classify_calls
+    from tests.test_client_tools import _luna_namespace
+
+    ns = (_luna_namespace(),)
+    owned = owned_tool_names(ns)
+    defs = {t.name.lower(): t for t in ns if t.name}
+    defs.update(nested_tool_defs(ns))
+    route = dispatchable_names(ns)
+    calls = [{"call_id": "c1", "name": "shell", "arguments": '{"command": "cat f"}'}]
+    passed, steer = _classify_calls(calls, owned, defs, route, ns, (), family="luna")
+    assert not steer
+    assert len(passed) == 1
+    assert passed[0]["name"] == "exec_command"
+    assert passed[0]["__exec_rewrite__"] == {
+        "name": "exec",
+        "input": 'await tools.exec_command({"cmd": "cat f"})',
+    }
+    # The JS input already carries the translated arguments: keeping
+    # __translated_args__ alongside the marker would also rewrite the
+    # done frame and refold a Frankenstein call.
+    assert "__translated_args__" not in passed[0]
+    # Plain function leg, unknown family: bare rename, no marker.
+    runner = ToolDef(
+        "exec_command",
+        "run",
+        {"type": "object", "properties": {"cmd": {}}, "required": ["cmd"]},
+    )
+    owned = {"exec_command": "exec_command"}
+    defs = {"exec_command": runner}
+    calls = [{"call_id": "c1", "name": "shell", "arguments": '{"command": "cat f"}'}]
+    passed, steer = _classify_calls(
+        calls, owned, defs, None, (runner,), family="unknown"
+    )
+    assert not steer
+    assert len(passed) == 1
+    assert passed[0]["name"] == "exec_command"
+    assert "__exec_rewrite__" not in passed[0]

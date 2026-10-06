@@ -86,6 +86,99 @@ def sniff_stream_usage(lines: list[str], ingress: str):
     return done
 
 
+def _remember_announced_arguments(
+    payload: str,
+    announced: dict[str, str],
+    announced_input: dict[str, str] | None = None,
+    announced_custom: set[str] | None = None,
+) -> None:
+    """Seed folded args from the added frame's own arguments snapshot.
+
+    Upstream announces calls via `response.output_item.added` whose
+    item carries the full `arguments` string, then replays the same
+    payload through `function_call_arguments` delta/done frames. The
+    incremental parser only accumulates the delta frames — a turn with
+    no delta frames (or one whose deltas arrive after the fold reads
+    them) folds to empty arguments, so a valid call steers as
+    owned-but-invalid. The added frame's snapshot is the same payload
+    the deltas would carry: seed it so the fold judges what the model
+    actually emitted. Never overwrites delta-accumulated arguments
+    (callers apply the seed only to calls with none).
+
+    Custom-tool calls ride a raw-string `input` (JS source for exec,
+    patch text for apply_patch), never JSON `arguments`: seed that
+    into `announced_input` too — even when EMPTY (an announced-but-
+    empty input is the live empty-exec shape the classifier must
+    steer, and absence would read as "no input announced"). Record
+    the wire type in `announced_custom`: the fold's `custom` flag
+    only accumulates from input deltas, which a valid rewrite has
+    none of — without this the tail check steers the proxy's own
+    rewrite as an empty call (live: streaming steer budget exhausted
+    on the rewritten clean turn).
+    """
+    import json as _json
+
+    try:
+        event = _json.loads(payload)
+    except Exception:
+        return
+    if not isinstance(event, dict):
+        return
+    if event.get("type") != "response.output_item.added":
+        return
+    item = event.get("item")
+    if not isinstance(item, dict):
+        return
+    if item.get("type") not in ("function_call", "custom_tool_call"):
+        return
+    call_id = item.get("id") or item.get("call_id")
+    if item.get("type") == "custom_tool_call" and call_id:
+        if announced_custom is not None:
+            announced_custom.add(str(call_id))
+        if announced_input is not None and isinstance(item.get("input"), str):
+            announced_input.setdefault(str(call_id), item["input"])
+    arguments = item.get("arguments")
+    if call_id and isinstance(arguments, str) and arguments:
+        announced.setdefault(str(call_id), arguments)
+
+
+def _emitted_name_for(call_id: str, lines: list[str]) -> str:
+    """The tool name the added frame announced for one call id, or "".
+
+    The streaming replay matches frames by the name the model EMITTED
+    (added frame), not the classifier's renamed replay target: a
+    genuine->client translation (shell->exec_command) or a casing
+    convert otherwise matches no frame and the turn replays unrenamed
+    (live: translated shell replayed as `shell`, harness failed it).
+    Parses only added-frame lines carrying the call id; unparseable
+    lines are skipped (caller falls back to the replay target).
+    """
+    import json as _json
+
+    if not call_id:
+        return ""
+    for line in lines:
+        if call_id not in line or not line.startswith("data:"):
+            continue
+        try:
+            payload = _json.loads(line[len("data:") :].strip())
+        except Exception as exc:
+            logger.debug("[fold] emitted-name skipped non-JSON line: %r", exc)
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("type") != "response.output_item.added":
+            continue
+        item = payload.get("item")
+        if not isinstance(item, dict):
+            continue
+        if item.get("id") != call_id and item.get("call_id") != call_id:
+            continue
+        name = item.get("name")
+        return name if isinstance(name, str) else ""
+    return ""
+
+
 def fold_stream_calls(lines: list[str], ingress: str) -> list[dict]:
     """Model tool calls in one folded SSE body, with wire arguments.
 
@@ -104,6 +197,14 @@ def fold_stream_calls(lines: list[str], ingress: str) -> list[dict]:
     names: dict[str, str] = {}
     args: dict[str, str] = {}
     custom: dict[str, bool] = {}
+    announced_args: dict[str, str] = {}
+    # Custom-channel snapshots from the added frames: the wire `input`
+    # (raw JS/patch text, announced even when empty) and the wire item
+    # type. A valid Custom call has no input deltas, so without these
+    # the fold emits arguments:"" with no type — indistinguishable
+    # from the live empty-exec shape the classifier must steer.
+    announced_input: dict[str, str] = {}
+    announced_custom: set[str] = set()
 
     def _accumulate(delta) -> None:
         name = parser.names.get(delta.call_id, delta.name)
@@ -117,10 +218,16 @@ def fold_stream_calls(lines: list[str], ingress: str) -> list[dict]:
 
     for line in lines:
         for payload in framer.feed(line):
+            _remember_announced_arguments(
+                payload, announced_args, announced_input, announced_custom
+            )
             for delta in parser.feed_payload(payload):
                 if isinstance(delta, ToolArgsDelta):
                     _accumulate(delta)
     for payload in framer.finish():
+        _remember_announced_arguments(
+            payload, announced_args, announced_input, announced_custom
+        )
         for delta in parser.feed_payload(payload):
             if isinstance(delta, ToolArgsDelta):
                 _accumulate(delta)
@@ -140,10 +247,37 @@ def fold_stream_calls(lines: list[str], ingress: str) -> list[dict]:
         except Exception:
             pass
     out = []
+    done_args = getattr(parser, "done_args", None) or {}
+    # A done-only turn announces the name (added frame) and carries the
+    # payload solely in the done frame: no delta ever registers the
+    # call in `names`, so seed announced-but-argless calls from the
+    # done payloads (same role as the pending-call flush below).
+    for cid, payload in done_args.items():
+        if cid not in names:
+            names[cid] = parser.names.get(cid, "")
+            args[cid] = ""
     for cid, cname in names.items():
-        entry = {"call_id": cid, "name": cname, "arguments": args.get(cid, "")}
-        if custom.get(cid):
+        folded = args.get(cid, "")
+        if not folded:
+            # No delta frames carried the payload: fall back to the
+            # added frame's own arguments snapshot, then to the done
+            # frame's payload (live: Zen announces with arguments:""
+            # and omits deltas on some turns — the done frame is the
+            # only copy). Deltas win when present (the done frame
+            # repeats them; concatenating both doubles the payload
+            # into invalid JSON) — hence fallback, never merge.
+            folded = announced_args.get(cid, "") or done_args.get(cid, "")
+        entry = {"call_id": cid, "name": cname, "arguments": folded}
+        if custom.get(cid) or cid in announced_custom:
             entry["type"] = "custom_tool_call"
+        if cid in announced_input:
+            # The wire input is the payload the client executes for
+            # Custom calls (JS source / patch text) — the classifier
+            # judges it, not the JSON arguments (which a valid Custom
+            # call never carries). Set even when empty: an announced
+            # empty input is the steerable empty-exec shape, while an
+            # unannounced absence is just "no data".
+            entry["input"] = announced_input[cid]
         out.append(entry)
     return out
 
@@ -159,6 +293,8 @@ async def fold_and_steer_streaming(
     client_names: set[str] | None,
     usage_sink=None,
     client_tools: tuple = (),
+    genuine_names: tuple = (),
+    family: str = "unknown",
 ):
     """Fold one streaming turn, steer undeclared calls, replay clean SSE.
 
@@ -332,11 +468,19 @@ async def fold_and_steer_streaming(
     # dead turn replaying as if the call ran.
     _steer_terminal: list[bytes] | None = None
     from llms.proxy.client_tools import owned_tool_names as _owned_names
+    from llms.proxy.client_tools import split_call_name as _split_name
     from llms.proxy.pipeline import _classify_calls as _classify
     from llms.proxy.pipeline import _steer_output_for as _output_for
     from llms.proxy.pipeline import _valid_json as _valid_args
 
     _owned = _owned_names(client_tools)
+    # Nested tools dispatch by bare name, so the dead-turn detector keys
+    # on owned names (not the container names the client declared):
+    # otherwise a nested call like exec_command never matches `lowered`
+    # and the fold treats a perfectly dispatchable turn as unjudged.
+    _nested_lowered = {n.lower() for n in _owned if isinstance(n, str)}
+    if _nested_lowered:
+        lowered = _nested_lowered
     _defs = {t.name.lower(): t for t in client_tools if t.name}
     _route: dict = {}
     try:
@@ -350,10 +494,22 @@ async def fold_and_steer_streaming(
     for _ in range(max_iters):
         calls = fold_stream_calls(lines, "responses") if lowered is not None else []
         # Shared classifier: owned-valid calls pass (converted casing),
-        # owned-invalid and undeclared calls steer. Without client_tools
-        # the legacy lowered-membership rule applies.
+        # owned-invalid and undeclared calls steer. The classifier also
+        # rewrites (genuine->client translation, exec-channel): a
+        # rewritten call passes with a new name/arguments, so the
+        # all-clean fast path below must not treat it as untouched.
+        # Without client_tools the legacy lowered-membership rule applies.
         if client_tools:
-            passthrough, steer = _classify(calls, _owned, _defs, _route)
+            passthrough, steer = _classify(
+                calls,
+                _owned,
+                _defs,
+                _route,
+                client_tools,
+                genuine_names,
+                family,
+                trace_id,
+            )
         else:
             passthrough, steer = (
                 [],
@@ -366,56 +522,181 @@ async def fold_and_steer_streaming(
                     )
                 ],
             )
+        # Fold outcome per iteration (debug): the steer INFO below only
+        # fires when the loop body steers, and the tail check can fail
+        # closed without passing it — this records clean folds and
+        # fold-vs-tail disagreements too (live spark leg, 2026-10-05).
+        logger.debug(
+            "[%s] steer fold iter detail=%s",
+            trace_id,
+            {
+                "n_lines": len(lines),
+                "calls": [
+                    {
+                        "name": c.get("name"),
+                        "arguments": (c.get("arguments", "") or "")[:200],
+                    }
+                    for c in calls
+                ],
+                "passthrough": [c.get("name") for c in passthrough],
+                "steer": [c.get("name") for c in steer],
+            },
+        )
         if passthrough and not steer:
-            # Every call is client-owned and valid: rewrite the replayed
-            # lines' call name fields to the declared casing so the
-            # client dispatches its own declarations. A Custom-route
-            # call also re-types its frames to custom_tool_call (the
-            # harness dispatches by item type): the added frame's item
-            # type flips and its arguments move to input; delta/done
-            # frames follow the same rename the model used upstream.
-            # Only data lines parse as JSON (pings/blank separators
-            # skip); frame bytes stay otherwise verbatim.
+            # Every call is client-owned and valid (or rewritten into an
+            # executable form): rewrite the replayed lines' call name
+            # fields to the declared casing so the client dispatches its
+            # own declarations. A Custom-route call also re-types its
+            # frames to custom_tool_call (the harness dispatches by item
+            # type): the added frame's item type flips and its arguments
+            # move to input; delta/done frames follow the same rename
+            # the model used upstream. Classifier rewrites (genuine name
+            # -> client name with translated arguments, nested name ->
+            # exec-channel custom call) apply to the frames' name,
+            # arguments, and type fields likewise. Only data lines parse
+            # as JSON (pings/blank separators skip); frame bytes stay
+            # otherwise verbatim.
             import json as _json
 
             for call in passthrough:
                 target = call["name"]
-                custom = call.get("type") == "custom_tool_call"
+                # The name the frames carry: the added frame names the
+                # model's EMITTED call (genuine `shell`, namespaced
+                # `default.exec_command`), while the classifier renamed
+                # the call for replay (shell->exec_command translation,
+                # bare-name convert). Matching the renamed target
+                # matches no frame and the turn replays unrenamed
+                # (live: translated shell replayed as `shell` and the
+                # harness failed it). Recover the emitted name from the
+                # call id's own added-frame line; fall back to the
+                # target (verbatim passthrough already agrees).
+                emitted = _emitted_name_for(call.get("call_id", ""), lines)
+                frame_name = emitted or target
                 # The classifier split code-mode `ns__name` to the bare
-                # name: re-attach a non-default namespace on the replayed
+                # name: re-attach a non-`default` namespace on the replayed
                 # frames (the harness reads the item's own namespace
-                # field). The marker key never reaches the client.
+                # field — and fills its own default when absent, so a
+                # foreign `default` value poisons lookup client-side).
+                # The marker key never reaches the client.
                 route_ns = call.pop("__route_namespace__", "")
+                rewrite = call.pop("__exec_rewrite__", None)
+                translated_args = call.pop("__translated_args__", None)
+                # Delta-frame payload swap state: the genuine payload
+                # arrives chunked across N delta frames — the first
+                # carries the full translated arguments, the rest blank
+                # so downstream concatenation yields exactly it.
+                _delta_swapped = False
                 for i, line in enumerate(lines):
                     # Rewrite only this call's frames (matched by call
-                    # id in the same line). Same frame grammar as
-                    # SseFramer: "data:" with or without the space.
+                    # id in the same line). Lines already carrying the
+                    # rewritten name are skipped (multi-call turns share
+                    # no lines, so a match here means this loop already
+                    # rewrote it). The match is on the parsed item name
+                    # below — never on raw `"name":"..."` bytes, whose
+                    # spacing varies (`"name":"x"` vs `"name": "x"`)
+                    # and whose presence in the added frame would wrongly
+                    # skip the very frame needing the rewrite. Same frame
+                    # grammar as SseFramer: "data:" with or without space.
                     cid = call.get("call_id", "")
-                    if cid and cid in line and f'"name":"{target}"' not in line:
-                        if not line.startswith("data:"):
-                            continue
-                        stripped = line[len("data:") :].strip()
-                        try:
-                            payload = _json.loads(stripped)
-                        except Exception as exc:
-                            logger.debug(
-                                "[%s] fold rename skipped non-JSON line: %r",
-                                trace_id,
-                                exc,
-                            )
-                            continue
-                        item = payload.get("item", {})
-                        if (item.get("id") == cid or item.get("call_id") == cid) and (
-                            isinstance(item.get("name"), str)
-                            and item["name"].lower() == target.lower()
-                        ):
-                            item["name"] = target
-                            if route_ns and "namespace" not in item:
-                                item["namespace"] = route_ns
-                            if custom and item.get("type") == "function_call":
+                    if not (cid and cid in line and line.startswith("data:")):
+                        continue
+                    stripped = line[len("data:") :].strip()
+                    try:
+                        payload = _json.loads(stripped)
+                    except Exception as exc:
+                        logger.debug(
+                            "[%s] fold rename skipped non-JSON line: %r",
+                            trace_id,
+                            exc,
+                        )
+                        continue
+                    item = payload.get("item", {})
+                    if (item.get("id") == cid or item.get("call_id") == cid) and (
+                        isinstance(item.get("name"), str)
+                        and item["name"].lower() == frame_name.lower()
+                    ):
+                        item["name"] = target
+                        if route_ns and route_ns.lower() != "default":
+                            item["namespace"] = route_ns
+                        if isinstance(rewrite, dict):
+                            # Exec-channel rewrite (see the
+                            # synthesize replay in pipeline.py):
+                            # the nested call becomes ONE
+                            # custom_tool_call named `exec` whose
+                            # input is the JS invocation. Frames
+                            # match by call id (same rename rule
+                            # the model used upstream), so added
+                            # delta/done frames follow it.
+                            item["name"] = str(rewrite.get("name", "exec"))
+                            item["type"] = "custom_tool_call"
+                            item.pop("arguments", None)
+                            item["input"] = str(rewrite.get("input", ""))
+                            target = item["name"]
+                        else:
+                            if "arguments" in item and isinstance(translated_args, str):
+                                # Genuine->client argument translation
+                                # (shell.command -> exec_command.cmd):
+                                # the frames carry the model's genuine
+                                # payload — swap in the rewritten
+                                # arguments the classifier produced.
+                                item["arguments"] = translated_args
+                            if (
+                                call.get("type") == "custom_tool_call"
+                                and item.get("type") == "function_call"
+                            ):
                                 item["type"] = "custom_tool_call"
                                 if "arguments" in item:
                                     item["input"] = item.pop("arguments")
+                        lines[i] = "data: " + _json.dumps(payload)
+                    elif (
+                        isinstance(translated_args, str)
+                        and payload.get("type")
+                        == "response.function_call_arguments.done"
+                        and payload.get("item_id") == cid
+                        and isinstance(payload.get("name"), str)
+                        and payload["name"].lower() == frame_name.lower()
+                    ):
+                        # Done frames carry no `item` object (top-level
+                        # item_id/name/arguments), so the added-frame
+                        # branch never matches them: a renamed replay
+                        # leaves a stale genuine name + payload behind.
+                        # The client folds those bytes, and the tail-check
+                        # refolds a Frankenstein call (stale name wins via
+                        # the parser's done-name update while
+                        # announced_args supplies translated args) that
+                        # steers again (live resp-26 done-only turns).
+                        # Rename and swap the payload like the added
+                        # frame. Guarded to the genuine->client
+                        # translation (translated_args set): other
+                        # rewrites keep their current frame behavior.
+                        payload["name"] = target
+                        if "arguments" in payload:
+                            payload["arguments"] = translated_args
+                        lines[i] = "data: " + _json.dumps(payload)
+                    elif (
+                        isinstance(translated_args, str)
+                        and payload.get("type")
+                        == "response.function_call_arguments.delta"
+                        and payload.get("item_id") == cid
+                    ):
+                        # Delta frames carry the genuine payload chunked
+                        # (the parser accumulates them, preferring deltas
+                        # over done — the oldest replay bug this fix
+                        # closes: live turn 1 carried the translated
+                        # added + done frames but stale `command` deltas,
+                        # so the tail refold judged exec_command +
+                        # `{"command":...}` as missing `cmd` and failed
+                        # closed after a clean first fold). The first
+                        # delta carries the full translated arguments;
+                        # the rest blank so concatenation yields
+                        # exactly it. Spacing-agnostic (matched by type
+                        # + item id — deltas carry no name field).
+                        if "delta" in payload:
+                            if not _delta_swapped:
+                                payload["delta"] = translated_args
+                                _delta_swapped = True
+                            else:
+                                payload["delta"] = ""
                             lines[i] = "data: " + _json.dumps(payload)
             break
         if not steer or client_names is None:
@@ -448,13 +729,17 @@ async def fold_and_steer_streaming(
             args = call.get("arguments", "")
             args = args if isinstance(args, str) else ""
             redirect = _output_for(
-                call, args, client_names, _owned, _defs, client_tools
+                call,
+                args,
+                client_names,
+                _owned,
+                _defs,
+                client_tools,
+                genuine_names,
             )
-            lowered = (
-                call.get("name", "").lower()
-                if isinstance(call.get("name"), str)
-                else ""
-            )
+            _name = call.get("name", "")
+            _, _bare = _split_name(_name) if isinstance(_name, str) else ("", "")
+            lowered = _bare.lower() if isinstance(_bare, str) else ""
             if lowered in seen_redirects:
                 # The model already saw this redirect and re-emitted the
                 # same call: another identical re-request cannot help.
@@ -574,7 +859,16 @@ async def fold_and_steer_streaming(
             fold_stream_calls(lines, "responses") if lowered is not None else []
         )
         if client_tools:
-            _, _tail_steer = _classify(_tail_calls, _owned, _defs, _route)
+            _, _tail_steer = _classify(
+                _tail_calls,
+                _owned,
+                _defs,
+                _route,
+                client_tools,
+                genuine_names,
+                family,
+                trace_id,
+            )
         else:
             # Legacy lowered-membership rule (same as the loop body).
             _tail_steer = [
@@ -601,6 +895,7 @@ async def fold_and_steer_streaming(
                 _owned,
                 _defs,
                 client_tools,
+                genuine_names,
             )
             logger.warning(
                 "[%s] streaming steer budget exhausted; failing closed",
@@ -1057,6 +1352,8 @@ async def forward(
     client_names: set[str] | None = None,
     steer_streaming: bool = False,
     client_tool_defs: tuple = (),
+    genuine_names: tuple = (),
+    family: str = "unknown",
 ) -> Response:
     # via_warp sends the Zen request through a client already bound to the
     # local warp SOCKS exit (httpx proxy=...): direct in-process egress, no
@@ -1157,6 +1454,8 @@ async def forward(
                         client_names=client_names,
                         usage_sink=stream_usage_sink,
                         client_tools=client_tool_defs,
+                        genuine_names=genuine_names,
+                        family=family,
                     ),
                     media_type="text/event-stream",
                 )
@@ -1194,6 +1493,8 @@ async def forward(
                     client_names=client_names,
                     usage_sink=stream_usage_sink,
                     client_tools=client_tool_defs,
+                    genuine_names=genuine_names,
+                    family=family,
                 ),
                 media_type=media,
             )
