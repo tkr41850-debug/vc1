@@ -164,6 +164,19 @@ live spark shape.
   (`/tmp/spark-ws` holds only `probe.txt`) — expected per
   mechanism 12: two `execute` steers with the CORRECT grammar, then
   stop. The grammar is right; the channel does not exist.
+- Open alternative (not yet probed): the spark leg's `exec_command`
+  is a working shell runner (11/11 emissions executed live,
+  including `pwd; ls -la; cat` compound commands). A file-write on
+  this leg may be achievable WITHOUT the exec channel — via a
+  shell heredoc/redirect (`cat > file <<'EOF'`) through the
+  already-proven `exec_command` path — rather than via
+  `apply_patch` at all. That reframes the spark-leg gap from
+  "impossible" to "needs a shell-redirection probe, not an
+  apply_patch probe." No spark-leg workspace file has ever been
+  created through any path (only `probe.txt` from setup), and the
+  lone `patch-final.txt` reference in captures belongs to a luna
+  session (`req-119.json`, model `gpt-5.6-luna`, exec channel) that
+  reported `No such file`.
 - Upstream instability 20:42 UTC: relayed `upstream status=429`
   plus 504/503 flaps and direct-probe 502s — quota/cooldown window,
   retried on the next tick.
