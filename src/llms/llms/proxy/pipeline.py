@@ -257,23 +257,47 @@ def _classify_calls(
     owned: dict[str, str],
     client_defs: dict[str, object],
     route: dict[str, tuple[str, str]] | None = None,
+    client_tools: tuple = (),
+    genuine_names: tuple = (),
 ) -> tuple[list[dict], list[dict]]:
     """Split folded model calls into (passthrough, steer) by client ownership.
 
     A call whose lowered name the client declared passes through with its
     name converted to the declared casing — provided its arguments carry
-    the client's required keys. Calls whose dispatch route is
-    `custom_tool_call` pass through re-typed (via rewrite_steered_call):
-    the harness dispatches by item type, so a Custom-route call arriving
-    as `function_call` would fail lookup client-side. Owned-but-invalid
+    the client's required keys. Ownership alone is not enough: the name
+    must also be dispatchable (present in the route map). The
+    deferred-namespace container itself (a bare `functions` call) is
+    owned but has no dispatch route, so it steers like an undeclared
+    name instead of replaying a turn the harness fails client-side.
+    Calls whose dispatch route is `custom_tool_call` pass through
+    re-typed: on legs with a documented `exec` orchestrator the nested
+    call rewrites into that channel (a `custom_tool_call` named `exec`
+    whose input is the JS invocation — the harness only executes
+    nested tools through it); otherwise via rewrite_steered_call (the
+    harness dispatches by item type, so a Custom-route call arriving
+    as `function_call` would fail lookup client-side). Owned-but-invalid
     calls (missing required keys, unparseable/non-object args) steer
     like undeclared ones: the client cannot execute them, so the
-    redirect + re-request recovers. Pure helper (shared semantics with
-    the streaming fold in forward.py). Takes folded call dicts (not a
-    Response) so both the synthesize path (via _genuine_calls_in) and
-    the streaming fold (via fold_stream_calls) share one classifier.
+    redirect + re-request recovers. Genuine-overlay names with usable
+    arguments (`shell` with `command`, `read` with `path`, ...) rewrite
+    onto the client's equivalent tool instead of steering a name the
+    client declared under its own name for the same capability. A
+    `shell` emission the client declared under its own shell-runner
+    name dedups against that runner's own retransmit (same harness
+    turn, same call_id): the model emits both the alias and the client
+    name for one action, and the client executes the first while its
+    own router rejects the duplicate — the duplicate steers, never
+    replays. Pure helper (shared semantics with the streaming fold in
+    forward.py). Takes folded call dicts (not a Response) so both the
+    synthesize path (via _genuine_calls_in) and the streaming fold (via
+    fold_stream_calls) share one classifier.
     """
-    from llms.proxy.client_tools import rewrite_steered_call, split_call_name
+    from llms.proxy.client_tools import (
+        exec_channel_source,
+        rewrite_steered_call,
+        split_call_name,
+        translate_genuine_call,
+    )
     from llms.proxy.ir import ToolDef
 
     passthrough: list[dict] = []
@@ -285,16 +309,21 @@ def _classify_calls(
         # `default.exec_command` is `exec_command` in the default
         # namespace — ownership, routing, and casing all key on the
         # bare name (live: `default.exec_command` steered forever as
-        # undeclared). A non-default namespace rides
+        # undeclared). A non-`default` namespace rides
         # `__route_namespace__` so the replay can re-attach it (the
-        # harness reads the item's own namespace field).
+        # harness reads the item's own namespace field); `default`
+        # never re-attaches (the harness fills its own default, and a
+        # foreign `default` value poisons lookup client-side).
         ns, bare = split_call_name(name) if isinstance(name, str) else ("", None)
         lowered = bare.lower() if isinstance(bare, str) else None
-        if lowered is not None and lowered in owned:
+        routable = not route or (lowered is not None and lowered in route)
+        if lowered is not None and lowered in owned and routable:
             # Custom-route calls (raw-string payload: patch text, JS
             # source) skip the JSON required-keys check — it would
-            # always reject them. Re-type and pass through with the
-            # input preserved verbatim.
+            # always reject them. Nested names documented in the exec
+            # description rewrite into the exec channel first (a bare
+            # nested call fails lookup); otherwise re-type and pass
+            # through with the input preserved verbatim.
             item_type = (
                 route.get(lowered, ("function_call", lowered))[0]
                 if route
@@ -302,12 +331,35 @@ def _classify_calls(
             )
             if item_type == "custom_tool_call":
                 fixed = {**call, "name": convert_call_name(name, owned)}
-                rewritten = rewrite_steered_call(
-                    fixed,
-                    call.get("arguments", ""),
-                    route if route is not None else {},
+                args_text = call.get("arguments", "")
+                args_text = args_text if isinstance(args_text, str) else ""
+                # Nested names documented in the exec description only
+                # execute through the `exec` orchestrator — even
+                # Custom-route ones (apply_patch): a bare nested call
+                # fails lookup, so the rewrite rides a marker the replay
+                # paths apply (never as the call name — they match
+                # frames by the emitted name). Other Custom-route calls
+                # re-type with the input preserved verbatim.
+                rewritten = None
+                source = exec_channel_source(
+                    fixed.get("name", ""), args_text, client_tools
                 )
-                passthrough.append(rewritten if rewritten is not None else fixed)
+                if source is not None:
+                    rewritten = {
+                        **fixed,
+                        "__exec_rewrite__": {"name": "exec", "input": source},
+                    }
+                else:
+                    rewritten = rewrite_steered_call(
+                        fixed,
+                        args_text,
+                        route if route is not None else {},
+                    )
+                if rewritten is not None:
+                    passthrough.append(rewritten)
+                else:
+                    fixed["type"] = "custom_tool_call"
+                    passthrough.append(fixed)
                 continue
             tool = client_defs.get(lowered)
             args = call.get("arguments", "")
@@ -317,7 +369,7 @@ def _classify_calls(
                 == []
             ):
                 fixed = {**call, "name": convert_call_name(name, owned)}
-                if ns:
+                if ns and ns.lower() != "default":
                     fixed["__route_namespace__"] = ns
                 if route is not None:
                     rewritten = rewrite_steered_call(
@@ -325,8 +377,65 @@ def _classify_calls(
                     )
                     if rewritten is not None:
                         fixed = rewritten
+                if "__exec_rewrite__" not in fixed:
+                    # Nested names documented in the exec description
+                    # only execute through the `exec` orchestrator —
+                    # even Function-route ones (luna exec_command):
+                    # a bare nested call fails lookup.
+                    source = exec_channel_source(
+                        fixed.get("name", ""),
+                        args if isinstance(args, str) else "",
+                        client_tools,
+                    )
+                    if source is not None:
+                        fixed["__exec_rewrite__"] = {
+                            "name": "exec",
+                            "input": source,
+                        }
                 passthrough.append(fixed)
                 continue
+        # Genuine-overlay names with usable arguments (the model was
+        # offered shell/write/edit upstream): rewrite onto the
+        # client's equivalent tool instead of steering a name the
+        # client declared under its own name for the same capability
+        # (live: `shell` steered forever on the spark leg while the
+        # client declares `exec_command` for the same thing). `read`
+        # never rewrites (a shared `path` key is not a file reader) —
+        # it steers, and the redirect teaches shell/command.
+        args_text = call.get("arguments", "")
+        args_text = args_text if isinstance(args_text, str) else ""
+        translated = translate_genuine_call(
+            bare if isinstance(bare, str) else "", args_text, owned, client_defs
+        )
+        if translated is not None:
+            declared, new_args = translated
+            # Same-turn duplicate retransmit: the model emits the alias
+            # AND the client runner name for one action (live spark
+            # harness 2026-10-06: translated `shell` +
+            # `exec_command {"cmd": ...}` under one call_id). The
+            # client executes the alias translation and rejects the
+            # same-name retransmit as a duplicate — it steers, never
+            # replays (a same-call_id double-execution would run the
+            # command twice).
+            dup = next(
+                (
+                    p
+                    for p in passthrough
+                    if call.get("call_id")
+                    and call.get("call_id") in (p.get("call_id"), p.get("id"))
+                ),
+                None,
+            )
+            if dup is not None:
+                steer.append(call)
+                continue
+            passed = {**call, "name": declared, "arguments": new_args}
+            # The replay swaps frame arguments only when the call was
+            # renamed (genuine name -> client name): verbatim
+            # passthrough keeps the frames' own payload.
+            passed["__translated_args__"] = new_args
+            passthrough.append(passed)
+            continue
         steer.append(call)
     return passthrough, steer
 
@@ -336,6 +445,7 @@ def _genuine_calls_in(
     client_names: set[str],
     *,
     client_tools: tuple = (),
+    genuine_names: tuple = (),
 ) -> tuple[list[dict], list[dict]]:
     """Split response function_calls into (passthrough, steer) candidates.
 
@@ -372,28 +482,54 @@ def _genuine_calls_in(
     owned = owned_tool_names(client_tools)
     defs = {t.name.lower(): t for t in client_tools if t.name}
     defs.update(nested_tool_defs(client_tools))
-    return _classify_calls(calls, owned, defs, dispatchable_names(client_tools))
+    return _classify_calls(
+        calls,
+        owned,
+        defs,
+        dispatchable_names(client_tools),
+        client_tools,
+        genuine_names,
+    )
 
 
-def _steer_output_for(call, args, client_names, owned, defs, client_tools=()):
+def _steer_output_for(
+    call, args, client_names, owned, defs, client_tools=(), genuine_names=()
+):
     """Redirect text for one steered call.
 
     Owned-but-invalid calls get an argument correction (the tool exists;
-    only the arguments were wrong). Undeclared names keep the
-    not-available text with the client tool list. Pure dispatch —
-    wording lives in client_tools.build_tool_redirect. The nested-tool
-    (`exec` orchestrator) guidance appends only on legs whose harness
-    actually exposes that channel — on plain function legs it would
-    contradict the usable tool list in the same message.
+    only the arguments were wrong). Undeclared genuine-overlay names
+    that a same-capability client tool can serve (live: `read` on the
+    spark leg, where only `exec_command` reads files) get a directed
+    correction naming that tool and its argument shape — the generic
+    not-available list never converted the model. All other undeclared
+    names keep the not-available text with the client tool list. Pure
+    dispatch — wording lives in client_tools.build_tool_redirect. The
+    nested-tool (`exec` orchestrator) guidance appends only on legs
+    whose harness actually exposes that channel — on plain function
+    legs it would contradict the usable tool list in the same message.
     """
-    from llms.proxy.client_tools import build_tool_redirect, has_nested_exec_channel
+    from llms.proxy.client_tools import (
+        build_tool_redirect,
+        display_tool_names,
+        has_nested_exec_channel,
+        steer_to_equivalent,
+    )
 
-    correction = build_tool_redirect(str(call.get("name", "")), args, owned, defs)
+    equivalent = steer_to_equivalent(
+        str(call.get("name", "")), args, owned, defs, genuine_names
+    )
+    if equivalent is not None:
+        return equivalent
+    correction = build_tool_redirect(
+        str(call.get("name", "")), args, owned, defs, genuine_names
+    )
     if correction is not None:
         return correction
+    display = display_tool_names(client_tools) if client_tools else sorted(client_names)
     text = f"Tool '{call.get('name', '')}' is not available in this session." + (
-        f" Use one of these tools instead: {', '.join(sorted(client_names))}."
-        if client_names
+        f" Use one of these tools instead: {', '.join(sorted(display))}."
+        if display
         else ""
     )
     if has_nested_exec_channel(client_tools):
@@ -418,6 +554,7 @@ async def _steer_genuine_calls(
     trace_id: str,
     client_names: set[str],
     client_tools: tuple = (),
+    genuine_names: tuple = (),
 ) -> tuple[Response, dict]:
     """Answer undeclared tool calls with a redirect error and re-request.
 
@@ -434,7 +571,10 @@ async def _steer_genuine_calls(
     """
     for _ in range(STEER_MAX_ITERS):
         passed, steer_calls = _genuine_calls_in(
-            response, client_names, client_tools=client_tools
+            response,
+            client_names,
+            client_tools=client_tools,
+            genuine_names=genuine_names,
         )
         owned = owned_tool_names(client_tools)
         defs = {t.name.lower(): t for t in client_tools if t.name}
@@ -466,7 +606,22 @@ async def _steer_genuine_calls(
                     call.get("call_id") or call.get("id") or call.get("item_id") or ""
                 )
                 if key in by_id:
+                    # Classifier rewrites (genuine name -> client name
+                    # with translated arguments, nested name ->
+                    # exec-channel custom call) apply alongside the
+                    # casing convert: the downstream harness only
+                    # executes the rewritten form.
                     by_id[key]["name"] = call["name"]
+                    # Classifier markers never reach the client (popped):
+                    # __translated_args__ (genuine->client argument
+                    # rewrite) applies to the replayed arguments;
+                    # __route_namespace__ re-attaches a non-default
+                    # namespace for the dispatch replay.
+                    translated = call.pop("__translated_args__", None)
+                    if isinstance(translated, str):
+                        by_id[key]["arguments"] = translated
+                    elif "arguments" in call and isinstance(call["arguments"], str):
+                        by_id[key]["arguments"] = call["arguments"]
                     # The classifier split code-mode `ns__name` to the
                     # bare name for ownership: re-attach a non-default
                     # namespace for the dispatch replay (the harness
@@ -474,9 +629,22 @@ async def _steer_genuine_calls(
                     # replay would land in the wrong namespace). The
                     # marker key never reaches the client (popped).
                     ns = call.pop("__route_namespace__", "")
-                    if ns:
+                    if ns and ns.lower() != "default":
                         by_id[key]["namespace"] = ns
-                    if call.get("type") == "custom_tool_call":
+                    rewrite = call.pop("__exec_rewrite__", None)
+                    if isinstance(rewrite, dict):
+                        # Exec-channel rewrite: the nested call becomes
+                        # ONE custom_tool_call named `exec` whose input
+                        # is the JS invocation (the harness only
+                        # executes nested tools through the `exec`
+                        # orchestrator — a bare nested call fails
+                        # lookup). Arguments move to input; the item id
+                        # stays so the harness correlates the turn.
+                        by_id[key]["name"] = str(rewrite.get("name", "exec"))
+                        by_id[key]["type"] = "custom_tool_call"
+                        by_id[key].pop("arguments", None)
+                        by_id[key]["input"] = str(rewrite.get("input", ""))
+                    elif call.get("type") == "custom_tool_call":
                         by_id[key]["type"] = "custom_tool_call"
                         if "arguments" in by_id[key]:
                             by_id[key]["input"] = by_id[key].pop("arguments")
@@ -511,7 +679,13 @@ async def _steer_genuine_calls(
                     "type": "function_call_output",
                     "call_id": call_id,
                     "output": _steer_output_for(
-                        call, args, client_names, owned, defs, client_tools
+                        call,
+                        args,
+                        client_names,
+                        owned,
+                        defs,
+                        client_tools,
+                        genuine_names,
                     ),
                 }
             )
@@ -539,7 +713,10 @@ async def _steer_genuine_calls(
         # closed with the first steered call's redirect as the assistant
         # message instead, so the client surfaces the correction.
         tail_passed, tail_steer = _genuine_calls_in(
-            response, client_names, client_tools=client_tools
+            response,
+            client_names,
+            client_tools=client_tools,
+            genuine_names=genuine_names,
         )
         if not (tail_passed and not tail_steer) and tail_steer:
             tail_call = tail_steer[0]
@@ -566,6 +743,7 @@ async def _steer_genuine_calls(
                                         owned,
                                         defs,
                                         client_tools,
+                                        genuine_names,
                                     ),
                                     "annotations": [],
                                 }
@@ -879,7 +1057,20 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     # fidelity: no notice computed, kwarg stays "".
     notice = ""
     if egress == "responses" and not settings.zen_api_key and not genuine:
-        notice = build_tool_notice(req.tools, GENUINE_TOOL_NAMES)
+        # Plain-function legs get the upstream-`shell` directive (live
+        # spark A/B, 2026-10-06: naming `shell`+`command` fills cleanly
+        # with zero steers; naming the client `exec_command`+`cmd`
+        # emits `{}` x3 — the client name has no wire schema since
+        # outbound is genuine-12-only). Nested legs keep the tight
+        # sketches: a bare "call `shell`" sentence would mis-teach
+        # where tools run through the exec orchestrator channel.
+        from llms.proxy.client_tools import has_nested_exec_channel
+
+        notice = build_tool_notice(
+            req.tools,
+            GENUINE_TOOL_NAMES,
+            shell_alias=not has_nested_exec_channel(req.tools),
+        )
     outbound = (
         to_zen_responses(req, tool_notice=notice)
         if egress == "responses"
@@ -964,6 +1155,16 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             "bucket": bucket,
             "slot": slot,
         },
+    )
+    # Compat family detection (Task 1): record the downstream UA verbatim
+    # so per-family probes reveal what each harness actually sends. The
+    # relay captures body only, so the proxy log is the UA source. INFO
+    # (not debug): the proxy runs at INFO in probe and prod alike.
+    logger.info(
+        "[%s] ingress UA=%r ingress=%s",
+        trace_id,
+        request.headers.get("user-agent", ""),
+        ingress,
     )
     headers = build_zen_headers(settings, session_id=session_id)
     url = settings.zen_base_url.rstrip("/") + ENDPOINT_PATH[egress]
@@ -1277,6 +1478,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             client_names=_client_names or None,
             steer_streaming=_steer_stream,
             client_tool_defs=req.tools,
+            genuine_names=() if genuine else GENUINE_TOOL_NAMES,
         )
         if synthesize is not None and egress == "responses":
             # Steer any call the client cannot execute (undeclared, or
@@ -1293,6 +1495,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 trace_id=trace_id,
                 client_names=_client_names,
                 client_tools=() if genuine else req.tools,
+                genuine_names=() if genuine else GENUINE_TOOL_NAMES,
             )
         return _response
 
