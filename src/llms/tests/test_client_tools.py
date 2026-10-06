@@ -212,6 +212,12 @@ def test_notice_nested_patch_example_names_custom_form():
     notice = build_tool_notice((_luna_namespace(),), GENUINE_TOOL_NAMES)
     assert "custom_tool_call" in notice and "apply_patch" in notice
     assert "await tools.apply_patch(" in notice
+    # Live-proven Add-File grammar (luna 2026-10-06, byte-exact file):
+    # no trailing `***` on Begin/End Patch, `+`-prefixed content.
+    # The old `*** Begin Patch ***` form fails harness verification.
+    assert "*** Begin Patch ***" not in notice
+    assert "*** Begin Patch\\n" in notice
+    assert "+<content-line>" in notice
 
 
 def test_notice_nested_entries_tighten_args_keep_freeform():

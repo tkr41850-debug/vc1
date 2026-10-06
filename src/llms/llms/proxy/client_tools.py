@@ -874,8 +874,10 @@ def build_tool_notice(
                     "it on the `tools` object — e.g. to create a file: "
                     '`{"type": "custom_tool_call", "name": "exec", '
                     f'"input": "await tools.{freeform}('
-                    "'*** Begin Patch ***\\n*** Add File: <path>\\n"
-                    "<content>\\n*** End Patch ***')\"}`; e.g. to run a "
+                    "'*** Begin Patch\\n*** Add File: <path>\\n"
+                    "+<content-line>\\n*** End Patch')\"} (each added line "
+                    "starts with `+`; the first/last lines carry no trailing "
+                    '`***"`; e.g. to run a '
                     "shell command: "
                     '`{"type": "custom_tool_call", "name": "exec", '
                     '"input": "await tools.exec_command({cmd: '

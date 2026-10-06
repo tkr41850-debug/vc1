@@ -23,12 +23,12 @@ PORT = int(os.getenv("PROBE_PORT", "8793"))
 BASE_URL = f"http://127.0.0.1:{PORT}/v1"
 MODEL = os.getenv("PROBE_MODEL", "gpt-5.6-luna")
 
-ADD_FILE = "*** Begin Patch ***\n*** Add File: grammar-add.txt\nhello-grammar\n*** End Patch ***"
+ADD_FILE = "*** Begin Patch\n*** Add File: grammar-add.txt\n+hello-grammar\n*** End Patch"
 UPDATE_FILE = (
-    "*** Begin Patch ***\n*** Update File: grammar-update.txt\n"
-    "@@\n-old-line\n+new-line\n*** End Patch ***"
+    "*** Begin Patch\n*** Update File: grammar-update.txt\n"
+    "@@\n-old-line\n+new-line\n*** End Patch"
 )
-DELETE_FILE = "*** Begin Patch ***\n*** Delete File: grammar-delete.txt\n*** End Patch ***"
+DELETE_FILE = "*** Begin Patch\n*** Delete File: grammar-delete.txt\n*** End Patch"
 
 CANDIDATES = {"add": ADD_FILE, "update": UPDATE_FILE, "delete": DELETE_FILE}
 
