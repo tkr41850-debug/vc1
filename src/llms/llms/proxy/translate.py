@@ -798,7 +798,14 @@ def to_zen_responses(
                     _owned = _owned_names(req.tools)
                     _defs = {t.name.lower(): t for t in req.tools if t.name}
                     _defs.update(_nested_defs(req.tools))
-                    _hist = _translate(b.name, b.arguments, _owned, _defs, family)
+                    _hist = _translate(
+                        b.name,
+                        b.arguments,
+                        _owned,
+                        _defs,
+                        family,
+                        req.tools,
+                    )
                     if _hist is not None:
                         _name, _args = _hist
                     else:

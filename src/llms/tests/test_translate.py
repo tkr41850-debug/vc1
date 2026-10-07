@@ -1297,6 +1297,78 @@ def test_history_genuine_call_replays_translated():
     assert calls[0]["arguments"] == '{"cmd": "cat f"}'
 
 
+def test_history_genuine_write_replays_as_exec_channel_patch():
+    # History-echo side of the shipped write->apply_patch row: a
+    # genuine `write` the model emitted turn 1 (rewritten by the
+    # classifier onto `exec` + __exec_rewrite__ and executed by the
+    # harness as apply_patch) must replay upstream under the rewritten
+    # name/args — verbatim history would re-teach the dead genuine
+    # name (same mechanism as test_history_genuine_call_replays_
+    # translated). Luna leg: the tools ride `additional_tools` with
+    # the deferred `functions` namespace (from_responses dissolves
+    # them into req.tools, where the exec-channel gate finds them).
+    import json as _json
+
+    from llms.proxy.translate import from_responses, to_zen_responses
+    from tests.test_client_tools import _luna_namespace
+
+    (ns,) = (_luna_namespace(),)
+    exec_desc = next(
+        t["description"]
+        for t in ns.options["tools"]
+        if isinstance(t, dict) and t.get("name") == "exec"
+    )
+    req = from_responses(
+        {
+            "model": "m",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "write",
+                    "arguments": _json.dumps(
+                        {"path": "w.txt", "content": "hello-grammar"}
+                    ),
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "c1",
+                    "output": "ok",
+                },
+                {
+                    "type": "additional_tools",
+                    "tools": [
+                        {
+                            "type": "namespace",
+                            "name": "functions",
+                            "tools": [
+                                {
+                                    "type": "custom",
+                                    "name": "exec",
+                                    "description": exec_desc,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            ],
+            "tools": [],
+        }
+    )
+    out = to_zen_responses(req, tool_notice="", family="luna")
+    calls = [i for i in out["input"] if i.get("type") == "function_call"]
+    assert len(calls) == 1
+    assert calls[0]["name"] == "exec"
+    assert calls[0]["arguments"] == (
+        "*** Begin Patch\n*** Add File: w.txt\n+hello-grammar\n*** End Patch"
+    )
+
+
 def test_tool_notice_also_appends_to_developer_message():
     # Codex sends the harness-guidance system prompt top-level AND
     # per-turn skills/permissions context as a developer input item;
