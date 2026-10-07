@@ -249,6 +249,75 @@ def test_bare_patch_exec_input_rewraps_as_apply_patch():
     )
 
 
+def test_bare_patch_rewrap_rides_fold_to_classifier():
+    # Fold-level pin for mechanism 13: the live wire shape is an
+    # `output_item.added` custom_tool_call exec frame carrying the bare
+    # patch text in `input` (no JSON arguments, no input deltas). The
+    # fold must carry that input into the classifier entry so the
+    # rewrap arm fires — the classifier-level test above uses a
+    # hand-built dict and would pass even if the fold dropped the
+    # input and the arm silently never fired live. Folds synthetic
+    # wire bytes (same frame grammar as the empty-exec fold test),
+    # then classifies on the luna leg.
+    import json as _json
+
+    from llms.proxy.client_tools import (
+        dispatchable_names,
+        nested_tool_defs,
+        owned_tool_names,
+    )
+    from llms.proxy.compat import rewrap_bare_patch_exec_input
+    from llms.proxy.forward import fold_stream_calls
+    from llms.proxy.pipeline import _classify_calls
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+    from tests.test_client_tools import _luna_namespace
+
+    bare = "'*** Begin Patch\\n*** Add File: w.txt\\n+hi\\n*** End Patch'"
+    lines = [
+        "data: "
+        + _json.dumps(
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": "call_m13",
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "input": bare,
+                    "call_id": "call_m13",
+                    "status": "in_progress",
+                },
+            }
+        ),
+        ": ping",
+        (
+            'data: {"type":"response.function_call_arguments.done",'
+            '"output_index":0,"item_id":"call_m13","name":"default.exec",'
+            '"arguments":"{}"}'
+        ),
+        ": ping",
+        ('data: {"type":"response.completed","response":{"status":"completed"}}'),
+        ": ping",
+    ]
+    (call,) = fold_stream_calls(lines, "responses")
+    assert call.get("type") == "custom_tool_call"
+    assert call.get("input") == bare
+    ns = (_luna_namespace(),)
+    owned = owned_tool_names(ns)
+    defs = {t.name.lower(): t for t in ns if t.name}
+    defs.update(nested_tool_defs(ns))
+    route = dispatchable_names(ns)
+    passed, steer = _classify_calls(
+        [call], owned, defs, route, ns, GENUINE_TOOL_NAMES, "luna", "t1"
+    )
+    assert steer == []
+    assert [c["name"] for c in passed] == ["exec"]
+    assert passed[0]["__exec_rewrite__"] == {
+        "name": "exec",
+        "input": rewrap_bare_patch_exec_input(bare),
+    }
+
+
 def test_write_to_apply_patch_proven_live():
     # Task 3 gate RETIRED 2026-10-07 (round 4): the Add-File marker
     # grammar is verified live against the harness — luna leg,
