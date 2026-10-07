@@ -300,6 +300,7 @@ def _classify_calls(
         split_call_name,
         translate_genuine_call,
     )
+    from llms.proxy.compat import rewrap_bare_patch_exec_input
     from llms.proxy.ir import ToolDef
 
     passthrough: list[dict] = []
@@ -354,20 +355,38 @@ def _classify_calls(
                 # frames by the emitted name). Other Custom-route calls
                 # re-type with the input preserved verbatim.
                 rewritten = None
-                source = exec_channel_source(
-                    fixed.get("name", ""), args_text, client_tools
-                )
-                if source is not None:
-                    rewritten = {
-                        **fixed,
-                        "__exec_rewrite__": {"name": "exec", "input": source},
-                    }
-                else:
-                    rewritten = rewrite_steered_call(
-                        fixed,
-                        args_text,
-                        route if route is not None else {},
+                if lowered == "exec":
+                    # Mechanism 13 (live luna 2026-10-07, round 5): the
+                    # model drops the `await tools.apply_patch(...)`
+                    # wrapper and emits the patch text as the whole
+                    # exec input — the harness JS parser rejects it
+                    # (`SyntaxError`). Re-wrap the bare marker text so
+                    # the channel executes it (passthrough with the
+                    # marker the replay paths apply).
+                    rewrapped = rewrap_bare_patch_exec_input(payload_text)
+                    if rewrapped is not None:
+                        rewritten = {
+                            **fixed,
+                            "__exec_rewrite__": {
+                                "name": "exec",
+                                "input": rewrapped,
+                            },
+                        }
+                if rewritten is None:
+                    source = exec_channel_source(
+                        fixed.get("name", ""), args_text, client_tools
                     )
+                    if source is not None:
+                        rewritten = {
+                            **fixed,
+                            "__exec_rewrite__": {"name": "exec", "input": source},
+                        }
+                    else:
+                        rewritten = rewrite_steered_call(
+                            fixed,
+                            args_text,
+                            route if route is not None else {},
+                        )
                 if rewritten is not None:
                     passthrough.append(rewritten)
                 else:

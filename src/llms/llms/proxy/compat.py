@@ -96,6 +96,34 @@ def _execute_to_exec_channel(payload: dict, required: list) -> str | None:
     return code.strip()
 
 
+def rewrap_bare_patch_exec_input(payload_text: str) -> str | None:
+    """Bare apply_patch text in an exec input -> channel-ready JS, or None.
+
+    Mechanism 13 (live luna 2026-10-07, round 5): under a natural
+    prompt the model drops the `await tools.apply_patch(...)`
+    wrapper and emits the patch text as the whole `exec` input
+    (`'*** Begin Patch\\n*** Add File: ...'` — 15 turns running,
+    `Script failed` + `SyntaxError` each time; the harness JS
+    parser cannot run a bare patch). Detect the marker at the
+    start (after stripping an optional single layer of matching
+    quotes — the model wraps the whole input in `'...'` verbatim)
+    and re-wrap it as the channel invocation. Returns None when
+    the input is not a bare patch (already-wrapped JS, shell
+    commands, anything else ride through untouched).
+    Pure helper.
+    """
+    if not isinstance(payload_text, str):
+        return None
+    text = payload_text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1].strip()
+    if not text.startswith("*** Begin Patch"):
+        return None
+    if "tools.apply_patch" in text:
+        return None
+    return f"await tools.apply_patch({text!r})"
+
+
 def _client_channel(
     owned: dict, defs: dict, family: str, client_tools: tuple = ()
 ) -> tuple[str, str] | None:

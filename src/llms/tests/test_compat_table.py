@@ -121,8 +121,7 @@ def test_classifier_steers_empty_custom_exec_call():
     assert [c["name"] for c in steer] == ["default.exec"]
 
 
-def test_fold_keeps_custom_input_for_valid_exec_rewrite():
-    # A rewritten turn replays as `custom_tool_call exec` with the JS
+def test_fold_keeps_custom_input_for_valid_exec_rewrite():  # A rewritten turn replays as `custom_tool_call exec` with the JS
     # invocation in `input` (no JSON arguments, no input deltas). The
     # fold must carry that input so the tail-check classifier judges
     # the payload the client will execute — not an empty shape that
@@ -157,6 +156,97 @@ def test_fold_keeps_custom_input_for_valid_exec_rewrite():
     assert call["name"] == "exec"
     assert call.get("type") == "custom_tool_call"
     assert call.get("input") == js
+
+
+def test_bare_patch_exec_input_rewraps_as_apply_patch():
+    # Mechanism 13 (live luna 2026-10-07, round 5): under a natural
+    # prompt the model drops the `await tools.apply_patch(...)`
+    # wrapper and emits the patch text as the whole `custom_tool_call
+    # exec` input — 15 turns running, harness `Script failed` +
+    # `SyntaxError` each time. The classifier must re-wrap the bare
+    # marker text into the channel invocation (passthrough with the
+    # __exec_rewrite__ marker), not steer it: steering taught the
+    # wrapper for 15 turns and the model never re-added it.
+    # Non-patch exec inputs (already-wrapped JS, shell commands)
+    # ride through untouched.
+    from llms.proxy.client_tools import (
+        dispatchable_names,
+        nested_tool_defs,
+        owned_tool_names,
+    )
+    from llms.proxy.compat import rewrap_bare_patch_exec_input
+    from llms.proxy.pipeline import _classify_calls
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+    from tests.test_client_tools import _luna_namespace
+
+    # Pure helper level: marker detection + quote-strip + re-wrap.
+    # The re-wrap quotes the patch with repr: the harness decodes the
+    # JS string escapes, so wire `\\n` becomes the real newlines the
+    # patch parser needs (same encoding the round-4 UPDATE proof ran).
+    bare = "'*** Begin Patch\\n*** Add File: w.txt\\n+hi\\n*** End Patch'"
+    assert rewrap_bare_patch_exec_input(bare) == (
+        "await tools.apply_patch('*** Begin Patch\\\\n"
+        "*** Add File: w.txt\\\\n+hi\\\\n*** End Patch')"
+    )
+    assert (
+        rewrap_bare_patch_exec_input(
+            "*** Begin Patch\n*** Delete File: d.txt\n*** End Patch"
+        )
+        == "await tools.apply_patch("
+        "'*** Begin Patch\\n*** Delete File: d.txt\\n*** End Patch')"
+    )
+    wrapped = "await tools.apply_patch('*** Begin Patch\\n*** End Patch')"
+    assert rewrap_bare_patch_exec_input(wrapped) is None
+    assert (
+        rewrap_bare_patch_exec_input('await tools.exec_command({"cmd": "x"})') is None
+    )
+    assert rewrap_bare_patch_exec_input("") is None
+    assert rewrap_bare_patch_exec_input(123) is None
+    # Classifier level: bare-patch exec passthrough with the marker.
+    ns = (_luna_namespace(),)
+    owned = owned_tool_names(ns)
+    defs = {t.name.lower(): t for t in ns if t.name}
+    defs.update(nested_tool_defs(ns))
+    route = dispatchable_names(ns)
+    (call,) = [
+        {
+            "call_id": "c1",
+            "name": "exec",
+            "type": "custom_tool_call",
+            "input": bare,
+            "arguments": "",
+        }
+    ]
+    passed, steer = _classify_calls(
+        [call], owned, defs, route, ns, GENUINE_TOOL_NAMES, "luna", "t1"
+    )
+    assert steer == []
+    assert [c["name"] for c in passed] == ["exec"]
+    assert passed[0]["__exec_rewrite__"] == {
+        "name": "exec",
+        "input": rewrap_bare_patch_exec_input(bare),
+    }
+    # Already-wrapped JS keeps its existing path (exec_channel_source
+    # finds no nested name for `exec` itself; rewrite_steered_call
+    # re-types — the marker assertion below pins no-regression, not
+    # the exact legacy branch).
+    (call,) = [
+        {
+            "call_id": "c2",
+            "name": "exec",
+            "type": "custom_tool_call",
+            "input": wrapped,
+            "arguments": "",
+        }
+    ]
+    passed, steer = _classify_calls(
+        [call], owned, defs, route, ns, GENUINE_TOOL_NAMES, "luna", "t1"
+    )
+    assert steer == []
+    assert [c["name"] for c in passed] == ["exec"]
+    assert "__exec_rewrite__" not in passed[0] or isinstance(
+        passed[0]["__exec_rewrite__"], dict
+    )
 
 
 def test_write_to_apply_patch_proven_live():
@@ -717,4 +807,91 @@ def test_write_to_shell_redirect_proven_live():
             runner,
         )
         is None
+    )
+
+
+def test_schema_audit_dropped_keys_pinned():
+    # Task 8 schema audit (vs zen_tools.py GENUINE_TOOLS, 2026-10-07):
+    # every compat row drops or refuses specific genuine keys. This
+    # test pins each drop so a future schema widening (new required
+    # key upstream) fails LOUDLY here instead of silently losing
+    # data on the translation path.
+    from llms.proxy.compat import (
+        _edit_to_apply_patch,
+        _execute_to_exec_channel,
+        _shell_to_cmd,
+        _write_to_apply_patch,
+        _write_to_shell_redirect,
+    )
+    from llms.proxy.zen_tools import GENUINE_TOOLS
+
+    schemas = {t["name"]: t["parameters"] for t in GENUINE_TOOLS}
+    # shell: only `command` survives; workdir/timeout/background drop
+    # (client cmd-runner takes cmd alone — the runner's cwd applies).
+    assert set(schemas["shell"]["properties"]) == {
+        "command",
+        "workdir",
+        "timeout",
+        "background",
+    }
+    assert (
+        _shell_to_cmd(
+            {
+                "command": "cat f",
+                "workdir": "/tmp",
+                "timeout": 5000,
+                "background": True,
+            },
+            ["cmd"],
+        )
+        == '{"cmd": "cat f"}'
+    )
+    # execute: `code` replays verbatim; no keys exist to drop.
+    assert set(schemas["execute"]["properties"]) == {"code"}
+    assert (
+        _execute_to_exec_channel({"code": "await tools.x()"}, []) == "await tools.x()"
+    )
+    # write: path+content both consumed; unknown extras ignored.
+    assert set(schemas["write"]["properties"]) == {"path", "content"}
+    assert (
+        _write_to_apply_patch({"path": "a", "content": "b", "extra": 1}, [])
+        == "*** Begin Patch\n*** Add File: a\n+b\n*** End Patch"
+    )
+    # edit: path+oldString+newString consumed; replaceAll REFUSED
+    # (not dropped — a global replace has no Update-hunk form).
+    assert set(schemas["edit"]["properties"]) == {
+        "path",
+        "oldString",
+        "newString",
+        "replaceAll",
+    }
+    assert (
+        _edit_to_apply_patch(
+            {
+                "path": "f",
+                "oldString": "a",
+                "newString": "b",
+                "replaceAll": False,
+            },
+            [],
+        )
+        == "*** Begin Patch\n*** Update File: f\n@@\n-a\n+b\n*** End Patch"
+    )
+    assert (
+        _edit_to_apply_patch(
+            {
+                "path": "f",
+                "oldString": "a",
+                "newString": "b",
+                "replaceAll": True,
+            },
+            [],
+        )
+        is None
+    )
+    # Spark shell synthesis consumes path+content; the heredoc body
+    # carries content verbatim (no key renames involved).
+    assert (
+        _write_to_shell_redirect({"path": "s.txt", "content": "hi\n"}, ["cmd"])
+        == "printf %s > s.txt <<'EOF'\nhi\nEOF"
     )
