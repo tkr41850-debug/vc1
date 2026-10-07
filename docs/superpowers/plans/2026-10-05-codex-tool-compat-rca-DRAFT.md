@@ -181,6 +181,50 @@ live spark shape.
   plus 504/503 flaps and direct-probe 502s — quota/cooldown window,
   retried on the next tick.
 
+## Live verification 2026-10-07, round 5 (02:30–02:40 UTC, quota clear)
+
+End-to-end proof of the SHIPPED translation rows (b632ecc) under
+natural prompts — no JS coaching, no channel naming:
+
+- Spark natural file-write: PASS, first try, zero proxy steers.
+  Model emitted genuine `function_call exec_command
+  {"cmd": "printf 'hello-natural\\\\n' > spark-natural.txt"}`,
+  harness `Process exited with code 0`, file byte-exact
+  `hello-natural\n` (`od -c` verified). The `write`→`exec_command`
+  row fires through the full classifier path on a natural prompt.
+- Luna natural file-write, attempt 1: FAIL-nofile (model-side
+  stall, not a proxy miss). Zero proxy steers — the model never
+  emitted ANY tool call (single ingress, replied DONE with no
+  action). Same shape as the round-3 attempt-1/2 stall: with no
+  JS coaching the model sometimes declines the exec channel it
+  cannot see as a wire tool.
+- Luna natural file-write, attempt 2 (retry): PASS after
+  model-side thrash. The model emitted 15× bare-patch `exec`
+  inputs (`'*** Begin Patch\\n...'` WITHOUT the `await
+  tools.apply_patch(...)` wrapper — `Script failed` + `SyntaxError`
+  each time), one stray `exec_command cat` probe, then
+  self-corrected to the shell path: `await
+  tools.exec_command({"cmd": "pwd; ls -la; printf
+  'hello-natural\\\\n' > luna-natural2.txt; ...})` → `Script
+  completed`, file byte-exact `hello-natural\n` (`od -c`
+  verified).
+- Mechanism 13 (new): the luna notice teaches the apply_patch
+  FORM (`await tools.apply_patch('*** ...')`) but the model
+  drops the wrapper under a natural prompt and emits the patch
+  text as the whole `exec` input. The `execute`→`exec` table row
+  covers genuine `execute {"code"}` emissions, but a bare-patch
+  `custom_tool_call exec` input has no classifier arm — nothing
+  re-wraps it, so it fails in the harness JS parser 15 turns
+  running. Fix direction: a classifier arm that detects a bare
+  `*** Begin Patch` exec input and re-wraps it as `await
+  tools.apply_patch(<input>)` (hermetic + live-proven before
+  shipping — same Task-3-gate discipline). NOT implemented yet.
+- Practical upshot: luna file-write works end-to-end today via
+  the model's own shell fallback (proven twice now), and via the
+  exec channel when the model keeps the wrapper (rounds 3–4);
+  the bare-patch stall is a model-fluency gap with a clear
+  proxy-side fix, not a grammar or routing bug.
+
 ## Live verification 2026-10-07, round 4 (01:00–01:25 UTC, quota cleared)
 
 Quota cleared ~01:01 UTC (HI round-trip 200,
