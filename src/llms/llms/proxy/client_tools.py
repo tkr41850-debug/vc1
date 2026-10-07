@@ -610,6 +610,7 @@ def translate_genuine_call(
     owned: dict[str, str],
     defs: dict,
     family: str = "unknown",
+    client_tools: tuple = (),
 ) -> tuple[str, str] | None:
     """Genuine name + usable args -> (client tool name, client arguments).
 
@@ -647,7 +648,9 @@ def translate_genuine_call(
         _compat_translate = None
     if _compat_translate is not None:
         try:
-            compat = _compat_translate(lowered, arguments, family, owned, defs)
+            compat = _compat_translate(
+                lowered, arguments, family, owned, defs, client_tools
+            )
         except Exception:
             compat = None
         if compat is not None:

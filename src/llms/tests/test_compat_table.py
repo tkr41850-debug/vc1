@@ -60,11 +60,11 @@ def test_family_for_breaks_ua_tie_with_requested_model():
         def __init__(self, ua):
             self.headers = {"user-agent": ua}
 
+    assert _family_for(_H(CODEX_UA), "responses", luna_req, "gpt-5.6-luna") == "luna"
     assert (
-        _family_for(_H(CODEX_UA), "responses", luna_req, "gpt-5.6-luna") == "luna"
-    )
-    assert (
-        _family_for(_H(CODEX_UA), "responses", luna_req, "muse-spark-1.3-contributor-free")
+        _family_for(
+            _H(CODEX_UA), "responses", luna_req, "muse-spark-1.3-contributor-free"
+        )
         == "codex-plain"
     )
     assert (
@@ -159,32 +159,105 @@ def test_fold_keeps_custom_input_for_valid_exec_rewrite():
     assert call.get("input") == js
 
 
-def test_write_to_apply_patch_needs_live_grammar_proof():
-    # Task 3 gate: NO write->apply_patch table entry ships until the
-    # Add-File marker grammar is verified live against the harness
-    # (2026-10-06: 4 FAIL-nofile attempts; the marker text the proxy
-    # would synthesize is still a guess). This test pins the CURRENT
-    # contract — translate_to_client("write", ...) is None (fail open,
-    # never synthesize) — so a future entry must update this test
-    # with the live proof, not slip in silently.
+def test_write_to_apply_patch_proven_live():
+    # Task 3 gate RETIRED 2026-10-07 (round 4): the Add-File marker
+    # grammar is verified live against the harness — luna leg,
+    # `custom_tool_call exec` carrying the synthesized patch ran
+    # `Script completed` with `FileChange update` and the workspace
+    # file byte-exact (`new-line\n`, od-verified; Add-File likewise
+    # `hello-grammar\n` round 3). The write->apply_patch row now
+    # ships on the luna family only (exec channel required —
+    # unknown families still fail open, never a wrong-family
+    # rewrite). This test pins the SHIPPED contract — a future
+    # regression to None reopens the gate.
+    from llms.proxy.client_tools import nested_tool_defs, owned_tool_names
     from llms.proxy.compat import translate_to_client
-    from llms.proxy.ir import ToolDef
+    from tests.test_client_tools import _luna_namespace, _spark_runner
 
-    nested_patch = ToolDef(
-        "apply_patch",
-        "Edit files, freeform.",
-        {},
-        kind="custom",
+    ns = (_luna_namespace(),)
+    owned = owned_tool_names(ns)
+    defs = {t.name.lower(): t for t in ns if t.name}
+    defs.update(nested_tool_defs(ns))
+    assert translate_to_client(
+        "write",
+        '{"path": "grammar-add.txt", "content": "hello-grammar"}',
+        "luna",
+        owned,
+        defs,
+        ns,
+    ) == (
+        "exec",
+        "*** Begin Patch\n*** Add File: grammar-add.txt\n+hello-grammar\n*** End Patch",
     )
-    owned = {"apply_patch": "apply_patch"}
-    defs = {"apply_patch": nested_patch}
+    # Multi-line content: every line gets a `+` prefix.
+    assert translate_to_client(
+        "write",
+        '{"path": "a.txt", "content": "l1\\nl2\\n"}',
+        "luna",
+        owned,
+        defs,
+        ns,
+    ) == (
+        "exec",
+        "*** Begin Patch\n*** Add File: a.txt\n+l1\n+l2\n*** End Patch",
+    )
+    # Missing/non-string fields: no guess (generic steer applies).
+    assert (
+        translate_to_client("write", '{"path": "a.txt"}', "luna", owned, defs, ns)
+        is None
+    )
+    assert (
+        translate_to_client(
+            "write",
+            '{"path": "a.txt", "content": 3}',
+            "luna",
+            owned,
+            defs,
+            ns,
+        )
+        is None
+    )
+    # Family gate: unknown families fail open (never a wrong-family
+    # rewrite); plain legs have no exec channel.
+    assert (
+        translate_to_client(
+            "write",
+            '{"path": "grammar-add.txt", "content": "hello-grammar"}',
+            "unknown",
+            owned,
+            defs,
+            ns,
+        )
+        is None
+    )
+    runner = (_spark_runner(),)
+    from llms.proxy.client_tools import owned_tool_names as _owned
+
+    s_owned = _owned(runner)
+    s_defs = {t.name.lower(): t for t in runner if t.name}
+    s_defs.update(nested_tool_defs(runner))
     assert (
         translate_to_client(
             "write",
             '{"path": "grammar-add.txt", "content": "hello-grammar"}',
             "luna",
-            owned,
-            defs,
+            s_owned,
+            s_defs,
+            runner,
+        )
+        is None
+    )
+    # Same-name ownership wins: the client declared `write` itself.
+    from llms.proxy.ir import ToolDef
+
+    assert (
+        translate_to_client(
+            "write",
+            '{"path": "x", "content": "y"}',
+            "luna",
+            dict(owned, write="write"),
+            dict(defs, write=ToolDef("write", "w", {})),
+            ns,
         )
         is None
     )
@@ -211,14 +284,11 @@ def test_dispatch_shell_to_cmd_runner_all_families():
     ) == ("exec_command", '{"cmd": "cat /tmp/hi"}')
     # Missing payload key or no cmd-runner: None (fail open, never guess).
     assert (
-        translate_to_client(
-            "shell", '{"workdir": "/tmp"}', "codex-plain", owned, defs
-        )
+        translate_to_client("shell", '{"workdir": "/tmp"}', "codex-plain", owned, defs)
         is None
     )
     assert (
-        translate_to_client("shell", '{"command": "x"}', "codex-plain", {}, {})
-        is None
+        translate_to_client("shell", '{"command": "x"}', "codex-plain", {}, {}) is None
     )
     # Same-name ownership wins: the client declared `shell` itself, so the
     # owned argument-correction path applies, not a rewrite.
@@ -381,38 +451,270 @@ def test_execute_rewrites_onto_nested_exec_channel():
     defs.update(nested_tool_defs(runner))
     route = dispatchable_names(runner)
     passed, steer = _classify_calls(
-        [dict(call)], owned, defs, route, runner, GENUINE_TOOL_NAMES, "codex-plain", "t1"
+        [dict(call)],
+        owned,
+        defs,
+        route,
+        runner,
+        GENUINE_TOOL_NAMES,
+        "codex-plain",
+        "t1",
     )
     assert passed == []
     assert [c["name"] for c in steer] == ["execute"]
 
 
-def test_write_to_shell_redirect_needs_live_proof():
-    # Spark-leg file-write gate: NO write->exec_command table entry
-    # ships until the shell-redirect synthesis is verified live
-    # against the harness (2026-10-06: the proxy would synthesize a
-    # heredoc command the harness has never executed — still a
-    # guess). This test pins the CURRENT contract —
-    # translate_to_client("write", ...) is None on codex-plain (fail
-    # open, never synthesize) — so a future entry must update this
-    # test with the live proof, not slip in silently.
+def test_edit_to_apply_patch_update_proven_live():
+    # Round-4 proof (2026-10-07, luna leg): the Update-File grammar
+    # ran `Script completed` with `FileChange update` (unified diff
+    # `@@ -1 +1 @@\n-old-line\n+new-line\n`) and the workspace file
+    # byte-exact `new-line\n`. The edit->apply_patch row ships on the
+    # luna family only. `replaceAll` is refused (the Update grammar
+    # addresses one hunk, never a global replace); empty/identical
+    # old/new and missing fields steer generic.
+    from llms.proxy.client_tools import nested_tool_defs, owned_tool_names
     from llms.proxy.compat import translate_to_client
-    from llms.proxy.ir import ToolDef
+    from tests.test_client_tools import _luna_namespace
 
-    runner = ToolDef(
-        "exec_command",
-        "run",
-        {"type": "object", "properties": {"cmd": {}}, "required": ["cmd"]},
+    ns = (_luna_namespace(),)
+    owned = owned_tool_names(ns)
+    defs = {t.name.lower(): t for t in ns if t.name}
+    defs.update(nested_tool_defs(ns))
+    assert translate_to_client(
+        "edit",
+        '{"path": "f.txt", "oldString": "old-line", "newString": "new-line"}',
+        "luna",
+        owned,
+        defs,
+        ns,
+    ) == (
+        "exec",
+        (
+            "*** Begin Patch\n*** Update File: f.txt\n"
+            "@@\n-old-line\n+new-line\n*** End Patch"
+        ),
     )
-    owned = {"exec_command": "exec_command"}
-    defs = {"exec_command": runner}
+    # replaceAll: the grammar cannot express it — no guess.
+    assert (
+        translate_to_client(
+            "edit",
+            '{"path": "f.txt", "oldString": "a", "newString": "b", "replaceAll": true}',
+            "luna",
+            owned,
+            defs,
+            ns,
+        )
+        is None
+    )
+    # Empty old / identical old-new: nothing to synthesize.
+    assert (
+        translate_to_client(
+            "edit",
+            '{"path": "f.txt", "oldString": "", "newString": "b"}',
+            "luna",
+            owned,
+            defs,
+            ns,
+        )
+        is None
+    )
+    assert (
+        translate_to_client(
+            "edit",
+            '{"path": "f.txt", "oldString": "a", "newString": "a"}',
+            "luna",
+            owned,
+            defs,
+            ns,
+        )
+        is None
+    )
+    # Family gate: unknown families fail open.
+    assert (
+        translate_to_client(
+            "edit",
+            '{"path": "f.txt", "oldString": "a", "newString": "b"}',
+            "unknown",
+            owned,
+            defs,
+            ns,
+        )
+        is None
+    )
+
+
+def test_write_edit_classifier_rides_exec_rewrite_marker():
+    # Classifier level (mirrors test_execute_rewrites_onto_nested_exec
+    # _channel): genuine write/edit on luna passthrough renamed to
+    # `exec` with the __exec_rewrite__ marker (the replay paths apply
+    # it into the exec channel — a bare function_call named
+    # apply_patch fails lookup), and genuine write on codex-plain
+    # passthrough renamed to `exec_command` with __translated_args__
+    # (plain function runner — replay swaps frame arguments).
+    import json as _json
+
+    from llms.proxy.client_tools import (
+        dispatchable_names,
+        nested_tool_defs,
+        owned_tool_names,
+    )
+    from llms.proxy.pipeline import _classify_calls
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+    from tests.test_client_tools import _luna_namespace, _spark_runner
+
+    ns = (_luna_namespace(),)
+    owned = owned_tool_names(ns)
+    defs = {t.name.lower(): t for t in ns if t.name}
+    defs.update(nested_tool_defs(ns))
+    route = dispatchable_names(ns)
+    (call,) = [
+        {
+            "call_id": "c1",
+            "name": "write",
+            "arguments": _json.dumps({"path": "w.txt", "content": "hi"}),
+        }
+    ]
+    passed, steer = _classify_calls(
+        [call], owned, defs, route, ns, GENUINE_TOOL_NAMES, "luna", "t1"
+    )
+    assert steer == []
+    assert [c["name"] for c in passed] == ["exec"]
+    assert passed[0]["__exec_rewrite__"] == {
+        "name": "exec",
+        "input": "*** Begin Patch\n*** Add File: w.txt\n+hi\n*** End Patch",
+    }
+    (call,) = [
+        {
+            "call_id": "c2",
+            "name": "edit",
+            "arguments": _json.dumps(
+                {"path": "w.txt", "oldString": "hi", "newString": "yo"}
+            ),
+        }
+    ]
+    passed, steer = _classify_calls(
+        [call], owned, defs, route, ns, GENUINE_TOOL_NAMES, "luna", "t1"
+    )
+    assert steer == []
+    assert [c["name"] for c in passed] == ["exec"]
+    assert passed[0]["__exec_rewrite__"]["input"] == (
+        "*** Begin Patch\n*** Update File: w.txt\n@@\n-hi\n+yo\n*** End Patch"
+    )
+    runner = (_spark_runner(),)
+    s_owned = owned_tool_names(runner)
+    s_defs = {t.name.lower(): t for t in runner if t.name}
+    s_defs.update(nested_tool_defs(runner))
+    s_route = dispatchable_names(runner)
+    (call,) = [
+        {
+            "call_id": "c3",
+            "name": "write",
+            "arguments": _json.dumps({"path": "s.txt", "content": "hi\n"}),
+        }
+    ]
+    passed, steer = _classify_calls(
+        [call],
+        s_owned,
+        s_defs,
+        s_route,
+        runner,
+        GENUINE_TOOL_NAMES,
+        "codex-plain",
+        "t1",
+    )
+    assert steer == []
+    assert [c["name"] for c in passed] == ["exec_command"]
+    assert passed[0]["__translated_args__"] == ("printf %s > s.txt <<'EOF'\nhi\nEOF")
+
+
+def test_write_to_shell_redirect_proven_live():
+    # shell-redirect synthesis is verified live — spark leg,
+    # genuine `function_call exec_command {"cmd": "printf
+    # 'hello-shell\\\\n' > shell-write.txt"}` executed with `Process
+    # exited with code 0`, file byte-exact `hello-shell\n` (od
+    # verified; first spark-leg file ever created through any path).
+    # The write->exec_command row ships on codex-plain only, and
+    # refuses delimiter collisions (content carrying a bare `EOF`
+    # line) rather than synthesize a truncating command.
+    from llms.proxy.client_tools import nested_tool_defs, owned_tool_names
+    from llms.proxy.compat import translate_to_client
+    from tests.test_client_tools import _spark_runner
+
+    runner = (_spark_runner(),)
+    owned = owned_tool_names(runner)
+    defs = {t.name.lower(): t for t in runner if t.name}
+    defs.update(nested_tool_defs(runner))
+    assert translate_to_client(
+        "write",
+        '{"path": "shell-write.txt", "content": "hello-shell\\n"}',
+        "codex-plain",
+        owned,
+        defs,
+        runner,
+    ) == (
+        "exec_command",
+        "printf %s > shell-write.txt <<'EOF'\nhello-shell\nEOF",
+    )
+    # Delimiter collision: content with a bare EOF line — no guess.
     assert (
         translate_to_client(
             "write",
-            '{"path": "shell-write.txt", "content": "hello-shell\\n"}',
+            '{"path": "x.txt", "content": "a\\nEOF\\nb"}',
             "codex-plain",
             owned,
             defs,
+            runner,
+        )
+        is None
+    )
+    # Missing/non-string fields: no guess.
+    assert (
+        translate_to_client(
+            "write", '{"path": "x.txt"}', "codex-plain", owned, defs, runner
+        )
+        is None
+    )
+    # Family gate: the luna-owned WRITE still takes the apply_patch
+    # row there (the shell row is codex-plain-only, and luna owns an
+    # exec_command runner too — the family tag, not runner shape,
+    # selects). Unknown families fail open.
+    from tests.test_client_tools import _luna_namespace
+
+    ns = (_luna_namespace(),)
+    l_owned = owned_tool_names(ns)
+    l_defs = {t.name.lower(): t for t in ns if t.name}
+    l_defs.update(nested_tool_defs(ns))
+    assert translate_to_client(
+        "write",
+        '{"path": "x.txt", "content": "y"}',
+        "luna",
+        l_owned,
+        l_defs,
+        ns,
+    ) == (
+        "exec",
+        "*** Begin Patch\n*** Add File: x.txt\n+y\n*** End Patch",
+    )
+    assert (
+        translate_to_client(
+            "write",
+            '{"path": "x.txt", "content": "y"}',
+            "unknown",
+            owned,
+            defs,
+            runner,
+        )
+        is None
+    )
+    # No cmd-runner at all: no guess.
+    assert (
+        translate_to_client(
+            "write",
+            '{"path": "x.txt", "content": "y"}',
+            "codex-plain",
+            {},
+            {},
+            runner,
         )
         is None
     )

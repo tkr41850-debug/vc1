@@ -423,6 +423,7 @@ def _classify_calls(
             owned,
             client_defs,
             family,
+            client_tools,
         )
         if translated is not None:
             declared, new_args = translated

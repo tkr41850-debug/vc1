@@ -96,6 +96,123 @@ def _execute_to_exec_channel(payload: dict, required: list) -> str | None:
     return code.strip()
 
 
+def _client_channel(
+    owned: dict, defs: dict, family: str, client_tools: tuple = ()
+) -> tuple[str, str] | None:
+    """(owned key, declared name) of the file-write channel, or None.
+
+    Nested legs (luna) execute ONLY through the `exec` JS
+    orchestrator: the channel target is the owned `exec` entry.
+    The gate is the deferred namespace's `exec` description in
+    `client_tools` (the classifier passes the raw ToolDef tuple;
+    owned/defs alone cannot tell an orchestrator `exec` from a raw
+    nested spec carrying the same name).
+    """
+    if family == LUNA:
+        from llms.proxy import client_tools as _ct
+
+        declared = owned.get("exec")
+        if declared is None:
+            return None
+        for tool in client_tools:
+            if _ct._namespace_exec_desc(tool):
+                return "exec", declared
+        return None
+    return None
+
+
+def _write_to_apply_patch(payload: dict, required: list) -> str | None:
+    """genuine `write {path, content}` onto the nested apply_patch channel.
+
+    Family-gated (luna only — the row carries the family): synthesizes
+    the Add-File marker grammar proven live 2026-10-07 (round 4):
+    `*** Begin Patch\\n*** Add File: <path>\\n+<content-line>\\n***
+    End Patch`. Each content line gets a `+` prefix (multi-line
+    content joins with newlines); the marker/filename lines carry no
+    trailing `***`. The classifier's `declared == "exec"` path feeds
+    the returned patch text through `__exec_rewrite__` into the exec
+    channel (see the `execute` row). Non-string path/content: None
+    (no guess — the generic steer applies).
+    """
+    path = payload.get("path")
+    content = payload.get("content")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    if not isinstance(content, str):
+        return None
+    lines = content.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    added = "\n".join(f"+{line}" for line in lines)
+    return f"*** Begin Patch\n*** Add File: {path}\n{added}\n*** End Patch"
+
+
+def _edit_to_apply_patch(payload: dict, required: list) -> str | None:
+    """genuine `edit {path, oldString, newString}` onto apply_patch Update.
+
+    Family-gated (luna only): synthesizes the Update-File grammar
+    proven live 2026-10-07 (round 4):
+    `*** Begin Patch\\n*** Update File: <path>\\n@@\\n-<old>\\n+<new>\\n***
+    End Patch`. The harness applies the `old`→`new` line swap
+    (unified-diff hunk from the rollout record). `replaceAll` is
+    refused (None): the Update grammar addresses one hunk, and a
+    global replace synthesized from a single old/new pair would
+    mis-fire on repeated lines. Missing/non-string fields: None.
+    """
+    path = payload.get("path")
+    old = payload.get("oldString")
+    new = payload.get("newString")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    if not isinstance(old, str) or not isinstance(new, str):
+        return None
+    if not old or old == new:
+        return None
+    if payload.get("replaceAll"):
+        return None
+    old_lines = old.split("\n")
+    new_lines = new.split("\n")
+    if old_lines and old_lines[-1] == "":
+        old_lines = old_lines[:-1]
+    if new_lines and new_lines[-1] == "":
+        new_lines = new_lines[:-1]
+    removed = "\n".join(f"-{line}" for line in old_lines)
+    added = "\n".join(f"+{line}" for line in new_lines)
+    return (
+        f"*** Begin Patch\n*** Update File: {path}\n"
+        f"@@\n{removed}\n{added}\n*** End Patch"
+    )
+
+
+def _write_to_shell_redirect(payload: dict, required: list) -> str | None:
+    """genuine `write {path, content}` onto a cmd-runner shell redirect.
+
+    Family-gated (codex-plain only — the row carries the family):
+    synthesizes `printf %s > <path> <<'EOF' ... EOF` proven live
+    2026-10-07 (round 4, spark leg: `printf 'hello-shell\\\\n' >
+    shell-write.txt` executed, file byte-exact). Heredoc with a
+    quoted delimiter (no interpolation, no expansion); the content
+    rides the body lines verbatim. Delimiter collision (content
+    contains a line equal to the delimiter) or non-string
+    path/content: None — never synthesize a command that would
+    truncate or corrupt the file (the generic steer applies).
+    """
+    path = payload.get("path")
+    content = payload.get("content")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    if not isinstance(content, str):
+        return None
+    if "cmd" not in set(required or []):
+        return None
+    delimiter = "EOF"
+    for line in content.split("\n"):
+        if line.strip() == delimiter:
+            return None
+    body = content if content.endswith("\n") else content + "\n"
+    return f"printf %s > {path} <<'{delimiter}'\n{body}{delimiter}"
+
+
 # Dispatch table: (genuine name, family ["*" = any], client lowered name,
 # argument translator). Family-specific rows require positive detection
 # (Task 1); unknown families get ``*`` rows only — never a wrong-family
@@ -103,6 +220,9 @@ def _execute_to_exec_channel(payload: dict, required: list) -> str | None:
 TO_CLIENT: tuple = (
     ("shell", "*", "exec_command", _shell_to_cmd),
     ("execute", "*", "exec", _execute_to_exec_channel),
+    ("write", LUNA, "exec", _write_to_apply_patch),
+    ("edit", LUNA, "exec", _edit_to_apply_patch),
+    ("write", CODEX_PLAIN, "exec_command", _write_to_shell_redirect),
 )
 
 
@@ -112,6 +232,7 @@ def translate_to_client(
     family: str,
     owned: dict,
     client_defs: dict,
+    client_tools: tuple = (),
 ) -> tuple[str, str] | None:
     """Genuine name + usable args -> (client tool name, client args), or None.
 
@@ -138,6 +259,38 @@ def translate_to_client(
         return None
     for genuine, fam, client_lower, convert in TO_CLIENT:
         if genuine != lowered or (fam != "*" and fam != family):
+            continue
+        if client_lower == "exec":
+            # File-write channel rows (write/edit -> apply_patch): the
+            # nested legs execute ONLY through the `exec` JS
+            # orchestrator, so resolve the channel there — never a bare
+            # nested name (a bare function_call fails lookup). The
+            # gate is a documented exec channel in client_tools
+            # (owned alone is not enough: fixture nested lists may
+            # carry an `exec` spec outside the orchestrator). The
+            # `execute` row is NOT channel-gated: genuine Code Mode
+            # `execute {"code"}` already carries the channel input
+            # verbatim (live luna 2026-10-06), so a declared `exec`
+            # entry suffices.
+            if genuine == "execute":
+                declared = owned.get("exec")
+                tool = client_defs.get("exec")
+                if declared is None or not isinstance(tool, ToolDef):
+                    continue
+                required = (tool.parameters or {}).get("required") or []
+                converted = convert(payload, required)
+                if converted is not None:
+                    return declared, converted
+                continue
+            channel = _client_channel(owned, client_defs, family, client_tools)
+            if channel is None:
+                continue
+            _, declared = channel
+            tool = client_defs.get("exec")
+            required = (tool.parameters or {}).get("required") or []
+            converted = convert(payload, required)
+            if converted is not None:
+                return declared, converted
             continue
         declared = owned.get(client_lower)
         tool = client_defs.get(client_lower)
