@@ -181,6 +181,79 @@ live spark shape.
   plus 504/503 flaps and direct-probe 502s — quota/cooldown window,
   retried on the next tick.
 
+## Live verification 2026-10-07, round 4 (01:00–01:25 UTC, quota cleared)
+
+Quota cleared ~01:01 UTC (HI round-trip 200,
+`{"output":[{"content":[{"text":"HI"}]}]}` after ~4h of
+`FreeUsageLimitError`/429). All probes ran through fresh probe
+proxies on free ports (:8796–8798; :8793 is held by a stale proxy
+from an earlier session and 401s fresh secrets — left untouched).
+Coder note: `running_proxy`'s teardown races a still-running
+`codex exec` (`TimeoutExpired` on terminate); the probe result
+still lands — check the workspace file, not the exit path. Also,
+`codex exec` without `stdin=DEVNULL` hangs on "Reading additional
+input from stdin" with zero ingress.
+
+- Luna `apply_patch` UPDATE grammar: PASS. First emission used
+  `\\n`-escaped JS (`'*** Begin Patch\\n*** Update File: ...'`),
+  harness `FileChange update` with unified diff
+  `@@ -1 +1 @@\n-old-line\n+new-line\n`, `Script completed`,
+  `grammar-update.txt` reads `new-line\n` (`od -c` verified).
+  The `\\n`-escaped form works — the round-3 "real newlines only"
+  framing was overstated: BOTH encodings execute (the harness runs
+  the decoded JS either way). The model's own unescaped retry
+  (`SyntaxError: Invalid or unexpected token`) failed, as expected
+  for a bare newline inside a single-quoted JS string.
+- Luna `apply_patch` DELETE grammar: PASS. Model first tried the
+  unescaped form (`Script failed` + `SyntaxError`, same as above),
+  then self-corrected to the `\\n`-escaped form on its own:
+  `FileChange delete`, `Script completed`,
+  `grammar-delete.txt` removed. Self-correction without any new
+  steer is further proof the notice grammar is right. (The probe
+  asserts removal, not bytes — the UPDATE probe above is the
+  byte-exact proof; DELETE's assertion is file-absent.)
+- Task 3 gate consequence: Add + Update + Delete grammars are ALL
+  proven live. `write`→`apply_patch` (Add-File subset) and
+  `edit`→`apply_patch` (Update subset) table entries are now
+  unblocked pending implementation — the hermetic gate tests
+  (`test_write_to_apply_patch_needs_live_grammar_proof`) may be
+  retired when the rows land.
+- Spark-leg shell-write via `exec_command` redirect: PASS.
+  Natural file-creation prompt (no JS coaching), model emitted
+  genuine `function_call exec_command
+  {"cmd": "printf 'hello-shell\\\\n' > shell-write.txt"}` —
+  zero steers in the proxy log — harness executed it
+  (`Process exited with code 0`), `shell-write.txt` byte-exact
+  `hello-shell\n` (`od -c` verified, 12 bytes). This is the FIRST
+  spark-leg workspace file ever created through any path, and it
+  reframes mechanism 12: spark-leg file-write is ACHIEVED via the
+  already-proven `exec_command` shell path, not via `apply_patch`
+  (which remains structurally impossible — no exec channel on the
+  codex-plain leg). The gated `write`→`exec_command` synthesis row
+  (`test_write_to_shell_redirect_needs_live_proof`) is now
+  unblocked pending implementation.
+- Spark cat re-probe: PASS. `exec_command {"cmd": "cat
+  probe.txt"}`, `function_call_output` carried `Helllo world!!!`
+  inline, model echoed `<content>Helllo world!!!</content>` —
+  zero steers (`grep -c 'no compat entry'` = 0). First probe
+  attempt hung on stdin (no ingress at all) — fixed with
+  `stdin=DEVNULL`.
+- Luna cat re-probe: PARTIAL (known artifact, not a regression).
+  `read {"path": "...probe.txt"}` steered (correctly — `read` has
+  no compat entry), model fell back to `custom_tool_call exec`
+  `await tools.exec_command(...)` which the harness EXECUTED
+  (`Script completed`, `function_call_output` shows
+  `Output:\nHelllo world!!!` inline in the FIRST rollout's
+  `function_call_output` record). But the model never relayed the
+  content into its reply text, so the echo-assertion failed. This
+  matches mechanism 11 (empty exec outputs are a harness display
+  artifact — `custom_tool_call_output` shows blank `Output:` while
+  the `function_call_output` record carries the bytes) plus a model
+  narration choice: with a blank tool-result record it summarized
+  instead of quoting. Byte transport is proven; the probe's echo
+  assertion is too strict for the luna exec-channel path. Not a
+  proxy bug — no code change.
+
 ## Live verification 2026-10-06 (quota cleared ~05:00 UTC)
 
 - Strict A/B (`/tmp/direct_probe11.py`, direct to :8789): both
