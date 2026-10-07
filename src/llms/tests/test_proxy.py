@@ -1967,6 +1967,90 @@ def test_nested_exec_command_replays_as_exec_custom_call(tmp_path):
     assert "await tools.exec_command" in customs[0]["input"]
 
 
+def test_synthesize_rewrap_applies_to_wire_custom_exec(tmp_path):
+    # Mechanism-13 end of the synthesize path (live luna 2026-10-07):
+    # a non-streaming upstream turn carries the bare patch as a wire
+    # `custom_tool_call exec` item (payload in `input`, `id` but no
+    # `call_id` — the exact shape ir_messages_to_responses_output
+    # emits). The replay block must match the classifier's
+    # __exec_rewrite__ marker onto that item (by id as well as
+    # call_id) so downstream carries the re-wrapped channel
+    # invocation — not the raw patch (which failed 3x live with
+    # harness SyntaxError while the fixed classifier sat idle one
+    # layer down: the by_id index only held function_call items).
+    import json as _json
+
+    from tests.conftest import TEST_HEADERS
+    from tests.test_client_tools import _luna_namespace
+
+    ns = _luna_namespace()
+    nested = ns.options["tools"]
+    exec_desc = next(t["description"] for t in nested if t["name"] == "exec")
+    tools = [
+        {
+            "type": "namespace",
+            "name": "functions",
+            "description": "",
+            "tools": [
+                {"type": "custom", "name": "exec", "description": exec_desc},
+                {
+                    "type": "function",
+                    "name": "wait",
+                    "description": "Wait.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            ],
+        }
+    ]
+    bare = "'*** Begin Patch\\n*** Add File: w.txt\\n+hi\\n*** End Patch'"
+    added = _json.dumps(
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "id": "call_m13",
+                "type": "custom_tool_call",
+                "name": "exec",
+                "input": bare,
+            },
+        }
+    )
+    delta = _json.dumps(
+        {
+            "type": "response.custom_tool_call_input.delta",
+            "output_index": 0,
+            "item_id": "call_m13",
+            "delta": bare,
+        }
+    )
+    first_body = (
+        f"data: {added}\n\n"
+        f"data: {delta}\n\n"
+        'data: {"type":"response.completed","response":{"status":"completed",'
+        '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+    ).encode()
+    tc_ctx, calls = _steer_app_client(tmp_path, first_body, _text_sse("done"))
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.6-luna",
+                "input": "write it",
+                "tools": tools,
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    customs = [
+        i for i in r.json().get("output", []) if i.get("type") == "custom_tool_call"
+    ]
+    assert len(customs) == 1
+    assert customs[0]["name"] == "exec"
+    assert customs[0]["input"].startswith("await tools.apply_patch(")
+    assert "*** Begin Patch" in customs[0]["input"]
+
+
 def test_steer_redirect_plain_leg_omits_nested_channel(tmp_path):
     """Plain function leg: the undeclared-name redirect must not teach
     the `exec` custom_tool_call channel (that harness exposes no `exec`

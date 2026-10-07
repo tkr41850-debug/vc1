@@ -330,6 +330,51 @@ def test_genuine_calls_in_custom_route_passes_raw_input():
     assert passed == [] and [c["name"] for c in steer] == ["exec_command"]
 
 
+def test_genuine_calls_in_sees_wire_custom_tool_call_items():
+    # Mechanism-13 live shape (luna natural-write probe 2026-10-07):
+    # the non-streaming upstream response carries the model's call as
+    # a wire `custom_tool_call` item (type custom_tool_call, payload
+    # in `input`), NOT a function_call. The collector only scanned
+    # function_call items, so the bare-patch exec input never reached
+    # the classifier's rewrap arm — ([], []), silently dropped, and
+    # the raw patch rode downstream to 4x harness SyntaxError. A wire
+    # Custom item must feed the classifier like the streaming fold's
+    # entries do (fold_stream_calls emits type custom_tool_call + input).
+    from fastapi.responses import JSONResponse
+
+    from llms.proxy.compat import rewrap_bare_patch_exec_input
+    from llms.proxy.pipeline import _genuine_calls_in
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+    from tests.test_client_tools import _luna_namespace
+
+    def resp(*output):
+        return JSONResponse(status_code=200, content={"output": list(output)})
+
+    ns = (_luna_namespace(),)
+    bare = "'*** Begin Patch\\n*** Add File: w.txt\\n+hi\\n*** End Patch'"
+    wire = {
+        "type": "custom_tool_call",
+        "id": "call_m13",
+        "call_id": "call_m13",
+        "name": "exec",
+        "input": bare,
+    }
+    passed, steer = _genuine_calls_in(
+        resp(wire),
+        set(),
+        client_tools=ns,
+        genuine_names=GENUINE_TOOL_NAMES,
+        family="luna",
+        trace_id="t1",
+    )
+    assert steer == []
+    assert [c["name"] for c in passed] == ["exec"]
+    assert passed[0]["__exec_rewrite__"] == {
+        "name": "exec",
+        "input": rewrap_bare_patch_exec_input(bare),
+    }
+
+
 def test_server_tool_specs_forwarded_never_500(app_client):
     # Their curl repros #5/#6 against our proxy: unknown server-tool
     # shapes (web_fetch, server_tool_use-as-tool) on the messages leg

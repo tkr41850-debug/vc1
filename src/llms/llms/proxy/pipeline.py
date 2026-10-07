@@ -539,7 +539,22 @@ def _genuine_calls_in(
     calls = []
     lowered = {n.lower() for n in client_names if isinstance(n, str)}
     for item in payload.get("output", []) or []:
-        if not isinstance(item, dict) or item.get("type") != "function_call":
+        # Wire Custom items (non-streaming upstream shape: type
+        # custom_tool_call, payload in `input`) feed the classifier
+        # like the streaming fold's entries — the Custom-route branch
+        # judges `input`, never JSON arguments. Skipping them here
+        # silently drops the call: neither passthrough nor steer, so
+        # the raw payload rides downstream (live luna 2026-10-07: 4x
+        # bare-patch harness SyntaxError while the rewrap arm sat
+        # idle one layer down).
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "custom_tool_call":
+            if not client_tools:
+                continue
+            calls.append(item)
+            continue
+        if item.get("type") != "function_call":
             continue
         name = item.get("name")
         if isinstance(name, str) and name.lower() in lowered:
@@ -671,13 +686,22 @@ async def _steer_genuine_calls(
                 break
             by_id = {}
             for item in payload.get("output", []) or []:
-                if isinstance(item, dict) and item.get("type") == "function_call":
-                    key = str(
-                        item.get("call_id")
-                        or item.get("id")
-                        or item.get("item_id")
-                        or ""
-                    )
+                # Wire Custom items carry the executable payload in
+                # `input` (no call_id when the upstream announce lacks
+                # one — match by id, same key the classifier's folded
+                # entries carry). Skipping them here drops the
+                # classifier's __exec_rewrite__ marker: the raw input
+                # replays downstream (live luna 2026-10-07: 3x
+                # bare-patch harness SyntaxError on the fixed proxy).
+                if not isinstance(item, dict) or item.get("type") not in (
+                    "function_call",
+                    "custom_tool_call",
+                ):
+                    continue
+                key = str(
+                    item.get("call_id") or item.get("id") or item.get("item_id") or ""
+                )
+                if key:
                     by_id[key] = item
             for call in passed:
                 key = str(
