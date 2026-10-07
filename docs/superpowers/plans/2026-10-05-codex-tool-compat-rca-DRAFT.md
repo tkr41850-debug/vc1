@@ -218,12 +218,23 @@ natural prompts — no JS coaching, no channel naming:
   running. Fix direction: a classifier arm that detects a bare
   `*** Begin Patch` exec input and re-wraps it as `await
   tools.apply_patch(<input>)` (hermetic + live-proven before
-  shipping — same Task-3-gate discipline). NOT implemented yet.
+  shipping — same Task-3-gate discipline). IMPLEMENTED 2026-10-07
+  (58656ec): pure helper `rewrap_bare_patch_exec_input` +
+  classifier arm in the Custom-route `exec` branch, riding the
+  `__exec_rewrite__` marker both replay paths apply; hermetic pins
+  at pure-helper, classifier (hand-built dict), and fold→classifier
+  wire-path levels (ac7a1be — the wire-path pin exists because the
+  dict-level test would pass even if the fold dropped the Custom
+  `input`). LIVE PROOF STILL OPEN: the m13 natural-write probe ran
+  against PRE-arm code (file created via model shell fallback,
+  rewrap unfired), so the arm awaits its own live round (natural
+  luna file-write via :8799, quota-gated) before it closes out.
 - Practical upshot: luna file-write works end-to-end today via
   the model's own shell fallback (proven twice now), and via the
   exec channel when the model keeps the wrapper (rounds 3–4);
-  the bare-patch stall is a model-fluency gap with a clear
-  proxy-side fix, not a grammar or routing bug.
+  the bare-patch stall has a shipped proxy-side arm with full
+  hermetic cover, awaiting live proof — not a grammar or routing
+  bug.
 
 ## Live verification 2026-10-07, round 4 (01:00–01:25 UTC, quota cleared)
 
