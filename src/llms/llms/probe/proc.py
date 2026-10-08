@@ -45,8 +45,8 @@ def running_proxy(
         env["PROBE_SECRET"] = secret
         proc = subprocess.Popen(
             [
-                "uv",
-                "run",
+                sys.executable,
+                "-m",
                 "uvicorn",
                 "llms.proxy.main:app",
                 "--host",
@@ -64,5 +64,15 @@ def running_proxy(
                 raise RuntimeError("proxy did not become healthy")
             yield proc, secret
         finally:
+            # The cell may outlive the proxy (codex exec keeps
+            # iterating after the file lands): terminate can race a
+            # natural exit, and wait() then raises TimeoutExpired
+            # which masks the cell's own verdict. Tolerate both.
             proc.terminate()
-            proc.wait(timeout=15)
+            try:
+                proc.wait(timeout=15)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass

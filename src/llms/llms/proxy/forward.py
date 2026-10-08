@@ -648,6 +648,37 @@ async def fold_and_steer_streaming(
                                 if "arguments" in item:
                                     item["input"] = item.pop("arguments")
                         lines[i] = "data: " + _json.dumps(payload)
+                    elif isinstance(rewrite, dict) and (
+                        payload.get("type")
+                        in (
+                            "response.custom_tool_call_input.done",
+                            "response.custom_tool_call_input.delta",
+                        )
+                        and payload.get("item_id") == cid
+                    ):
+                        # Exec-channel rewrite of a Custom turn: the
+                        # input delta/done frames carry the SAME raw
+                        # payload as the added frame (no `item` object,
+                        # top-level item_id/input) — the added-frame
+                        # branch above never matches them, so the replay
+                        # leaves the stale raw patch behind. The harness
+                        # folds those bytes and executes the bare patch
+                        # (live luna 2026-10-07: added frame rewritten,
+                        # input.done rode raw, 4x harness SyntaxError
+                        # while the arm sat idle one frame down). Swap
+                        # the payload like the added frame: a lone delta
+                        # carries the full rewritten input, the rest
+                        # blank so concatenation yields exactly it (same
+                        # rule as the genuine-delta swap below).
+                        if payload.get("type").endswith(".delta"):
+                            if not _delta_swapped:
+                                payload["delta"] = str(rewrite.get("input", ""))
+                                _delta_swapped = True
+                            else:
+                                payload["delta"] = ""
+                        else:
+                            payload["input"] = str(rewrite.get("input", ""))
+                        lines[i] = "data: " + _json.dumps(payload)
                     elif (
                         isinstance(translated_args, str)
                         and payload.get("type")

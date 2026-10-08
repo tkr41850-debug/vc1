@@ -373,3 +373,75 @@ input from stdin" with zero ingress.
   `custom_tool_call apply_patch` with marker text passes through
   with the `__exec_rewrite__` into the exec channel, and the fold
   carries Custom `input` so the tail check judges the real payload.
+
+## Live verification 2026-10-07, round 6 (06:29 UTC, coached channel proof)
+
+- Coached luna file-write via natural-write probe shape (PROBE_MODEL
+  `gpt-5.6-luna`, proof proxy :8796 — NOT :8799): workspace file
+  `m13-coached.txt` byte-exact `hello-natural\n` (`od -c` verified,
+  14B). Rollout ordinal 38: `await
+  tools.apply_patch('*** Begin Patch\n*** Add File:
+  m13-coached.txt\nhello-natural\n*** End Patch')` (\n-escaped) →
+  `FileChange add` + `Script completed` 5.9s → DONE. This proves the
+  exec-channel DELIVERY mechanism end-to-end through the FIXED code
+  (13a2f32: wire-Custom collector + replay by_id).
+- Model fluency variance on the same run (same prompt family):
+  ordinals 12/28 emitted the wrapper with REAL newlines inside the
+  single-quoted JS string → `SyntaxError: Invalid or unexpected
+  token`; ordinal 20 emitted a bare patch (no wrapper) → `SyntaxError:
+  Unexpected token '**'`. Only the \n-escaped form executes — rounds
+  3–4 framing holds. The bare-patch ordinal-20 turn is exactly the
+  mechanism-13 shape the shipped arm targets, but it ran BEFORE the
+  collector fix could see it (pre-fix `_genuine_calls_in` dropped
+  wire Custom items → `([],[])` → arm never fired).
+- Quota state: HI 200 at 06:14 UTC (free tier clear). Rate-limit
+  tiers per operator (memory `zen-ratelimit-tiers`): 60s tier → wait
+  60s; ~24h tier → `warp-cli disconnect` + `warp-cli connect`.
+- PROXY HYGIENE (2026-10-07 ~07:00 UTC check): `:8799` (PID 1263097,
+  booted Oct 6 21:07) runs PRE-arm code — it predates every compat
+  commit after 58aa7cc (shipped rows b632ecc, arm 58656ec, collector
+  13a2f32 all Oct 7). Do NOT run arm proofs against `:8799`; it
+  would re-prove nothing (same trap as round 5's pre-arm probe).
+  Live work must use a fresh `running_proxy` on a free port
+  (8792/8794/8797/8798 verified free) with current HEAD code, as
+  `scripts/probes/compat_matrix_probe.py` does. `:8796` (booted Oct
+  7 06:28) does carry the full arm — left running, owned by the
+  coached-proof run.
+- Claude leg: FIRST live messages-leg proofs via proof proxy :8796
+  (`sk-probe-...` bearer): `/v1/messages` → 200 `HI`, and
+  `/ak-claude/v1/messages` → 200 `HI` (ak- path affinity stripped,
+  same handler). Family detection confirmed in proxy log:
+  `ingress UA='claude-cli/2.1.291 (external, sdk-cli)'
+  ingress=messages`. Task 1 Claude schema capture still open
+  (declared-tool input_schema + first file-write round-trip).
+
+## Schema audit appendix (Task 8 Step 1 — hermetic, 2026-10-07)
+
+Per-entry dropped/renamed keys vs `zen_tools.py` GENUINE_TOOLS, pinned
+by `test_schema_audit_dropped_keys_pinned`:
+
+| Row | Genuine keys in | Consumed | Dropped / refused |
+|---|---|---|---|
+| `shell`→`*`/`exec_command` | command, workdir, timeout, background | `command`→`cmd` (rename) | workdir/timeout/background dropped by contract (client cmd-runner takes `cmd` alone; runner cwd applies) |
+| `execute`→`*`/`exec` | code | `code` verbatim as channel input | none (single-key schema) |
+| `write`→luna/`exec` | path, content | both (Add-File patch synthesis) | unknown extras ignored |
+| `edit`→luna/`exec` | path, oldString, newString, replaceAll | path/old/new (Update hunk) | `replaceAll: true` REFUSED (None — no Update-hunk form for global replace; NOT silently dropped) |
+| `write`→codex-plain/`exec_command` | path, content | both (heredoc body verbatim) | none; delimiter collision (`EOF` line) or non-string fields → None (never synthesize a truncating command) |
+
+Unshipped genuine names stay fail-open (`log_untranslatable`):
+`read`, `glob`, `skill` (log review below). No claude/dsh-family
+rows shipped — detection only; the `*` shell/execute rows serve
+those legs unproven (Task 7 matrix).
+
+## Log review (Task 8 Step 2 — all probe windows, 2026-10-07)
+
+`no compat entry` lines across every proxy log in the job tmp dir:
+
+- `read (family=luna)` ×11 — EXPECTED: Task 5 table ships no
+  `read` row (mechanism 6: no 1:1 target; steers to `cat` via
+  `_read_via_shell_redirect`). Wont-translate recorded.
+- `skill (family=luna)` ×2, `glob (family=luna)` ×1 — EXPECTED:
+  no client harness declares these; fail-open passthrough is
+  correct. Wont-translate recorded.
+- Zero distinct names without a verdict. No new table entry
+  required from this review.

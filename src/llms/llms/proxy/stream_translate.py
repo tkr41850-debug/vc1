@@ -341,6 +341,21 @@ class ResponsesParser:
                 )
             )
             return deltas
+        if kind == "response.custom_tool_call_input.done":
+            # The done frame carries the FULL input string (same role
+            # as function_call_arguments.done): on turns where Zen
+            # omits the input deltas it is the ONLY copy. The fold
+            # prefers accumulated deltas and falls back here (never
+            # both) — see done_args handling below.
+            item_id = event.get("item_id", "")
+            name = self.names.get(item_id, "")
+            if name:
+                self.saw_calls = True
+            self.pending_calls.pop(item_id, None)
+            payload_input = event.get("input", "")
+            if isinstance(payload_input, str) and payload_input:
+                self.done_args[item_id] = payload_input
+            return deltas
         if kind in ("response.completed", "response.failed", "response.incomplete"):
             status = {
                 "response.completed": "completed",

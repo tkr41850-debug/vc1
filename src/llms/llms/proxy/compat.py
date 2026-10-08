@@ -276,8 +276,15 @@ def translate_to_client(
     # Same-name ownership wins: when the client declared the genuine name
     # itself, the owned path validates it — the translation must not
     # shadow the client's own declaration (its redirect corrects
-    # arguments; a rewrite would bypass it).
-    if lowered in owned:
+    # arguments; a rewrite would bypass it). Channel plumbing never
+    # counts (see client_tools._real_owned_names).
+    from llms.proxy.client_tools import _real_owned_names as _real_owned_of
+
+    try:
+        _guard = _real_owned_of(owned, client_tools)
+    except Exception:
+        _guard = set(owned)
+    if lowered in _guard:
         return None
     try:
         payload = _json.loads(arguments) if isinstance(arguments, str) else None
@@ -298,15 +305,22 @@ def translate_to_client(
             # carry an `exec` spec outside the orchestrator). The
             # `execute` row is NOT channel-gated: genuine Code Mode
             # `execute {"code"}` already carries the channel input
-            # verbatim (live luna 2026-10-06), so a declared `exec`
-            # entry suffices.
+            # verbatim (live luna 2026-10-06), so a documented exec
+            # channel suffices. The gate is the NAMESPACE exec
+            # description (client_tools), not a defs entry: the raw
+            # nested `exec` spec carries other tools' signatures, so
+            # nested_tool_defs skips it (no `exec` defs entry exists).
             if genuine == "execute":
-                declared = owned.get("exec")
-                tool = client_defs.get("exec")
-                if declared is None or not isinstance(tool, ToolDef):
+                from llms.proxy.client_tools import (
+                    _namespace_exec_desc as _ns_exec_desc,
+                )
+
+                if not any(_ns_exec_desc(t) for t in client_tools or ()):
                     continue
-                required = (tool.parameters or {}).get("required") or []
-                converted = convert(payload, required)
+                declared = owned.get("exec")
+                if declared is None:
+                    continue
+                converted = convert(payload, [])
                 if converted is not None:
                     return declared, converted
                 continue
@@ -314,9 +328,11 @@ def translate_to_client(
             if channel is None:
                 continue
             _, declared = channel
-            tool = client_defs.get("exec")
-            required = (tool.parameters or {}).get("required") or []
-            converted = convert(payload, required)
+            # No `exec` defs entry exists by design (nested_tool_defs
+            # skips the orchestrator spec — it carries other tools'
+            # signatures): the channel takes raw input, not JSON keys,
+            # so there are no required keys to check.
+            converted = convert(payload, [])
             if converted is not None:
                 return declared, converted
             continue

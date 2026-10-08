@@ -4,7 +4,7 @@ import time
 import urllib.request
 
 
-def wait_for_health(port: int, timeout_s: int = 30) -> bool:
+def wait_for_health(port: int, timeout_s: int = 120) -> bool:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:

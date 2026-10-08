@@ -118,7 +118,16 @@ def _synthesize_for(ingress: str, egress: str, model: str):
 
         parser = STREAM_PARSERS[egress]()
         deltas = list(_deltas_with_pending(parser, lines))
-        return EMITTERS[ingress](deltas_to_response_ir(iter(deltas), model), model)
+        return EMITTERS[ingress](
+            deltas_to_response_ir(
+                iter(deltas),
+                model,
+                getattr(parser, "done_args", None) or {},
+                getattr(parser, "names", None) or {},
+                getattr(parser, "custom_items", None) or frozenset(),
+            ),
+            model,
+        )
 
     return run
 
@@ -1592,7 +1601,30 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         # detect undeclared calls. Genuine opencode passes through
         # untouched (no shaping, no steer); other legs keep legacy
         # streaming.
+        # Fold-vs-live observability (2026-10-07): the streaming fold
+        # only runs when every one of these holds; a bare-patch turn
+        # that never folds reproduces as "arm idle" with no other
+        # trace. Log the inputs once per request so a dead arm leaves
+        # a verdict (which gate failed), not a mystery. logger.info
+        # (not print): uvicorn captures stdout per worker, but the
+        # logging pipeline writes to the same stream as every other
+        # proxy line — grep one place, not two.
         _client_names = {t.name for t in req.tools if t.name}
+        _family = _family_for(request, ingress, req, requested)
+        logger.info(
+            "[%s] steer gates genuine=%s egress=%s stream=%s names=%s family=%s",
+            trace_id,
+            genuine,
+            egress,
+            outbound.get("stream"),
+            sorted(_client_names),
+            _family,
+        )
+        # Codex exec is NON-streaming downstream (live 2026-10-07: every
+        # codex turn arrives stream=None): the streaming fold never runs
+        # for it — the synthesize path (_steer_genuine_calls below) is
+        # the arm's live leg. A stream=True gate here would silently
+        # disable the arm for the very client it was built for.
         _steer_stream = (
             not genuine
             and egress == "responses"
@@ -1603,7 +1635,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         # else leg+tool-shape fallback. Unknown degrades to today's
         # behavior (`*` all-family rows only — never a wrong-family
         # rewrite). Genuine opencode keeps exact fidelity regardless.
-        _family = _family_for(request, ingress, req, requested)
+        # (Computed once above for the steer-gates observability line.)
         _response = await forward(
             client,
             url,

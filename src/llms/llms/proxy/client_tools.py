@@ -150,6 +150,14 @@ def nested_tool_defs(tools: tuple[ToolDef, ...]) -> dict[str, ToolDef]:
                 nname = str(n.get("name"))
                 if nname.lower() in defs:
                     continue
+                # The orchestrator entry itself (`exec`) is the CALL
+                # channel, not a nested tool: it never validates as a
+                # nested call (its description documents OTHER tools'
+                # signatures — validating exec_command args against it
+                # misroutes). Route/rewrite logic keys on the channel
+                # separately (dispatchable_names, exec_channel_source).
+                if n.get("type") == "custom" and _namespace_exec_desc(t):
+                    continue
                 params = n.get("parameters")
                 defs[nname.lower()] = ToolDef(
                     nname,
@@ -174,8 +182,11 @@ def dispatchable_names(tools: tuple[ToolDef, ...]) -> dict[str, tuple[str, str]]
     object declaration as `function_call` with JSON arguments. Nested
     items carry no namespace (the harness fills its default when
     absent). Freeform top-level custom (e.g. apply_patch on the spark
-    leg) dispatches as `custom_tool_call` with raw-string input. Last
-    declaration wins, matching owned_tool_names.
+    leg) dispatches as `custom_tool_call` with raw-string input. The
+    deferred namespace's OWN name never routes: it is the container,
+    not a callable tool — routing it lets a model call naming the
+    container pass as owned and replay a turn the harness fails
+    client-side. Last declaration wins, matching owned_tool_names.
     """
     out: dict[str, tuple[str, str]] = {}
     for t in tools:
@@ -191,7 +202,12 @@ def dispatchable_names(tools: tuple[ToolDef, ...]) -> dict[str, tuple[str, str]]
                 out[nname.lower()] = (item_type, nname)
             # Raw nested specs not documented in the exec description
             # (e.g. luna's plain `wait` function) route by declared
-            # type. Description-parsed entries win on collision.
+            # type. Description-parsed entries win on collision. The
+            # orchestrator entry itself (`exec`) routes Custom too: it
+            # is the CALL channel — a call naming it carries the JS
+            # input the classifier judges (empty steers, bare-patch
+            # re-wraps). Without this the channel call falls to the
+            # owned-but-unrouted path and the arm never sees it.
             nested = t.options.get("tools")
             if isinstance(nested, list):
                 for n in nested:
@@ -199,6 +215,17 @@ def dispatchable_names(tools: tuple[ToolDef, ...]) -> dict[str, tuple[str, str]]
                         continue
                     nname = str(n.get("name"))
                     if nname.lower() in out:
+                        continue
+                    if n.get("type") == "custom":
+                        # The orchestrator entry itself (`exec`): the
+                        # CALL channel, not a nested tool — but a call
+                        # naming it carries the JS input the classifier
+                        # judges (empty steers, bare-patch re-wraps),
+                        # so it routes Custom like any channel
+                        # invocation. Without this the channel call
+                        # falls to owned-but-unrouted and the arm never
+                        # sees it.
+                        out[nname.lower()] = ("custom_tool_call", nname)
                         continue
                     item_type = (
                         "function_call"
@@ -367,7 +394,7 @@ def steer_to_equivalent(
     lowered = bare.lower() if isinstance(bare, str) else None
     if lowered is None or lowered not in ("read", "shell", "write", "edit", "execute"):
         return None
-    if lowered in owned:
+    if lowered in _real_owned_names(owned, client_tools):
         return None
     try:
         payload = json.loads(arguments) if isinstance(arguments, str) else None
@@ -568,6 +595,30 @@ def rewrite_steered_call(
     return out
 
 
+def _real_owned_names(owned: dict[str, str], client_tools: tuple = ()) -> set[str]:
+    """Owned names minus channel plumbing (same-name guard input).
+
+    The deferred namespace's raw nested specs (e.g. the `exec`
+    orchestrator entry) land in `owned` as dispatchable-looking
+    names, but they are channel plumbing — not callable tools a
+    same-name guard should protect. The guard must only fire for
+    names the client can actually execute: top-level declarations
+    plus description-documented nested tools (real signatures).
+    Raw nested specs outside the exec description never count.
+    """
+    real: set[str] = set()
+    for tool in client_tools or ():
+        name = getattr(tool, "name", "")
+        if name:
+            real.add(str(name).lower())
+        try:
+            for nname in nested_tool_defs((tool,)):
+                real.add(str(nname).lower())
+        except Exception:
+            pass
+    return {n for n in owned if n in real} if real else set(owned)
+
+
 def display_tool_names(tools: tuple[ToolDef, ...]) -> list[str]:
     """Model-callable names for redirect lists (excludes containers).
 
@@ -640,7 +691,8 @@ def translate_genuine_call(
     # name itself (casing-insensitive), the owned path validates it —
     # the translation must not shadow the client's own declaration
     # (its redirect corrects arguments; a rewrite would bypass it).
-    if lowered in owned:
+    # Channel plumbing never counts (see _real_owned_names).
+    if lowered in _real_owned_names(owned, client_tools):
         return None
     try:
         from llms.proxy.compat import translate_to_client as _compat_translate

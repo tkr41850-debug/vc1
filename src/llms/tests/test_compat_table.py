@@ -409,14 +409,15 @@ def test_write_to_apply_patch_proven_live():
     # Same-name ownership wins: the client declared `write` itself.
     from llms.proxy.ir import ToolDef
 
+    own_write = ToolDef("write", "w", {})
     assert (
         translate_to_client(
             "write",
             '{"path": "x", "content": "y"}',
             "luna",
             dict(owned, write="write"),
-            dict(defs, write=ToolDef("write", "w", {})),
-            ns,
+            dict(defs, write=own_write),
+            ns + (own_write,),
         )
         is None
     )
@@ -583,7 +584,7 @@ def test_execute_rewrites_onto_nested_exec_channel():
     defs = {t.name.lower(): t for t in ns if t.name}
     defs.update(nested_tool_defs(ns))
     # Table level: inner JS replays verbatim as the channel input.
-    assert translate_to_client("execute", args, "luna", owned, defs) == (
+    assert translate_to_client("execute", args, "luna", owned, defs, ns) == (
         "exec",
         js,
     )

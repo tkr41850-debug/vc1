@@ -289,13 +289,27 @@ def messages_to_chat(payload: dict, model: str) -> dict:
     return convert_response("messages", "chat", payload, model)
 
 
-def deltas_to_response_ir(deltas, model: str) -> ResponseIR:
+def deltas_to_response_ir(
+    deltas,
+    model: str,
+    done_args: dict | None = None,
+    done_names: dict | None = None,
+    done_custom: frozenset | set | None = None,
+) -> ResponseIR:
     """Fold an IR delta stream into one ResponseIR (stream-upstream adapter).
 
     Lets a non-streaming downstream ride the streaming upstream leg (which
     anonymous Zen requires) and still get a single JSON body: text /
     reasoning / tool-argument chunks accumulate, the terminal StreamDone
-    supplies status + usage.
+    supplies status + usage. `done_args` (the parser's done-frame
+    payloads, Custom input included) seeds calls that announced but
+    never streamed chunks — without it a done-only Custom turn folds
+    to an empty input the classifier must steer (live luna
+    2026-10-07: 9x bare-patch harness SyntaxError while the rewrap arm
+    sat idle one layer down). `done_names`/`done_custom` carry the
+    parser's added-frame name registry + Custom set so a seeded call
+    keeps its emitted name and route (it is NOT nameless — only its
+    chunks never arrived).
     """
     from llms.proxy.ir import ReasoningDelta, StreamDone, TextDelta, ToolArgsDelta
 
@@ -331,6 +345,25 @@ def deltas_to_response_ir(deltas, model: str) -> ResponseIR:
             out_tok = delta.output_tokens
             cached = delta.cached_tokens
             reasoning_tok = delta.reasoning_tokens
+    for call_id, payload in (done_args or {}).items():
+        # Done-frame fallback (never merged with deltas — same rule as
+        # the streaming fold): a done payload for an unknown call seeds
+        # it; for a chunkless known call it IS the payload. Names/route
+        # come from the parser registries (added frame announced them;
+        # only the chunks never arrived).
+        names = done_names or {}
+        customs = done_custom or frozenset()
+        if call_id in tool_args:
+            if "".join(tool_args[call_id]):
+                continue
+            tool_args[call_id] = [payload]
+        else:
+            tool_args[call_id] = [payload]
+            tool_names[call_id] = tool_names.get(call_id, "") or names.get(call_id, "")
+            tool_custom[call_id] = tool_custom.get(call_id, False) or (
+                call_id in customs
+            )
+            order.append(call_id)
     blocks: list = []
     if thinking:
         blocks.append(ThinkingBlock("".join(thinking)))

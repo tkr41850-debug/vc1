@@ -2369,3 +2369,90 @@ def test_streaming_namespaced_emitter_gets_argument_correction(tmp_path):
     assert "'default.exec_command'" in text
     assert "Retry as 'shell'" in text and '"command"' in text
     assert "not available" not in text
+
+
+def test_streaming_bare_patch_rewrite_reaches_input_frames(tmp_path):
+    """Mechanism-13 streaming replay (live luna 2026-10-07): the bare
+    patch arrives as a Custom added frame (raw patch in `input`) plus
+    a `custom_tool_call_input.done` frame carrying the SAME payload
+    (no `item` object, top-level item_id/input). The replay rewrote
+    the added frame but left the done frame raw — the harness folds
+    those bytes and executes the bare patch (4x harness SyntaxError
+    while the arm sat idle one frame down). Both frames must carry
+    the re-wrapped channel invocation downstream."""
+    import httpx
+
+    from tests.conftest import TEST_HEADERS, TEST_SECRET, build_app_client
+    from tests.conftest import make_settings as _make_settings
+    from tests.test_client_tools import _luna_namespace
+
+    ns = _luna_namespace()
+    nested = ns.options["tools"]
+    exec_desc = next(t["description"] for t in nested if t["name"] == "exec")
+    tools = [
+        {
+            "type": "additional_tools",
+            "id": "at_1",
+            "role": "developer",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "functions",
+                    "description": "",
+                    "tools": [
+                        {"type": "custom", "name": "exec", "description": exec_desc},
+                        {
+                            "type": "function",
+                            "name": "wait",
+                            "description": "Wait.",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    ],
+                }
+            ],
+        }
+    ]
+    patch = "*** Begin Patch\\n*** Add File: w.txt\\n+hi\\n*** End Patch\\n"
+    body = (
+        'data: {"type":"response.output_item.added","output_index":1,'
+        '"item":{"id":"call_p1","call_id":"call_p1","type":"custom_tool_call",'
+        '"name":"exec","input":"' + patch + '"}}\n\n'
+        'data: {"type":"response.custom_tool_call_input.done",'
+        '"output_index":1,"item_id":"call_p1","input":"' + patch + '"}\n\n'
+        'data: {"type":"response.completed",'
+        '"response":{"id":"resp_p1","status":"completed",'
+        '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+    )
+    calls: list = []
+
+    async def handler(request):
+        import json as _json
+
+        calls.append(_json.loads(request.content.decode()))
+        return httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    with build_app_client(
+        _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.6-luna",
+                "input": ["write w.txt", tools[0]],
+                "stream": True,
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    assert "await tools.apply_patch" in r.text
+    # The done frame must not leak the raw patch: every input payload
+    # downstream is the re-wrapped invocation.
+    assert "*** Begin Patch\\n" not in r.text.replace("await tools.apply_patch", "")

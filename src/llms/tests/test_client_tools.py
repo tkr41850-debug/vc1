@@ -26,7 +26,11 @@ def test_owned_map_dotted_declaration_also_owns_bare():
     dotted = ToolDef(
         "default.exec_command",
         "Runs a command",
-        {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
+        {
+            "type": "object",
+            "properties": {"cmd": {"type": "string"}},
+            "required": ["cmd"],
+        },
     )
     owned = owned_tool_names((dotted,))
     assert owned["exec_command"] == "default.exec_command"
@@ -229,13 +233,14 @@ def test_notice_nested_entries_tighten_args_keep_freeform():
     # the call shape.
     from llms.proxy.client_tools import _short_decl
 
-    assert _short_decl(
-        "exec_command",
-        "Runs a command.\ndeclare const tools: { exec_command(args: {\n  cmd: string;\n  login?: boolean;\n}): Promise<unknown>; };",
-    ) == "Runs a command. Call as args-object {cmd} on tools.exec_command via exec."
-    freeform = (
-        "Edit files.\ndeclare const tools: { apply_patch(input: string): Promise<unknown>; };"
+    assert (
+        _short_decl(
+            "exec_command",
+            "Runs a command.\ndeclare const tools: { exec_command(args: {\n  cmd: string;\n  login?: boolean;\n}): Promise<unknown>; };",
+        )
+        == "Runs a command. Call as args-object {cmd} on tools.exec_command via exec."
     )
+    freeform = "Edit files.\ndeclare const tools: { apply_patch(input: string): Promise<unknown>; };"
     assert _short_decl("apply_patch", freeform) == freeform
 
 
@@ -467,10 +472,7 @@ def test_translate_genuine_read_never_renames():
     )
     owned = {"view_image": "view_image"}
     defs = {"view_image": viewer}
-    assert (
-        translate_genuine_call("read", '{"path": "/tmp/f.txt"}', owned, defs)
-        is None
-    )
+    assert translate_genuine_call("read", '{"path": "/tmp/f.txt"}', owned, defs) is None
 
 
 def test_translate_genuine_write_never_renames_onto_viewer():
@@ -496,7 +498,10 @@ def test_translate_genuine_write_never_renames_onto_viewer():
     args = '{"content": "x", "path": "/tmp/f.txt"}'
     assert translate_genuine_call("write", args, owned, defs) is None
     assert translate_genuine_call("edit", args, owned, defs) is None
-    assert _translate_genuine_args("write", {"content": "x", "path": "f"}, ["path"]) is None
+    assert (
+        _translate_genuine_args("write", {"content": "x", "path": "f"}, ["path"])
+        is None
+    )
     # No directed equivalent either: a bare "retry as apply_patch"
     # sentence would mis-teach (nested tools only run via the exec
     # orchestrator channel) — the generic list + channel guidance
@@ -519,9 +524,7 @@ def test_steer_to_equivalent_directs_shell_onto_cmd_runner():
     )
     owned = {"exec_command": "exec_command"}
     defs = {"exec_command": runner}
-    assert steer_to_equivalent(
-        "shell", '{"command": "cat f"}', owned, defs
-    ) == (
+    assert steer_to_equivalent("shell", '{"command": "cat f"}', owned, defs) == (
         "Tool 'shell' is not available in this session — use "
         "'exec_command' instead with these arguments: "
         '{"cmd": "cat f"}. Retry the call as \'exec_command\'.'
@@ -539,8 +542,9 @@ def test_steer_to_equivalent_directs_shell_onto_cmd_runner():
             {
                 "a": runner,
                 "b": ToolDef(
-                    "b", "r", {"type": "object", "properties": {"cmd": {}},
-                               "required": ["cmd"]}
+                    "b",
+                    "r",
+                    {"type": "object", "properties": {"cmd": {}}, "required": ["cmd"]},
                 ),
             },
         )
@@ -562,20 +566,16 @@ def test_steer_to_equivalent_directs_read_via_cat():
     )
     owned = {"exec_command": "exec_command"}
     defs = {"exec_command": runner}
-    assert steer_to_equivalent(
-        "read", '{"path": "/tmp/f.txt"}', owned, defs
-    ) == (
+    assert steer_to_equivalent("read", '{"path": "/tmp/f.txt"}', owned, defs) == (
         "Tool 'read' is not available in this session — to read a "
         "file, use 'exec_command' instead with these arguments: "
         '{"cmd": "cat /tmp/f.txt"}. Retry the call as \'exec_command\'.'
     )
     # Paths with spaces quote; no runner or no path means no guess.
-    assert steer_to_equivalent(
-        "read", '{"path": "/tmp/my f.txt"}', owned, defs
-    ) == (
+    assert steer_to_equivalent("read", '{"path": "/tmp/my f.txt"}', owned, defs) == (
         "Tool 'read' is not available in this session — to read a "
         "file, use 'exec_command' instead with these arguments: "
-        '{"cmd": "cat \'/tmp/my f.txt\'"}. Retry the call as \'exec_command\'.'
+        "{\"cmd\": \"cat '/tmp/my f.txt'\"}. Retry the call as 'exec_command'."
     )
     assert steer_to_equivalent("read", '{"path": "f"}', {}, {}) is None
     assert steer_to_equivalent("read", '{"offset": 3}', owned, defs) is None
@@ -587,7 +587,11 @@ def _spark_runner():
     return ToolDef(
         "exec_command",
         "Runs a command",
-        {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
+        {
+            "type": "object",
+            "properties": {"cmd": {"type": "string"}},
+            "required": ["cmd"],
+        },
     )
 
 
@@ -601,9 +605,7 @@ def test_notice_shell_directive_plain_leg():
     from llms.proxy.client_tools import build_tool_notice
     from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
 
-    notice = build_tool_notice(
-        (_spark_runner(),), GENUINE_TOOL_NAMES, shell_alias=True
-    )
+    notice = build_tool_notice((_spark_runner(),), GENUINE_TOOL_NAMES, shell_alias=True)
     assert "- 'shell': run every shell command as" in notice
     assert '"command"' in notice
     assert "do NOT call it directly" in notice
@@ -652,9 +654,7 @@ def test_redirect_shell_runner_points_at_alias():
     runner = _spark_runner()
     owned = owned_tool_names((runner,))
     defs = {"exec_command": runner}
-    text = build_tool_redirect(
-        "exec_command", "{}", owned, defs, GENUINE_TOOL_NAMES
-    )
+    text = build_tool_redirect("exec_command", "{}", owned, defs, GENUINE_TOOL_NAMES)
     assert text is not None
     assert "Retry as 'shell'" in text
     assert '"command"' in text
@@ -749,8 +749,6 @@ def test_steer_execute_genuine_points_at_nested_channel():
     owned = {"exec_command": "exec_command"}
     defs = {"exec_command": runner}
     assert (
-        steer_to_equivalent(
-            "execute", '{"code": "x"}', owned, defs, GENUINE_TOOL_NAMES
-        )
+        steer_to_equivalent("execute", '{"code": "x"}', owned, defs, GENUINE_TOOL_NAMES)
         is None
     )
