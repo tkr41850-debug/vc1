@@ -374,6 +374,17 @@ def _classify_calls(
                     # marker the replay paths apply).
                     rewrapped = rewrap_bare_patch_exec_input(payload_text)
                     if rewrapped is not None:
+                        # Mechanism-13 arm observability: a bare-patch
+                        # turn that never arrives reproduces as silence
+                        # (no fold entry, no steer — the raw patch rides
+                        # downstream to harness SyntaxError). Log the
+                        # firing once per call so the live proof greps
+                        # one place, not the absence of other lines.
+                        logger.info(
+                            "[%s] mechanism-13 rewrap: bare patch input "
+                            "re-wrapped as apply_patch channel call",
+                            trace_id,
+                        )
                         rewritten = {
                             **fixed,
                             "__exec_rewrite__": {
