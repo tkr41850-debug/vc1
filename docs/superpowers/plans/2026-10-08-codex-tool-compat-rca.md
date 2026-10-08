@@ -566,3 +566,38 @@ matrix-spark3, matrix-luna3/4):
   probe PASSED byte-exact on the same run. EXPECTED — no new entry.
 - Zero lines from any claude/spark window: every genuine emission
   hits a table row. No new table entry required.
+
+### Rounds 9–10: streaming fail-closed guards (repeat + stall) — 2026-10-08
+
+Two live failure shapes from the `~/DONOTCOMMIT_logs.txt` window and
+the stress runs, both fixed in `forward.py` (`fold_and_steer_streaming`)
+with hermetic pins in `test_stream_translate.py`:
+
+1. Same-name repeat (round 9, commits 3e816fc/05cd5ee): two defects —
+   the repeat guard keyed redirects on the full emitted form
+   (`default.view_image`) while comparing the split bare name
+   (`view_image`), so it silently never fired (fix: bare-name keying);
+   and the trip `break` only left the inner `for`, falling through to
+   the re-request (fix: `_steer_repeat` flag + outer break). Pinned by
+   `test_streaming_fold_repeat_prefixed_call_fails_closed_fast`
+   (verified to fail on pre-fix code via path-scoped stash).
+2. Cross-name stall (round 10, commit 43d4997): trace 883373baaf5f
+   cycled `read` -> `default.view_image` -> `default.view_image` (4
+   steers, budget death) — cycling names never trips the same-name
+   guard. A `_steer_stall` counter now fails closed after 2
+   consecutive fully-steered turns (`test_proxy.py` exhaustion test
+   updated: `len(calls) == 2`, stall trip instead of budget burn).
+   Pinned by `test_streaming_fold_cross_name_stall_fails_closed_fast`.
+
+Live proof on the stall-guard commit: trace 069de27d81b6 (spark view
+shape) steered `read` then `default.view_image` and failed closed with
+the stall warning — 1 re-request, no budget burn, no dead turn leaked.
+
+Stress verdict (shared proxy, fresh code): spark 4/5 + verify PASS,
+claude 4/5 + verify PASS, luna 900s rerun PASS byte-exact (26/27
+turns via mechanism-13 rewrap, zero guard trips; earlier 1/5 was the
+300s harness cap vs slow upstream, not translation). Zero
+`streamfailed`/`stream incomplete`/`unsupported call` signatures in
+any stress output.
+
+Hermetic: 541 passed, ruff clean.
