@@ -445,3 +445,65 @@ those legs unproven (Task 7 matrix).
   correct. Wont-translate recorded.
 - Zero distinct names without a verdict. No new table entry
   required from this review.
+
+## Live verification 2026-10-08, round 7 (06:49–07:20 UTC, matrix probe on current code)
+
+Claude-leg root cause + fix (stop-hook gap closed): 7x upstream-200
+text-only turns ("I'll run the echo command via Bash") while spark
+passed byte-exact. Double inversion of the spark-proven pattern —
+outbound is genuine-12-only so client `Bash` has no wire schema, and
+the `shell` directive never fired on the claude leg (`_ALIASES`
+matched only `exec_command`, absent from the 23-tool capture; the
+`cmd`-only gate rejected verbatim-`command` `Bash`). Fix (`e2114de`):
+`(bash, shell, command)` alias row + `_is_shell_runner` admits the
+verbatim-`command` shape; notice now directs shell commands at
+upstream `shell` and demotes `Bash` to a pointer. Live: model
+self-corrects ("Need to use bare `shell` tool name per instructions,
+retrying") → `PASS claude: Bash tool-ok round-trip`, 2x consecutive
+(`claude-fix` :8798 + `claude-rerun` :8791 probes). Cleanup `1edd455`
+drops the orphaned `_is_cmd_shaped`.
+
+- Mechanism-13 arm LIVE proof (stop-hook gap closed): luna
+  file-write `PASS matrix-luna.txt: byte-exact` AND the arm fired
+  24x across 24 traces (`mechanism-13 rewrap` log line, `bb6df62`
+  observability; traces in `/tmp/m13-probe-proxy.log`). The model
+  emits bare-patch exec inputs on the natural-write path; every one
+  re-wraps into the apply_patch channel. Zero steer lines: clean
+  passthrough each turn.
+- Spark regression check: `PASS matrix-spark.txt: byte-exact` in 3
+  upstream turns, zero steers (clean-workspace rerun; two earlier
+  failures were stale-workspace + model-side variance — same code
+  passes, `multi_agent_v1` tool set identical across pass/fail).
+- Full hermetic suite green (535), ruff clean on touched files.
+  Recorded in empty commit `206d63b` (verdicts only — logs stay in
+  job tmp per probes-vs-tests split).
+
+## Schema audit appendix, round 7 delta (Task 8 Step 1 — hermetic, 2026-10-08)
+
+New rows since the 2026-10-07 audit (all pinned in
+`test_schema_audit_dropped_keys_pinned` + `test_claude_rows_...`):
+
+| Row | Genuine keys in | Consumed | Dropped / refused |
+|---|---|---|---|
+| `shell`→claude/`Bash` | command, workdir, timeout, background | `command` verbatim (1:1 — capture: Bash requires `["command"]`) | workdir/timeout/background dropped by contract (Bash carries its own timeout/description; client defaults apply) |
+| `read`→claude/`Read` | path, offset, limit | `path`→`file_path` (rename; capture: Read requires `["file_path"]`) | offset/limit dropped (whole-file read is what the overlay asked for) |
+| `write`→claude/`Write` | path, content | `path`→`file_path` rename, `content` verbatim (capture: Write requires both) | unknown extras ignored |
+| `edit`→claude/`Edit` | path, oldString, newString, replaceAll | three renames (capture: Edit requires all three) | `replaceAll: true` REFUSED (None — client `replace_all` defaults False with different semantics; NOT silently dropped) |
+
+Notice-side change (no wire effect — notice text only): the `shell`
+directive + `Bash` pointer demotion on the claude leg (same
+spark-proven shape; classifier keys on names, never on notice text).
+
+## Log review, round 7 (Task 8 Step 2 — current-code probe windows, 2026-10-08)
+
+`no compat entry` lines across `/tmp/*proxy*.log` + job tmp (all
+windows, old and new):
+
+- `read (family=luna)` ×11 — EXPECTED (unchanged): Task 5 ships no
+  `read` row; steers to `cat` via `_read_via_shell_redirect`.
+- `skill (family=luna)` ×3, `glob (family=luna)` ×1 — EXPECTED:
+  no client harness declares these; fail-open passthrough correct.
+- Zero lines from any current-code window (m13/spark-clean/
+  luna-clean/claude-fix/claude-rerun/spark-retry logs): every
+  genuine emission on every leg now hits a table row. No new table
+  entry required from this review.
