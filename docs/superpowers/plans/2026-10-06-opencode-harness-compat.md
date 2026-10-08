@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python, FastAPI/Starlette (proxy), pytest (hermetic), `scripts/` live probes against Zen free tier.
 
-**Spec:** User direction in conversation 2026-10-06 (full 1:1 compat, UA-based families with leg fallback, fail-open + error logs, extensive live tests, schema audit afterwards) plus follow-up (codex `apply_patch`→`edit`/`write` upstream on follow-up turns; Claude `Read`→`read` upstream). Background: `docs/superpowers/plans/2026-10-05-codex-tool-compat-rca-DRAFT.md`.
+**Spec:** User direction in conversation 2026-10-06 (full 1:1 compat, UA-based families with leg fallback, fail-open + error logs, extensive live tests, schema audit afterwards) plus follow-up (codex `apply_patch`→`edit`/`write` upstream on follow-up turns; Claude `Read`→`read` upstream). Background: `docs/superpowers/plans/2026-10-08-codex-tool-compat-rca.md`.
 
 ## Global Constraints
 
@@ -41,7 +41,7 @@
 - **Modify `llms/proxy/client_tools.py`** — extend `translate_genuine_call`/`_translate_genuine_args` ONLY via compat table lookup (no behavior change for pairs the table doesn't cover; the `view_image` trap tests keep passing).
 - **Tests:** fill `tests/test_compat_table.py` (created, docstring-only placeholder); extend `tests/test_pipeline.py`, `tests/test_proxy.py` for new rewrites + fail-open logging.
 - **Probes:** create `scripts/probes/compat_matrix_probe.py` (per-leg × per-pair live matrix, byte-exact assertions).
-- **Docs:** finalize `docs/superpowers/plans/2026-10-05-codex-tool-compat-rca-DRAFT.md` (rename without `-DRAFT`, add compat mechanisms + schema audit appendix).
+- **Docs:** finalize the codex-tool-compat RCA (renamed 2026-10-08 without `-DRAFT`, compat mechanisms + schema audit appendix).
 
 ## Family + tool-shape inventory (verified live 2026-10-05/06)
 
@@ -272,7 +272,7 @@ Expected: PASS/FAIL recorded verbatim. If Update fails, Task 5 ships `write`→A
 
 - [ ] **Step 4: Record grammar in RCA draft**
 
-Append the verified marker grammar (verbatim, with the passing patch texts) to the DRAFT RCA's inventory section. No commit (docs + probe ship with Task 7's verification commit).
+Append the verified marker grammar (verbatim, with the passing patch texts) to the RCA's inventory section. No commit (docs + probe ship with Task 7's verification commit).
 
 ### Task 4: Wire dispatch into the shared classifier + streaming fold
 
@@ -394,7 +394,7 @@ Matrix (skip cells the table doesn't cover — those assert fail-open passthroug
 ### Task 8: Schema translation audit + finalize RCA + green suite + commit
 
 **Files:**
-- Docs: rename `docs/superpowers/plans/2026-10-05-codex-tool-compat-rca-DRAFT.md` → `docs/superpowers/plans/2026-10-06-opencode-harness-compat.md` (finalized: compat mechanisms, per-entry proof pointers, audit appendix)
+- Docs: rename the RCA DRAFT to `docs/superpowers/plans/2026-10-08-codex-tool-compat-rca.md` (finalized: compat mechanisms, per-entry proof pointers, audit appendix; dated 10-08 — the plan-specified `2026-10-06-opencode-harness-compat.md` name was already taken by this plan)
 - All modified code + tests
 
 - [ ] **Step 1: Schema audit pass** — for every shipped table entry, diff the genuine-12 schema (`zen_tools.py`) against the client's declared schema (live captures req-93/95/113 + Task 1 Claude/dsh captures): list every dropped/renamed key per entry (e.g. `shell{workdir,timeout,…}` → `exec_command{cmd}` drops extras by contract) and confirm each drop is covered by a hermetic test asserting the dropped key never reaches the harness.
