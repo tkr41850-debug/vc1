@@ -1073,19 +1073,6 @@ def _is_shell_runner(tool: ToolDef) -> bool:
     return "cmd" in set(required) or "command" in set(required)
 
 
-def _is_cmd_shaped(tool: ToolDef) -> bool:
-    """True when a client tool is the `shell` -> `cmd` rewrite target.
-
-    Same contract as _translate_genuine_args("shell", ...): a cmd key
-    among the required keys (exact {"cmd"} or a superset — extra
-    required keys ride the sketch verbatim and the strict check stays
-    the source of truth). Kept for the spark-only call sites; the
-    alias gate uses _is_shell_runner (both shapes). Pure helper.
-    """
-    required = (tool.parameters or {}).get("required") or []
-    return "cmd" in set(required)
-
-
 # The upstream-offered `shell` schema line for the notice alias: the
 # exact key the model fills when the notice names it (live spark
 # 2026-10-06 diagnostic: `shell` + `command` in the notice ->
