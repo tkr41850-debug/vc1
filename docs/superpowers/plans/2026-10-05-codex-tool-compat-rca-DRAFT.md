@@ -507,3 +507,62 @@ windows, old and new):
   luna-clean/claude-fix/claude-rerun/spark-retry logs): every
   genuine emission on every leg now hits a table row. No new table
   entry required from this review.
+
+## Round 8 delta (2026-10-08 — streaming rename, buffering, casing norm)
+
+Two commits since round 7: a2b540e (streaming `to_client` rename in
+`translate_streaming` — genuine calls rename onto client declarations
+mid-stream) and 119c8ca (buffer genuine chunks to the done frame +
+normalize client-cased emissions to declared casing).
+
+Why: live claude file-write probe FAILed — upstream `shell` replayed
+verbatim downstream 15x, CLI dispatcher `No such tool available:
+shell` every time (only dispatches `Bash`). My earlier synthesize-path
+fix never runs live for this leg (all turns `stream=True`);
+`translate_streaming` passed names verbatim. Then genuine `write`
+(~105 chars, multi-delta) defeated the first-chunk-only rename the
+same way (partial JSON -> None -> verbatim -> CLI rejection 3x).
+
+### Live ledger, current code (119c8ca)
+
+- Claude Bash: `FILE: 'hello-echo'` byte-exact, transcript
+  `TOOL_USE: Bash`, `shell -> Bash` fired on the streaming turn.
+- Claude Write: `FILE: 'hello-write'` byte-exact, transcript
+  `TOOL_USE: Write`, `write -> Write` fired (buffered full payload),
+  first try after the buffering fix.
+- Spark: `PASS matrix-spark.txt: byte-exact 'hello-matrix\n'`
+  (fresh run on 119c8ca).
+- Luna: `PASS matrix-luna.txt: byte-exact 'hello-matrix\n'`
+  (retry converged after 17 turns; m13 arm firing throughout).
+
+BOTH-leg translation proven live on current code.
+
+### Schema audit, round 8 (Task 8 Step 1 — no new rows)
+
+No new table rows since round 7: the streaming rename reuses the
+proven `translate_genuine_call` table (same drops/refusals, pinned by
+`test_schema_audit_dropped_keys_pinned`). New behavior is transport
+(buffering, casing norm), not schema:
+
+- Casing norm (`bash` -> declared `Bash`): name-only, args untouched
+  (payload already the client's own shape) — pinned by
+  `test_streaming_normalizes_client_tool_casing`.
+- Buffer-then-rename: identical translated output to the fold path,
+  only later in the turn — pinned by
+  `test_streaming_rename_buffers_multichunk_genuine_write`.
+
+Hermetic: 539 passed, ruff check + format clean.
+
+### Log review, round 8 (Task 8 Step 2 — new probe windows)
+
+`no compat entry` across the six new windows (claude-write9/10/11,
+matrix-spark3, matrix-luna3/4):
+
+- `edit (family=luna)` ×1 (luna4, final turn): model emitted a
+  degenerate `edit {"newString":"test",...}` probe-shaped call; no
+  luna `edit` row exists by design (Task 5 ships write/edit via the
+  exec channel only for usable payloads — a same-string no-op edit
+  has no valid translation). Generic steer applied, turn completed,
+  probe PASSED byte-exact on the same run. EXPECTED — no new entry.
+- Zero lines from any claude/spark window: every genuine emission
+  hits a table row. No new table entry required.
