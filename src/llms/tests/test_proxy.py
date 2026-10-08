@@ -1667,10 +1667,10 @@ def test_streaming_steer_exhaustion_fails_closed_with_redirect_text(tmp_path):
     """Steer budget spent on fresh undeclared names: no unjudged turn replays.
 
     Live shape: the model emits a NEW undeclared name every turn (shell,
-    execute, read, glob), so the loop never sees a repeat and the budget
-    dies — the 4th turn must not replay downstream (the client fails it
-    with `unsupported call`). Instead the client gets the last redirect
-    text as a terminal turn.
+    execute, read, glob), so the loop never sees a repeat. The stall guard
+    trips on the 2nd consecutive steered turn and fails closed — the client
+    gets the last redirect text as a terminal turn instead of the budget
+    being burned on further re-requests.
     """
     import httpx
 
@@ -1720,10 +1720,9 @@ def test_streaming_steer_exhaustion_fails_closed_with_redirect_text(tmp_path):
     assert "function_call" not in r.text
     # The client surfaces the last correction instead.
     assert "not available in this session" in r.text
-    # Budget honored: 1 initial + STEER_MAX_ITERS re-requests.
-    from llms.proxy.pipeline import STEER_MAX_ITERS
-
-    assert len(calls) == 1 + STEER_MAX_ITERS
+    # Stall guard: 2 consecutive steered turns fail closed with 1 re-request,
+    # so the stall trip (not full budget burn) bounds the upstream calls.
+    assert len(calls) == 2
 
 
 def test_synthesize_steer_exhaustion_fails_closed_with_redirect_json(tmp_path):

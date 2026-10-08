@@ -468,6 +468,16 @@ async def fold_and_steer_streaming(
     # would set _steer_failed yet STILL re-request upstream (and loop
     # again), burning the turns it was meant to save.
     _steer_repeat = False
+    # Stall counter: consecutive re-requests whose folded turn steered
+    # ENTIRELY (nothing passed). A model cycling DIFFERENT unroutable
+    # names across turns (live codex 2026-10-08 trace 883373baaf5f:
+    # `read` -> `default.view_image` -> `default.view_image`, 4 steers
+    # then budget death) never trips the same-name guard, yet no
+    # redirect is changing its next turn. Two fully-steered turns in a
+    # row fail closed fast with the last redirect as the terminal —
+    # the third upstream turn cannot teach anything the first two
+    # did not. Reset whenever any call passes (progress).
+    _steer_stall = 0
     # Terminal redirect text when the model repeats a steered call it
     # already saw corrected (set in the loop below): emitted as a real
     # model turn so the client surfaces the correction instead of the
@@ -738,6 +748,17 @@ async def fold_and_steer_streaming(
             break
         if not steer or client_names is None:
             break
+        if not passthrough:
+            # Fully-steered turn: nothing in it could execute, so this
+            # re-request (when it happens) buys progress only if the
+            # model changes its next turn. Count consecutive stalls —
+            # the trip check below fails closed fast on the second in
+            # a row, even when the names differ each time (the
+            # same-name guard cannot see a `read` -> `view_image`
+            # capability cycle as a repeat). Any passing call resets.
+            _steer_stall += 1
+        else:
+            _steer_stall = 0
         # Probe evidence needs the steered payload, not just the name:
         # a name-only line left the live execute->exec rewrap's silence
         # unanswerable (empty `code` vs populated `code`). Truncate —
@@ -846,6 +867,44 @@ async def fold_and_steer_streaming(
         # re-request the inner break could not (it only leaves the for).
         if _steer_repeat:
             break
+        if _steer_stall >= 2:
+            # Consecutive fully-steered turns: the last re-request
+            # changed nothing (same-name repeats trip the guard above;
+            # this catches the cross-name stall — live trace
+            # 883373baaf5f cycled `read` -> `view_image` with zero
+            # passing calls). Fail closed fast with the last redirect
+            # as the terminal instead of buying a third turn that no
+            # redirect so far has changed. Runs at most one re-request
+            # (stall hits 2 only on the second fully-steered fold).
+            from llms.proxy.ir import StreamDone as _Done
+            from llms.proxy.ir import TextDelta as _Text
+            from llms.proxy.stream_translate import (
+                emit_responses_sse as _emit_sse,
+            )
+
+            _stall_redirect = (
+                followups[-1]["output"]
+                if followups
+                and isinstance(followups[-1], dict)
+                and isinstance(followups[-1].get("output"), str)
+                else None
+            )
+            if _stall_redirect is not None:
+                logger.warning(
+                    "[%s] streaming steer stalled; failing closed",
+                    trace_id,
+                )
+                lines = []
+                _steer_failed = True
+                _steer_repeat = True
+                _steer_terminal = list(
+                    _emit_sse(
+                        [_Text(_stall_redirect), _Done(status="completed")],
+                        trace_id,
+                        "",
+                    )
+                )
+                break
         outbound = dict(outbound, input=list(outbound.get("input", [])) + followups)
         req = client.build_request("POST", url, headers=headers, json=outbound)
         req.extensions["timeout"] = {
