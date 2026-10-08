@@ -212,6 +212,94 @@ def _edit_to_apply_patch(payload: dict, required: list) -> str | None:
     )
 
 
+def _shell_to_claude_bash(payload: dict, required: list) -> str | None:
+    """genuine `shell {command}` onto claude-native `Bash {command}`.
+
+    Family-gated (claude only — the row carries the family): the key
+    is verbatim (`command`; capture: Bash requires ["command"]).
+    Extra genuine keys (workdir/timeout/background) are dropped — the
+    client schema is the contract (same discipline as _shell_to_cmd).
+    Pure helper.
+    """
+    import json as _json
+
+    command = payload.get("command")
+    if not isinstance(command, str):
+        return None
+    if "command" not in set(required or []):
+        return None
+    return _json.dumps({"command": command})
+
+
+def _read_to_claude_read(payload: dict, required: list) -> str | None:
+    """genuine `read {path}` onto claude-native `Read {file_path}`.
+
+    Family-gated (claude only): key rename `path` -> `file_path`
+    (capture: Read requires ["file_path"]; offset/limit/pages are
+    optional, never synthesized). Non-string path: None (no guess —
+    the generic steer applies). Pure helper.
+    """
+    import json as _json
+
+    path = payload.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    if "file_path" not in set(required or []):
+        return None
+    return _json.dumps({"file_path": path})
+
+
+def _write_to_claude_write(payload: dict, required: list) -> str | None:
+    """genuine `write {path, content}` onto claude-native `Write`.
+
+    Family-gated (claude only): key rename `path` -> `file_path`,
+    `content` verbatim (capture: Write requires ["file_path",
+    "content"]). Non-string path/content: None. Pure helper.
+    """
+    import json as _json
+
+    path = payload.get("path")
+    content = payload.get("content")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    if not isinstance(content, str):
+        return None
+    if not {"file_path", "content"} <= set(required or []):
+        return None
+    return _json.dumps({"file_path": path, "content": content})
+
+
+def _edit_to_claude_edit(payload: dict, required: list) -> str | None:
+    """genuine `edit {path, oldString, newString}` onto claude-native `Edit`.
+
+    Family-gated (claude only): key renames `path` -> `file_path`,
+    `oldString` -> `old_string`, `newString` -> `new_string`
+    (capture: Edit requires ["file_path", "old_string",
+    "new_string"]). `replaceAll` is refused (None): the client
+    `replace_all` key defaults False with different semantics, and a
+    synthesized global replace from a single old/new pair would
+    mis-fire on repeated lines (same discipline as
+    _edit_to_apply_patch). Missing/non-string fields: None.
+    Pure helper.
+    """
+    import json as _json
+
+    path = payload.get("path")
+    old = payload.get("oldString")
+    new = payload.get("newString")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    if not isinstance(old, str) or not isinstance(new, str):
+        return None
+    if not old or old == new:
+        return None
+    if payload.get("replaceAll"):
+        return None
+    if not {"file_path", "old_string", "new_string"} <= set(required or []):
+        return None
+    return _json.dumps({"file_path": path, "old_string": old, "new_string": new})
+
+
 def _write_to_shell_redirect(payload: dict, required: list) -> str | None:
     """genuine `write {path, content}` onto a cmd-runner shell redirect.
 
@@ -251,6 +339,10 @@ TO_CLIENT: tuple = (
     ("write", LUNA, "exec", _write_to_apply_patch),
     ("edit", LUNA, "exec", _edit_to_apply_patch),
     ("write", CODEX_PLAIN, "exec_command", _write_to_shell_redirect),
+    ("shell", CLAUDE, "bash", _shell_to_claude_bash),
+    ("read", CLAUDE, "read", _read_to_claude_read),
+    ("write", CLAUDE, "write", _write_to_claude_write),
+    ("edit", CLAUDE, "edit", _edit_to_claude_edit),
 )
 
 
@@ -277,11 +369,12 @@ def translate_to_client(
     # itself, the owned path validates it — the translation must not
     # shadow the client's own declaration (its redirect corrects
     # arguments; a rewrite would bypass it). Channel plumbing never
-    # counts (see client_tools._real_owned_names).
+    # counts, and a table row for this genuine name exempts its client
+    # target (see client_tools._real_owned_names).
     from llms.proxy.client_tools import _real_owned_names as _real_owned_of
 
     try:
-        _guard = _real_owned_of(owned, client_tools)
+        _guard = _real_owned_of(owned, client_tools, lowered)
     except Exception:
         _guard = set(owned)
     if lowered in _guard:

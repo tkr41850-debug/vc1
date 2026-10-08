@@ -406,7 +406,12 @@ def test_write_to_apply_patch_proven_live():
         )
         is None
     )
-    # Same-name ownership wins: the client declared `write` itself.
+    # Same-name ownership wins when NO table row covers the pair: a
+    # client `write` declaration on a family with no write row (dsh
+    # declares one here — no write row ships for dsh) refuses the
+    # translation so the owned path (argument correction) applies.
+    # (On families WITH a write row — luna/claude — the row IS the
+    # ownership decision for the pair and the translation ships.)
     from llms.proxy.ir import ToolDef
 
     own_write = ToolDef("write", "w", {})
@@ -414,7 +419,7 @@ def test_write_to_apply_patch_proven_live():
         translate_to_client(
             "write",
             '{"path": "x", "content": "y"}',
-            "luna",
+            "dsh",
             dict(owned, write="write"),
             dict(defs, write=own_write),
             ns + (own_write,),
@@ -880,6 +885,119 @@ def test_write_to_shell_redirect_proven_live():
     )
 
 
+def _claude_tools():
+    # REAL 23-tool fixture: claude-cli 2.1.293 declaration captured live
+    # 2026-10-08 (compat-matrix-claude-proxy.log steer gates
+    # names=[...23...] family=claude). Bash takes {command},
+    # Write {file_path, content}, Read {file_path}, Edit
+    # {file_path, old_string, new_string} — key renames vs the
+    # genuine-12 (command/file_path/...) are the rows' exact contract.
+    import json as _json
+
+    from llms.proxy.ir import ToolDef
+
+    with open("/home/uqmm/.claude/jobs/8c5ef74f/tmp/claude-schema.jsonl") as f:
+        body = _json.loads(f.readline())["body"]
+    return tuple(
+        ToolDef(
+            t["name"],
+            t.get("description", ""),
+            t.get("input_schema", {}),
+            kind=t.get("type", "function"),
+        )
+        for t in body["tools"]
+        if isinstance(t, dict)
+    )
+
+
+def test_claude_rows_translate_genuine_onto_native_tools():
+    # Task 4/5 (plan 2026-10-06): the claude leg declares native tools
+    # under the SAME names the genuine overlay uses (Bash vs shell is
+    # the only true rename; Read/Write/Edit collide case-insensitively
+    # with read/write/edit) — the same-name guard must not refuse the
+    # rows: it fires on exact-case declarations only
+    # (Bash/Read/Write/Edit guard their own case; the model's lowercase
+    # genuine emissions shell/read/write/edit translate).
+    import json as _json
+
+    from llms.proxy.client_tools import (
+        dispatchable_names,
+        nested_tool_defs,
+        owned_tool_names,
+    )
+    from llms.proxy.compat import CLAUDE, translate_to_client
+    from llms.proxy.pipeline import _classify_calls
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+
+    tools = _claude_tools()
+    owned = owned_tool_names(tools)
+    defs = {t.name.lower(): t for t in tools if t.name}
+    defs.update(nested_tool_defs(tools))
+    route = dispatchable_names(tools)
+    # shell{command} -> Bash{command}: verbatim key (capture: Bash
+    # requires ["command"]; genuine shell carries command+extras).
+    assert translate_to_client(
+        "shell", '{"command": "echo tool-ok"}', CLAUDE, owned, defs, tools
+    ) == ("Bash", '{"command": "echo tool-ok"}')
+    # read{path} -> Read{file_path}: key rename (capture: Read
+    # requires ["file_path"]).
+    assert translate_to_client(
+        "read", '{"path": "f.txt"}', CLAUDE, owned, defs, tools
+    ) == (
+        "Read",
+        '{"file_path": "f.txt"}',
+    )
+    # write{path,content} -> Write{file_path,content}: key rename
+    # (capture: Write requires ["file_path", "content"]).
+    assert translate_to_client(
+        "write",
+        '{"path": "f.txt", "content": "hi"}',
+        CLAUDE,
+        owned,
+        defs,
+        tools,
+    ) == ("Write", '{"file_path": "f.txt", "content": "hi"}')
+    # edit{path,oldString,newString} -> Edit{file_path,old_string,
+    # new_string}: key renames (capture: Edit requires
+    # ["file_path", "old_string", "new_string"]).
+    assert translate_to_client(
+        "edit",
+        '{"path": "f", "oldString": "a", "newString": "b"}',
+        CLAUDE,
+        owned,
+        defs,
+        tools,
+    ) == ("Edit", '{"file_path": "f", "old_string": "a", "new_string": "b"}')
+    # Missing keys / wrong family: None (fail open, never guess).
+    assert (
+        translate_to_client("shell", '{"workdir": "/tmp"}', CLAUDE, owned, defs, tools)
+        is None
+    )
+    assert (
+        translate_to_client("read", '{"path": "f"}', "unknown", owned, defs, tools)
+        is None
+    )
+    assert (
+        translate_to_client("write", '{"path": "f"}', CLAUDE, owned, defs, tools)
+        is None
+    )
+    # Classifier level: genuine shell on claude passthrough renamed to
+    # Bash (the replay swaps frame arguments — plain function route).
+    (call,) = [
+        {
+            "call_id": "c1",
+            "name": "shell",
+            "arguments": _json.dumps({"command": "echo tool-ok"}),
+        }
+    ]
+    passed, steer = _classify_calls(
+        [call], owned, defs, route, tools, GENUINE_TOOL_NAMES, CLAUDE, "t1"
+    )
+    assert steer == []
+    assert [c["name"] for c in passed] == ["Bash"]
+    assert passed[0]["__translated_args__"] == '{"command": "echo tool-ok"}'
+
+
 def test_schema_audit_dropped_keys_pinned():
     # Task 8 schema audit (vs zen_tools.py GENUINE_TOOLS, 2026-10-07):
     # every compat row drops or refuses specific genuine keys. This
@@ -888,9 +1006,13 @@ def test_schema_audit_dropped_keys_pinned():
     # data on the translation path.
     from llms.proxy.compat import (
         _edit_to_apply_patch,
+        _edit_to_claude_edit,
         _execute_to_exec_channel,
+        _read_to_claude_read,
+        _shell_to_claude_bash,
         _shell_to_cmd,
         _write_to_apply_patch,
+        _write_to_claude_write,
         _write_to_shell_redirect,
     )
     from llms.proxy.zen_tools import GENUINE_TOOLS
@@ -964,4 +1086,53 @@ def test_schema_audit_dropped_keys_pinned():
     assert (
         _write_to_shell_redirect({"path": "s.txt", "content": "hi\n"}, ["cmd"])
         == "printf %s > s.txt <<'EOF'\nhi\nEOF"
+    )
+    # Claude rows (capture: claude-cli 2.1.293, 23 tools): per-entry
+    # drops/renames vs the genuine-12 above.
+    # shell->Bash: `command` verbatim; workdir/timeout/background drop
+    # (Bash carries its own timeout/description — never synthesized
+    # from the overlay payload; the client defaults apply).
+    assert (
+        _shell_to_claude_bash(
+            {"command": "echo hi", "workdir": "/tmp", "timeout": 1},
+            ["command"],
+        )
+        == '{"command": "echo hi"}'
+    )
+    assert _shell_to_claude_bash({"workdir": "/tmp"}, ["command"]) is None
+    # read->Read: `path` -> `file_path` rename; offset/limit drop (the
+    # client defaults apply — a whole-file read is what the overlay
+    # asked for).
+    assert set(schemas["read"]["properties"]) == {"path", "offset", "limit"}
+    assert (
+        _read_to_claude_read({"path": "f", "offset": 3, "limit": 10}, ["file_path"])
+        == '{"file_path": "f"}'
+    )
+    assert _read_to_claude_read({"path": "f"}, ["other"]) is None
+    # write->Write: `path` -> `file_path` rename, `content` verbatim.
+    assert (
+        _write_to_claude_write(
+            {"path": "f", "content": "hi", "extra": 1},
+            ["file_path", "content"],
+        )
+        == '{"file_path": "f", "content": "hi"}'
+    )
+    assert _write_to_claude_write({"path": "f"}, ["file_path", "content"]) is None
+    # edit->Edit: `path`/`oldString`/`newString` renames;
+    # replaceAll REFUSED (same discipline as _edit_to_apply_patch —
+    # the client `replace_all` defaults False with different
+    # semantics, and a synthesized global replace mis-fires).
+    assert (
+        _edit_to_claude_edit(
+            {"path": "f", "oldString": "a", "newString": "b"},
+            ["file_path", "old_string", "new_string"],
+        )
+        == '{"file_path": "f", "old_string": "a", "new_string": "b"}'
+    )
+    assert (
+        _edit_to_claude_edit(
+            {"path": "f", "oldString": "a", "newString": "b", "replaceAll": True},
+            ["file_path", "old_string", "new_string"],
+        )
+        is None
     )

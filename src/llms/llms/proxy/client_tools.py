@@ -394,7 +394,7 @@ def steer_to_equivalent(
     lowered = bare.lower() if isinstance(bare, str) else None
     if lowered is None or lowered not in ("read", "shell", "write", "edit", "execute"):
         return None
-    if lowered in _real_owned_names(owned, client_tools):
+    if lowered in _real_owned_names(owned, client_tools, lowered):
         return None
     try:
         payload = json.loads(arguments) if isinstance(arguments, str) else None
@@ -595,7 +595,11 @@ def rewrite_steered_call(
     return out
 
 
-def _real_owned_names(owned: dict[str, str], client_tools: tuple = ()) -> set[str]:
+def _real_owned_names(
+    owned: dict[str, str],
+    client_tools: tuple = (),
+    genuine_name: str | None = None,
+) -> set[str]:
     """Owned names minus channel plumbing (same-name guard input).
 
     The deferred namespace's raw nested specs (e.g. the `exec`
@@ -605,7 +609,27 @@ def _real_owned_names(owned: dict[str, str], client_tools: tuple = ()) -> set[st
     names the client can actually execute: top-level declarations
     plus description-documented nested tools (real signatures).
     Raw nested specs outside the exec description never count.
+    `genuine_name`: the overlay name being translated (or None when
+    unknown). A compat table row translating that genuine name onto
+    the owned client name IS the ownership decision for the pair —
+    the guard must not refuse it (live claude: the client declares
+    `Bash`/`Read`/`Write`/`Edit` while the model emits lowercase
+    genuine `shell`/`read`/`write`/`edit`; guarding on the
+    case-folded collision refuses the translation the table ships).
+    Rows for OTHER genuine names still guard (a same-name declaration
+    the model never emits through the overlay stays owned).
     """
+    _row_clients: set[str] = set()
+    if genuine_name is not None:
+        try:
+            from llms.proxy.compat import TO_CLIENT as _TO_CLIENT
+
+            _lowered = genuine_name.lower() if isinstance(genuine_name, str) else ""
+            for _genuine, _fam, _client_lower, _convert in _TO_CLIENT:
+                if _genuine == _lowered:
+                    _row_clients.add(str(_client_lower).lower())
+        except Exception:
+            pass
     real: set[str] = set()
     for tool in client_tools or ():
         name = getattr(tool, "name", "")
@@ -616,7 +640,8 @@ def _real_owned_names(owned: dict[str, str], client_tools: tuple = ()) -> set[st
                 real.add(str(nname).lower())
         except Exception:
             pass
-    return {n for n in owned if n in real} if real else set(owned)
+    guarded = {n for n in owned if n in real} if real else set(owned)
+    return guarded - _row_clients
 
 
 def display_tool_names(tools: tuple[ToolDef, ...]) -> list[str]:
@@ -691,8 +716,10 @@ def translate_genuine_call(
     # name itself (casing-insensitive), the owned path validates it —
     # the translation must not shadow the client's own declaration
     # (its redirect corrects arguments; a rewrite would bypass it).
-    # Channel plumbing never counts (see _real_owned_names).
-    if lowered in _real_owned_names(owned, client_tools):
+    # Channel plumbing never counts (see _real_owned_names). A table
+    # row for this genuine name exempts its client target (the row IS
+    # the ownership decision for the pair).
+    if lowered in _real_owned_names(owned, client_tools, lowered):
         return None
     try:
         from llms.proxy.compat import translate_to_client as _compat_translate
@@ -893,10 +920,31 @@ def build_tool_notice(
             )
     declared_lower = {t.name.lower() for t in named}
     shell_offered = bool(alias_lines) or "shell" in declared_lower
+    # Same-name collision (live claude 2026-10-08): the client declares
+    # `Bash`/`Read`/`Write`/`Edit` while the genuine overlay offers
+    # lowercase `shell`/`read`/`write`/`edit` — the header bans those
+    # four names ("never call them") while the compat table translates
+    # them onto the client's own tools. A model that obeys the ban
+    # narrates instead of calling (4x upstream-200 text-only turns).
+    # Exempt a banned name when a table row translates it: the entry
+    # below names the working route, so the header must not forbid it.
+    # Names with no row stay banned (fail open — the steer teaches them).
+    try:
+        from llms.proxy.compat import TO_CLIENT as _TO_CLIENT
+
+        _row_genuine = {str(_g).lower() for _g, _f, _c, _v in _TO_CLIENT}
+    except Exception:
+        _row_genuine = set()
+    _banned = [
+        _n for _n in ("read", "write", "edit", "glob", "grep") if _n not in _row_genuine
+    ]
+    if "shell" in _row_genuine:
+        shell_offered = True
     # No contradiction: when the shell directive applies (or the client
-    # declared `shell` itself), the header must not ban `shell` in the
-    # same breath the notice offers it.
+    # declared `shell` itself, or a row translates it), the header must
+    # not ban `shell` in the same breath the notice offers it.
     banned_shell = "" if shell_offered else ", shell"
+    banned_rest = ", ".join(_banned)
     lines = [
         (
             "Your harness can only execute the tools listed below — call "
@@ -905,7 +953,7 @@ def build_tool_notice(
             "prefix (e.g. never `default.exec_command` — always bare "
             "`exec_command`). "
             "Any other tool name will fail in your harness: in particular, "
-            f"the default tools read{banned_shell}, write, edit, glob, grep, "
+            f"the default tools {banned_rest}{banned_shell}, "
             "skill, subagent, webfetch, websearch, execute, and question "
             "are NOT available here unless listed below — never call them."
         ),

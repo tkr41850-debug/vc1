@@ -611,13 +611,44 @@ def test_notice_shell_directive_plain_leg():
     assert "do NOT call it directly" in notice
     assert "EITHER" not in notice
     # No contradiction: the header must not ban `shell` in the same
-    # breath the directive offers it.
-    assert "read, shell, write" not in notice
+    # breath the directive offers it. (The `shell` compat row also
+    # exempts it — belt and suspenders on the same invariant.)
+    head = notice.split("\n")[0]
+    assert "shell" not in head.split("the default tools")[1].split("are NOT")[0]
+
+
+def test_notice_ban_exempts_table_rows():
+    # Live claude 2026-10-08: the header banned read/shell/write/edit
+    # ("never call them") while the compat table translates those
+    # exact names onto the client's own tools — the model obeyed the
+    # ban and narrated instead of calling (4x upstream-200 text-only
+    # turns). A banned name with a compat row is exempt; names with no
+    # row stay banned (fail open — the steer teaches them).
+    import json as _json
+
+    from llms.proxy.client_tools import build_tool_notice
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+
+    with open("/home/uqmm/.claude/jobs/8c5ef74f/tmp/claude-schema.jsonl") as f:
+        body = _json.loads(f.readline())["body"]
+    from llms.proxy.ir import ToolDef as _ToolDef
+
+    claude = tuple(
+        _ToolDef(t["name"], t.get("description", ""), t.get("input_schema", {}))
+        for t in body["tools"]
+    )
+    head = build_tool_notice(claude, GENUINE_TOOL_NAMES).split("\n")[0]
+    banned = head.split("the default tools")[1].split("are NOT")[0]
+    for name in ("read", "shell", "write", "edit"):
+        assert name not in banned, name
+    for name in ("glob", "grep", "skill", "subagent", "webfetch", "websearch"):
+        assert name in banned, name
 
 
 def test_notice_shell_directive_off_by_default_and_gated():
-    # Default (and nested legs): tight sketches, `shell` still banned,
-    # no directive line, no pointer demotion.
+    # Default (and nested legs): tight sketches, no directive line, no
+    # pointer demotion (`shell` itself is table-exempt — only the
+    # untranslated names are asserted banned below).
     from llms.proxy.client_tools import build_tool_notice
     from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
 
@@ -641,7 +672,14 @@ def test_notice_shell_directive_off_by_default_and_gated():
     )
     notice = build_tool_notice((other,), GENUINE_TOOL_NAMES, shell_alias=True)
     assert "run every shell command" not in notice
-    assert "read, shell, write" in notice
+    head = notice.split("\n")[0]
+    banned = head.split("the default tools")[1].split("are NOT")[0]
+    # `shell` still banned (no table row targets this client's tools);
+    # read/write/edit exempted by their family-agnostic rows is a
+    # table-level exemption — the ban text consults the table, not the
+    # client. Only the untranslated names are asserted here.
+    for name in ("glob", "grep", "skill", "subagent"):
+        assert name in banned, name
 
 
 def test_redirect_shell_runner_points_at_alias():
