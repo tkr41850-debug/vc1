@@ -340,7 +340,7 @@ def build_tool_redirect(
     for client_lower, alias, alias_key in _ALIASES:
         if lowered != client_lower or alias not in genuine_lower:
             continue
-        if tool.kind != "function" or not _is_cmd_shaped(tool):
+        if tool.kind != "function" or not _is_shell_runner(tool):
             continue
         return (
             f"Tool '{emitted}' was called without its required "
@@ -451,7 +451,7 @@ def steer_to_equivalent(
                 if (
                     not isinstance(tool, ToolDef)
                     or tool.kind != "function"
-                    or not _is_cmd_shaped(tool)
+                    or not _is_shell_runner(tool)
                     or owned_lower != client_lower
                 ):
                     continue
@@ -542,7 +542,7 @@ def _read_via_shell_redirect(
             alias in genuine_lower
             and isinstance(tool, ToolDef)
             and tool.kind == "function"
-            and _is_cmd_shaped(tool)
+            and _is_shell_runner(tool)
             and runner.lower() == client_lower
         ):
             return (
@@ -876,8 +876,15 @@ def _nested_exec_tools(description: str) -> list[tuple[str, str]]:
 # travels as notice text alone — emissions under the client name come
 # back `{}` (live spark A/B 2026-10-06), so notice, redirect, and steer
 # all point shell commands at the alias, and the classifier rewrites it
-# back (translate_genuine_call).
-_ALIASES: tuple[tuple[str, str, str], ...] = (("exec_command", "shell", "command"),)
+# back (translate_genuine_call). `bash` covers the claude leg (live
+# 2026-10-08: its Bash requires exactly ["command"], the same verbatim
+# key genuine `shell` carries — 7x text-only turns until the spark-
+# proven directive fired there too); `exec_command` covers the
+# codex-plain spark leg.
+_ALIASES: tuple[tuple[str, str, str], ...] = (
+    ("exec_command", "shell", "command"),
+    ("bash", "shell", "command"),
+)
 
 
 def build_tool_notice(
@@ -912,7 +919,7 @@ def build_tool_notice(
             tool = next((t for t in named if t.name.lower() == client_lower), None)
             if tool is None or tool.kind != "function":
                 continue
-            if not _is_cmd_shaped(tool):
+            if not _is_shell_runner(tool):
                 continue
             aliased.add(client_lower)
             alias_lines.append(
@@ -1051,13 +1058,29 @@ def build_tool_notice(
     return "\n".join(lines)
 
 
+def _is_shell_runner(tool: ToolDef) -> bool:
+    """True when a client tool runs shell commands under one key.
+
+    Either schema shape qualifies: `cmd` (spark `exec_command`) or
+    verbatim `command` (claude `Bash`, whose required ["command"]
+    matches genuine `shell` 1:1 — live 2026-10-08). The alias-row
+    match itself stays exact-name (each _ALIASES row names its client),
+    so per-name precision is unchanged — this only admits the second
+    runner shape into the gate. Pure helper for the alias gate (notice
+    directive, redirect, and steer sanction).
+    """
+    required = (tool.parameters or {}).get("required") or []
+    return "cmd" in set(required) or "command" in set(required)
+
+
 def _is_cmd_shaped(tool: ToolDef) -> bool:
     """True when a client tool is the `shell` -> `cmd` rewrite target.
 
     Same contract as _translate_genuine_args("shell", ...): a cmd key
     among the required keys (exact {"cmd"} or a superset — extra
     required keys ride the sketch verbatim and the strict check stays
-    the source of truth). Pure helper for the notice alias gate.
+    the source of truth). Kept for the spark-only call sites; the
+    alias gate uses _is_shell_runner (both shapes). Pure helper.
     """
     required = (tool.parameters or {}).get("required") or []
     return "cmd" in set(required)

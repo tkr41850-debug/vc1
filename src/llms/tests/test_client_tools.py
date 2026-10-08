@@ -617,6 +617,46 @@ def test_notice_shell_directive_plain_leg():
     assert "shell" not in head.split("the default tools")[1].split("are NOT")[0]
 
 
+def test_notice_shell_directive_claude_bash_runner():
+    # Live claude 2026-10-08: 7x upstream-200 text-only turns ("I'll
+    # run the echo command via Bash") while spark passes byte-exact.
+    # Root cause: outbound is genuine-12-only, so the client `Bash`
+    # has no wire schema — and the spark-proven `shell` directive
+    # never fired on the claude leg because _ALIASES matched only
+    # `exec_command`, which the 23-tool capture never declares. The
+    # notice named `Bash` with a call sketch the model cannot fill
+    # (the exact spark A/B failure shape) and never named the
+    # wire-offered `shell`. The notice must direct shell commands at
+    # upstream `shell` and demote `Bash` to a pointer — the classifier
+    # rewrites `shell` onto `Bash` via the compat row.
+    import json as _json
+
+    from llms.proxy.client_tools import (
+        build_tool_notice,
+        has_nested_exec_channel,
+    )
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+
+    with open("/home/uqmm/.claude/jobs/8c5ef74f/tmp/claude-schema.jsonl") as f:
+        body = _json.loads(f.readline())["body"]
+    from llms.proxy.ir import ToolDef as _ToolDef
+
+    claude = tuple(
+        _ToolDef(t["name"], t.get("description", ""), t.get("input_schema", {}))
+        for t in body["tools"]
+    )
+    # Production wiring: plain-function legs get the directive.
+    notice = build_tool_notice(
+        claude, GENUINE_TOOL_NAMES, shell_alias=not has_nested_exec_channel(claude)
+    )
+    assert "- 'shell': run every shell command as" in notice
+    assert '"command"' in notice
+    assert "EITHER" not in notice
+    bash_line = next(l for l in notice.split("\n") if l.startswith("- 'Bash'"))
+    assert "do NOT call it directly" in bash_line
+    assert "Call as" not in bash_line
+
+
 def test_notice_ban_exempts_table_rows():
     # Live claude 2026-10-08: the header banned read/shell/write/edit
     # ("never call them") while the compat table translates those
