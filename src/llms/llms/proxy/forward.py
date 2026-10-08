@@ -1236,24 +1236,25 @@ async def translate_streaming(
     {"tools": client_tools_tuple, "genuine": genuine_names_tuple,
     "family": compat family}. Deltas accumulate per call id on the
     emitter (a tool_use block opens on the FIRST chunk and the CLI
-    folds every following partial_json chunk); emitting the rename
-    only when the full payload has arrived would leave the genuine
-    name + partial genuine args already serialized downstream with
-    no way to retract them. So the rename applies to the FIRST
-    ToolArgsDelta chunk of a genuine call instead: the call id's
-    accumulated arguments are empty, the chunk carries the WHOLE
-    payload on every turn seen live (single delta, or done-only —
-    the parser seeds announced/done payloads into the first chunk),
-    and the translated name + full translated args serialize as the
-    block's first and only content. Live claude 2026-10-08: upstream
-    `shell` replayed verbatim downstream 15x while the CLI's own
-    dispatcher answered `No such tool available: shell` every time
-    (it only dispatches `Bash`). Same-name ownership wins (the
-    client's own declaration passes verbatim); untranslatable
+    folds every following partial_json chunk); emitting the call
+    before its full payload arrives would serialize the genuine name
+    + partial genuine args with no way to retract them. So a
+    genuine-named call's chunks BUFFER until the turn's done frame:
+    then the rename applies once with the FULL accumulated payload
+    (translate_genuine_call: shell->Bash, write->Write, ...) and a
+    single renamed ToolArgsDelta feeds the emitter — one `Write`
+    block carrying the translated args. Live claude 2026-10-08:
+    upstream `shell` replayed verbatim downstream 15x while the
+    CLI's own dispatcher answered `No such tool available: shell`
+    every time (it only dispatches `Bash`); genuine `write` split
+    across multiple deltas (long tmp path) defeated the earlier
+    first-chunk-only rename the same way. Same-name ownership wins
+    (the client's own declaration passes verbatim); untranslatable
     names/args pass verbatim (never guessed); genuine legs pass None
-    (exact fidelity). Multi-chunk genuine payloads (never seen live —
-    Zen emits one delta per call) pass verbatim rather than risk a
-    half-renamed block.
+    (exact fidelity). Client-cased emissions (`bash` for declared
+    `Bash`) normalize to the declared casing immediately (no
+    buffering — the payload shape is already the client's own);
+    text deltas stream through untouched (no buffering delay).
     """
     from llms.proxy.ir import StreamDone, ToolArgsDelta
     from llms.proxy.stream_translate import (
@@ -1266,7 +1267,11 @@ async def translate_streaming(
     emitter = STREAM_EMITTERS[ingress](trace_id, model)
     framer = SseFramer()
     seen_done = None
-    _renamed_calls: set[str] = set()
+    # Buffered genuine-named call chunks: call_id -> list[ToolArgsDelta].
+    # Flushed (renamed or verbatim) at the turn's done frame. Text and
+    # non-genuine deltas never buffer — they emit immediately.
+    _buffered: dict[str, list] = {}
+    _buffered_names: dict[str, str] = {}
     if to_client is not None:
         from llms.proxy.client_tools import (
             nested_tool_defs as _to_client_nested,
@@ -1292,46 +1297,63 @@ async def translate_streaming(
         }
         _to_client_family = to_client.get("family", "unknown")
 
-    def _maybe_rename(delta):
-        # First-chunk genuine->client rename (see docstring): only the
-        # call's first ToolArgsDelta chunk is eligible (the emitter
-        # has serialized nothing for the call yet), and only when the
-        # chunk carries the whole payload (every live turn: one delta
-        # with the full JSON object). Later chunks of an already
-        # renamed call pass through (their name already rides the
-        # renamed block); chunks of a call that failed translation
-        # pass verbatim (fail open, never guessed).
-        if to_client is None or not isinstance(delta, ToolArgsDelta):
-            return delta
-        if delta.call_id in _renamed_calls:
-            return delta
-        name = parser.names.get(delta.call_id, delta.name) or delta.name
+    def _flush_buffered(call_id: str) -> list[bytes]:
+        # Rename one buffered genuine call with its FULL accumulated
+        # payload, then emit as a single renamed chunk. Failure at any
+        # step replays the original chunks verbatim (fail open — the
+        # downstream sees exactly what upstream sent).
+        chunks = _buffered.pop(call_id, [])
+        name = _buffered_names.pop(call_id, "")
+        if not chunks:
+            return []
         lowered = name.lower() if isinstance(name, str) else ""
-        if lowered not in _to_client_genuine:
-            return delta
-        chunk = delta.args_chunk or ""
+        full = "".join(c.args_chunk or "" for c in chunks)
         try:
             translated = _to_client_translate(
                 lowered,
-                chunk,
+                full,
                 _to_client_owned,
                 _to_client_defs,
                 _to_client_family,
                 _to_client_tools,
             )
         except Exception:
-            return delta
+            translated = None
         if translated is None:
-            return delta
+            out: list[bytes] = []
+            for c in chunks:
+                out.extend(emitter.feed_delta(c))
+            return out
         declared, new_args = translated
-        _renamed_calls.add(delta.call_id)
         logger.info(
             "[%s] streaming genuine->client rename %s -> %s",
             trace_id,
             lowered,
             declared,
         )
-        return ToolArgsDelta(delta.call_id, declared, new_args)
+        return emitter.feed_delta(ToolArgsDelta(call_id, declared, new_args))
+
+    def _maybe_buffer(delta):
+        # Genuine-named ToolArgsDelta chunks buffer until the done
+        # frame (see docstring); client-cased emissions normalize to
+        # the declared casing immediately; everything else emits at
+        # once. Returns None when buffered (nothing to emit yet), else
+        # the delta (possibly casing-normalized) to emit now.
+        if to_client is None or not isinstance(delta, ToolArgsDelta):
+            return delta
+        name = parser.names.get(delta.call_id, delta.name) or delta.name
+        lowered = name.lower() if isinstance(name, str) else ""
+        if lowered in _to_client_genuine:
+            _buffered.setdefault(delta.call_id, []).append(delta)
+            _buffered_names.setdefault(delta.call_id, name)
+            return None
+        declared = _to_client_owned.get(lowered)
+        if declared is not None and declared != name:
+            # Client-owned name, wrong casing: normalize (the fold /
+            # synthesize classifier applies the same converted casing;
+            # args are already the client's own shape — untouched).
+            return ToolArgsDelta(delta.call_id, declared, delta.args_chunk or "")
+        return delta
 
     def _run_payloads(payloads: list[str]) -> list[bytes]:
         nonlocal seen_done
@@ -1339,9 +1361,13 @@ async def translate_streaming(
         for payload in payloads:
             for delta in parser.feed_payload(payload):
                 if isinstance(delta, StreamDone):
+                    for _cid in list(_buffered):
+                        out.extend(_flush_buffered(_cid))
                     seen_done = delta
                 else:
-                    delta = _maybe_rename(delta)
+                    delta = _maybe_buffer(delta)
+                    if delta is None:
+                        continue
                 out.extend(emitter.feed_delta(delta))
         return out
 
@@ -1367,6 +1393,10 @@ async def translate_streaming(
         if terminal is not None:
             if seen_done is None:
                 seen_done = terminal
+            if isinstance(terminal, StreamDone):
+                for _cid in list(_buffered):
+                    for chunk in _flush_buffered(_cid):
+                        yield chunk
             for chunk in emitter.feed_delta(terminal):
                 yield chunk
     except BaseException:

@@ -798,3 +798,164 @@ def test_streaming_rename_genuine_shell_to_claude_bash():
         run_case({"tools": tools, "genuine": ("shell",), "family": "unknown"})
     )
     assert '"name":"shell"' in unknown or '"name": "shell"' in unknown
+
+
+def test_streaming_rename_buffers_multichunk_genuine_write():
+    """Multi-delta genuine payload renames after buffering (Write row).
+
+    Live claude 2026-10-08: the model emitted genuine `write` 3x with
+    a ~105-char payload (long tmp path) that Zen split across
+    multiple input deltas. The first-chunk-only rename translated
+    chunk 1 alone (partial JSON -> None) and passed the whole turn
+    verbatim — the CLI rejected `write` every time (it only
+    dispatches `Write`) and the probe ended FAIL: not created. The
+    fix buffers a genuine-named call's chunks until the turn's done
+    frame, then renames with the FULL payload: one `Write` block
+    carrying the translated args. Text-only turns and non-genuine
+    calls stream through untouched (no buffering delay).
+    """
+    import asyncio as _asyncio
+
+    import httpx as _httpx
+
+    from llms.proxy import forward as _forward
+    from tests.test_compat_table import _claude_tools
+
+    body = (
+        "event: response.output_item.added\n"
+        'data: {"type":"response.output_item.added","output_index":1,'
+        '"item":{"id":"c1","type":"function_call","name":"write",'
+        '"arguments":""}}\n\n'
+        "event: response.function_call_arguments.delta\n"
+        'data: {"type":"response.function_call_arguments.delta",'
+        '"output_index":1,"item_id":"c1",'
+        '"delta":"{\\"content\\": \\"hello-write\\", "}\n\n'
+        "event: response.function_call_arguments.delta\n"
+        'data: {"type":"response.function_call_arguments.delta",'
+        '"output_index":1,"item_id":"c1",'
+        '"delta":"\\"path\\": \\"a.txt\\"}"}\n\n'
+        "event: response.function_call_arguments.done\n"
+        'data: {"type":"response.function_call_arguments.done",'
+        '"output_index":1,"item_id":"c1","name":"write",'
+        '"arguments":"{\\"content\\": \\"hello-write\\", \\"path\\": \\"a.txt\\"}"}\n\n'
+        "event: response.completed\n"
+        'data: {"type":"response.completed","response":{"id":"r1",'
+        '"status":"completed","usage":{"input_tokens":1,'
+        '"output_tokens":1}}}\n\n'
+    )
+
+    async def handler(request):
+        return _httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def run_case(to_client):
+        client = _httpx.AsyncClient(transport=_httpx.MockTransport(handler))
+        req = client.build_request("POST", "http://x", json={"model": "m"})
+        upstream = await client.send(req, stream=True)
+        out = []
+        async for chunk in _forward.translate_streaming(
+            upstream,
+            "messages",
+            "responses",
+            "t1",
+            "m",
+            "responses",
+            None,
+            to_client=to_client,
+        ):
+            out.append(chunk)
+        return b"".join(out).decode()
+
+    tools = _claude_tools()
+    renamed = _asyncio.run(
+        run_case(
+            {
+                "tools": tools,
+                "genuine": ("shell", "read", "write", "edit"),
+                "family": "claude",
+            }
+        )
+    )
+    assert '"name": "Write"' in renamed or '"name":"Write"' in renamed
+    assert '"write"' not in renamed
+    assert "file_path" in renamed
+    # None to_client (genuine legs): today's verbatim behavior.
+    verbatim = _asyncio.run(run_case(None))
+    assert '"name":"write"' in verbatim or '"name": "write"' in verbatim
+
+
+def test_streaming_normalizes_client_tool_casing():
+    """A client-named emission normalizes to the declared casing.
+
+    The model may emit the client's own tool under a different
+    casing (`bash` for declared `Bash`) — against the genuine overlay
+    in spirit (not an upstream-offered name) but undispatchable as-is
+    (the CLI matches its declarations exactly). The streaming leg
+    normalizes such emissions onto the declared casing mid-stream
+    (same converted-casing the classifier applies on the fold /
+    synthesize paths): name-only, args untouched, immediate (no
+    buffering — the payload shape is already the client's own).
+    Already-correct casings pass through untouched.
+    """
+    import asyncio as _asyncio
+
+    import httpx as _httpx
+
+    from llms.proxy import forward as _forward
+    from tests.test_compat_table import _claude_tools
+
+    body = (
+        "event: response.output_item.added\n"
+        'data: {"type":"response.output_item.added","output_index":1,'
+        '"item":{"id":"c1","type":"function_call","name":"bash",'
+        '"arguments":""}}\n\n'
+        "event: response.function_call_arguments.delta\n"
+        'data: {"type":"response.function_call_arguments.delta",'
+        '"output_index":1,"item_id":"c1",'
+        '"delta":"{\\"command\\":\\"echo hi\\"}"}\n\n'
+        "event: response.completed\n"
+        'data: {"type":"response.completed","response":{"id":"r1",'
+        '"status":"completed","usage":{"input_tokens":1,'
+        '"output_tokens":1}}}\n\n'
+    )
+
+    async def handler(request):
+        return _httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def run_case(to_client):
+        client = _httpx.AsyncClient(transport=_httpx.MockTransport(handler))
+        req = client.build_request("POST", "http://x", json={"model": "m"})
+        upstream = await client.send(req, stream=True)
+        out = []
+        async for chunk in _forward.translate_streaming(
+            upstream,
+            "messages",
+            "responses",
+            "t1",
+            "m",
+            "responses",
+            None,
+            to_client=to_client,
+        ):
+            out.append(chunk)
+        return b"".join(out).decode()
+
+    tools = _claude_tools()
+    tc = {
+        "tools": tools,
+        "genuine": ("shell", "read", "write", "edit"),
+        "family": "claude",
+    }
+    normalized = _asyncio.run(run_case(tc))
+    assert '"name": "Bash"' in normalized or '"name":"Bash"' in normalized
+    assert "echo hi" in normalized
+    # None to_client: verbatim (today's behavior for genuine legs).
+    verbatim = _asyncio.run(run_case(None))
+    assert '"name":"bash"' in verbatim or '"name": "bash"' in verbatim
