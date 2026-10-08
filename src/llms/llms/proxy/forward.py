@@ -965,9 +965,25 @@ async def fold_and_steer_streaming(
                 client_tools,
                 genuine_names,
             )
+            # Probe evidence needs the steered payload, not just the
+            # budget line (live spark stress 2026-10-08: two tail-check
+            # fail-closeds with zero loop steers — the first-turn fold
+            # was clean, so the dead call only exists in this tail).
+            # Same detail shape as the loop steer line (name + payload
+            # prefix, truncated — a patch payload runs kilobytes).
+            _tail_detail = sorted(
+                {
+                    str(c.get("name", ""))
+                    + " "
+                    + str(c.get("arguments", "") or c.get("input", ""))[:200]
+                    for c in _tail_steer
+                    if c.get("name")
+                }
+            )
             logger.warning(
-                "[%s] streaming steer budget exhausted; failing closed",
+                "[%s] streaming steer budget exhausted; failing closed (tail %s)",
                 trace_id,
+                _tail_detail,
             )
             _steer_failed = True
             _steer_terminal = list(
