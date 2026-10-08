@@ -630,6 +630,92 @@ def test_streaming_fold_steers_undeclared_call(tmp_path):
     assert len(seen) == 2
 
 
+def test_streaming_fold_repeat_prefixed_call_fails_closed_fast():
+    """A namespaced repeat fails closed on the second steer, not the third.
+
+    Live codex 2026-10-08 (:8789 proxy log): the model emits
+    `default.view_image {}` (empty args, client declares `view_image`
+    requiring `path`), gets the redirect, and re-emits the identical
+    call — 3 steers per trace, then budget-exhausted fail-closed, 5
+    traces in a row. The repeat guard must catch the second emission
+    and emit the redirect as a terminal turn: one wasted re-request,
+    not two. The guard compares the bare call name against names
+    parsed from redirect text, so a `default.`-prefixed emission must
+    match its own redirect (full emitted form stored, bare compared
+    never fires).
+    """
+    import asyncio as _asyncio
+
+    import httpx as _httpx
+
+    from llms.proxy import forward as _forward
+    from llms.proxy.ir import ToolDef
+
+    viewer = ToolDef(
+        "view_image",
+        "View an image",
+        {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    )
+
+    def _turn(call_id, resp_id):
+        return (
+            "event: response.output_item.added\n"
+            'data: {"type":"response.output_item.added","output_index":1,'
+            f'"item":{{"id":"{call_id}","type":"function_call",'
+            '"name":"default.view_image","arguments":""}}\n\n'
+            "event: response.function_call_arguments.done\n"
+            'data: {"type":"response.function_call_arguments.done",'
+            f'"output_index":1,"item_id":"{call_id}","name":"default.view_image",'
+            '"arguments":"{}"}\n\n'
+            "event: response.completed\n"
+            f'data: {{"type":"response.completed","response":{{"id":"{resp_id}",'
+            '"status":"completed","usage":{"input_tokens":1,'
+            '"output_tokens":1}}}\n\n'
+        )
+
+    seen: list = []
+
+    async def handler(request):
+        seen.append(request.content.decode())
+        return _httpx.Response(
+            200,
+            content=_turn(f"c{len(seen)}", f"r{len(seen)}").encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def scenario():
+        client = _httpx.AsyncClient(transport=_httpx.MockTransport(handler))
+        req = client.build_request("POST", "http://x", json={"model": "m"})
+        upstream = await client.send(req, stream=True)
+        out = []
+        async for chunk in _forward.fold_and_steer_streaming(
+            upstream,
+            client=client,
+            url="http://x",
+            headers={},
+            outbound={"model": "m", "input": []},
+            trace_id="t-view",
+            client_names={"view_image"},
+            client_tools=(viewer,),
+        ):
+            out.append(chunk)
+        return b"".join(out).decode()
+
+    raw = _asyncio.run(scenario())
+    # First steer re-requests (1 upstream + 1 re-request = 2 calls);
+    # the identical repeat fails closed WITHOUT a third call.
+    assert len(seen) == 2
+    # No dead call leaks downstream: the terminal carries the
+    # redirect text, not a dispatchable function_call.
+    assert "without its required argument(s): path" in raw
+    assert '"name":"default.view_image"' not in raw
+    assert '"name": "default.view_image"' not in raw
+
+
 def test_streaming_fold_first_turn_overflow_passes_through():
     """First-turn collect past the budget: prefix replay + tap remainder.
 

@@ -462,6 +462,12 @@ async def fold_and_steer_streaming(
     except Exception:
         pass
     _steer_failed = False
+    # Repeat-guard trip flag: the inner `for call in steer` loop below
+    # can only `break` out of itself — execution then falls through to
+    # the re-request code after the loop. Without this flag the guard
+    # would set _steer_failed yet STILL re-request upstream (and loop
+    # again), burning the turns it was meant to save.
+    _steer_repeat = False
     # Terminal redirect text when the model repeats a steered call it
     # already saw corrected (set in the loop below): emitted as a real
     # model turn so the client surfaces the correction instead of the
@@ -766,7 +772,21 @@ async def fold_and_steer_streaming(
             ):
                 _out = _line["output"]
                 if _out.startswith("Tool '") and _out != _out[:8]:
-                    seen_redirects.add(_out.split("'", 2)[1].lower())
+                    # Bare-name keying (same ownership key as the
+                    # classifier): redirect text names the exact emitted
+                    # form (`default.view_image`) while the loop
+                    # compares the split bare name (`view_image`) —
+                    # storing the full form never matches and the
+                    # repeat guard silently never fires (live codex
+                    # 2026-10-08: 3x identical steers per trace, then
+                    # budget-exhausted fail-closed, 5 traces running).
+                    _seen_name = _out.split("'", 2)[1]
+                    _seen_ns, _seen_bare = _split_name(_seen_name)
+                    seen_redirects.add(
+                        _seen_bare.lower()
+                        if isinstance(_seen_bare, str)
+                        else _seen_name.lower()
+                    )
         for call in steer:
             call_id = str(call.get("call_id") or call.get("id") or "")
             args = call.get("arguments", "")
@@ -798,6 +818,7 @@ async def fold_and_steer_streaming(
 
                 lines = []
                 _steer_failed = True
+                _steer_repeat = True
                 _steer_terminal = list(
                     _emit_sse(
                         [_Text(redirect), _Done(status="completed")], trace_id, ""
@@ -821,6 +842,10 @@ async def fold_and_steer_streaming(
                     "output": redirect,
                 }
             )
+        # Repeat guard tripped above: the terminal is ready — skip the
+        # re-request the inner break could not (it only leaves the for).
+        if _steer_repeat:
+            break
         outbound = dict(outbound, input=list(outbound.get("input", [])) + followups)
         req = client.build_request("POST", url, headers=headers, json=outbound)
         req.extensions["timeout"] = {
