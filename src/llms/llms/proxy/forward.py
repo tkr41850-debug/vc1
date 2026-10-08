@@ -1217,6 +1217,7 @@ async def translate_streaming(
     model: str,
     stream_ingress: str | None,
     usage_sink=None,
+    to_client: dict | None = None,
 ):
     """Translate upstream SSE incrementally as frames arrive (pure asyncio).
 
@@ -1229,8 +1230,32 @@ async def translate_streaming(
 
     Dialect note: the parser reads the UPSTREAM (egress) dialect and the
     emitter writes the DOWNSTREAM (ingress) dialect.
+
+    `to_client` (None = verbatim names) renames genuine-overlay tool
+    calls onto the client's own declarations mid-stream:
+    {"tools": client_tools_tuple, "genuine": genuine_names_tuple,
+    "family": compat family}. Deltas accumulate per call id on the
+    emitter (a tool_use block opens on the FIRST chunk and the CLI
+    folds every following partial_json chunk); emitting the rename
+    only when the full payload has arrived would leave the genuine
+    name + partial genuine args already serialized downstream with
+    no way to retract them. So the rename applies to the FIRST
+    ToolArgsDelta chunk of a genuine call instead: the call id's
+    accumulated arguments are empty, the chunk carries the WHOLE
+    payload on every turn seen live (single delta, or done-only —
+    the parser seeds announced/done payloads into the first chunk),
+    and the translated name + full translated args serialize as the
+    block's first and only content. Live claude 2026-10-08: upstream
+    `shell` replayed verbatim downstream 15x while the CLI's own
+    dispatcher answered `No such tool available: shell` every time
+    (it only dispatches `Bash`). Same-name ownership wins (the
+    client's own declaration passes verbatim); untranslatable
+    names/args pass verbatim (never guessed); genuine legs pass None
+    (exact fidelity). Multi-chunk genuine payloads (never seen live —
+    Zen emits one delta per call) pass verbatim rather than risk a
+    half-renamed block.
     """
-    from llms.proxy.ir import StreamDone
+    from llms.proxy.ir import StreamDone, ToolArgsDelta
     from llms.proxy.stream_translate import (
         STREAM_EMITTERS,
         STREAM_PARSERS,
@@ -1241,6 +1266,72 @@ async def translate_streaming(
     emitter = STREAM_EMITTERS[ingress](trace_id, model)
     framer = SseFramer()
     seen_done = None
+    _renamed_calls: set[str] = set()
+    if to_client is not None:
+        from llms.proxy.client_tools import (
+            nested_tool_defs as _to_client_nested,
+        )
+        from llms.proxy.client_tools import (
+            owned_tool_names as _to_client_owned,
+        )
+        from llms.proxy.client_tools import (
+            translate_genuine_call as _to_client_translate,
+        )
+
+        _to_client_tools = to_client.get("tools", ()) or ()
+        _to_client_owned = _to_client_owned(_to_client_tools)
+        _to_client_defs = {t.name.lower(): t for t in _to_client_tools if t.name}
+        try:
+            _to_client_defs.update(_to_client_nested(_to_client_tools))
+        except Exception:
+            pass
+        _to_client_genuine = {
+            g.lower()
+            for g in (to_client.get("genuine", ()) or ())
+            if isinstance(g, str)
+        }
+        _to_client_family = to_client.get("family", "unknown")
+
+    def _maybe_rename(delta):
+        # First-chunk genuine->client rename (see docstring): only the
+        # call's first ToolArgsDelta chunk is eligible (the emitter
+        # has serialized nothing for the call yet), and only when the
+        # chunk carries the whole payload (every live turn: one delta
+        # with the full JSON object). Later chunks of an already
+        # renamed call pass through (their name already rides the
+        # renamed block); chunks of a call that failed translation
+        # pass verbatim (fail open, never guessed).
+        if to_client is None or not isinstance(delta, ToolArgsDelta):
+            return delta
+        if delta.call_id in _renamed_calls:
+            return delta
+        name = parser.names.get(delta.call_id, delta.name) or delta.name
+        lowered = name.lower() if isinstance(name, str) else ""
+        if lowered not in _to_client_genuine:
+            return delta
+        chunk = delta.args_chunk or ""
+        try:
+            translated = _to_client_translate(
+                lowered,
+                chunk,
+                _to_client_owned,
+                _to_client_defs,
+                _to_client_family,
+                _to_client_tools,
+            )
+        except Exception:
+            return delta
+        if translated is None:
+            return delta
+        declared, new_args = translated
+        _renamed_calls.add(delta.call_id)
+        logger.info(
+            "[%s] streaming genuine->client rename %s -> %s",
+            trace_id,
+            lowered,
+            declared,
+        )
+        return ToolArgsDelta(delta.call_id, declared, new_args)
 
     def _run_payloads(payloads: list[str]) -> list[bytes]:
         nonlocal seen_done
@@ -1249,6 +1340,8 @@ async def translate_streaming(
             for delta in parser.feed_payload(payload):
                 if isinstance(delta, StreamDone):
                     seen_done = delta
+                else:
+                    delta = _maybe_rename(delta)
                 out.extend(emitter.feed_delta(delta))
         return out
 
@@ -1503,6 +1596,22 @@ async def forward(
                     media_type="text/event-stream",
                 )
             else:
+                # Cross-dialect streaming (messages/chat legs): rename
+                # genuine-overlay calls onto the client's own declarations
+                # mid-stream (same table as the fold/synthesize paths).
+                # Genuine legs ride an empty genuine_names tuple (exact
+                # fidelity — pipeline passes () for genuine opencode);
+                # unknown families degrade to verbatim (only `*` rows
+                # would apply, and those never rename onto client
+                # tools). No tools declared: verbatim (nothing to map
+                # onto).
+                _to_client = None
+                if genuine_names and client_tool_defs:
+                    _to_client = {
+                        "tools": client_tool_defs,
+                        "genuine": genuine_names,
+                        "family": family,
+                    }
                 response = StreamingResponse(
                     translate_streaming(
                         upstream,
@@ -1512,6 +1621,7 @@ async def forward(
                         model,
                         stream_ingress,
                         stream_usage_sink,
+                        to_client=_to_client,
                     ),
                     media_type="text/event-stream",
                 )

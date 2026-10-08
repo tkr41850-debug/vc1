@@ -998,6 +998,53 @@ def test_claude_rows_translate_genuine_onto_native_tools():
     assert passed[0]["__translated_args__"] == '{"command": "echo tool-ok"}'
 
 
+def test_synthesized_messages_tool_use_feeds_classifier():
+    # Live claude 2026-10-08: the CLI emitted `shell` tool_use blocks
+    # 11x and got `No such tool available: shell` from its OWN
+    # dispatcher each time — the proxy replayed the genuine name
+    # downstream. Root cause: on the messages leg the synthesize path
+    # folds upstream SSE into a messages JSON body (content[] with
+    # tool_use, NO output[]), and `_genuine_calls_in` only scanned
+    # `output[]` — ([], []), silently dropped, raw name rode
+    # downstream. A synthesized messages body carrying a genuine call
+    # must classify like a wire responses body (translate onto the
+    # client tool, same markers the replay paths apply).
+    from fastapi.responses import JSONResponse
+
+    from llms.proxy.compat import CLAUDE
+    from llms.proxy.pipeline import _genuine_calls_in
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+
+    tools = _claude_tools()
+    msg_body = {
+        "id": "msg_x",
+        "type": "message",
+        "role": "assistant",
+        "model": "m",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "shell",
+                "input": {"command": "echo shape-ok"},
+            }
+        ],
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+    passed, steer = _genuine_calls_in(
+        JSONResponse(status_code=200, content=msg_body),
+        {"Bash"},
+        client_tools=tools,
+        genuine_names=GENUINE_TOOL_NAMES,
+        family=CLAUDE,
+        trace_id="t1",
+    )
+    assert steer == []
+    assert [c["name"] for c in passed] == ["Bash"]
+    assert passed[0]["__translated_args__"] == '{"command": "echo shape-ok"}'
+
+
 def test_schema_audit_dropped_keys_pinned():
     # Task 8 schema audit (vs zen_tools.py GENUINE_TOOLS, 2026-10-07):
     # every compat row drops or refuses specific genuine keys. This

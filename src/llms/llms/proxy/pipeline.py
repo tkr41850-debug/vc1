@@ -558,7 +558,34 @@ def _genuine_calls_in(
         return [], []
     calls = []
     lowered = {n.lower() for n in client_names if isinstance(n, str)}
-    for item in payload.get("output", []) or []:
+    # Synthesized messages-leg bodies carry the model's calls as
+    # content[] tool_use parts (input dict, id, name) — no output[]
+    # exists. Normalize those into classifier entries (arguments as
+    # the JSON string the fold entries carry) so a genuine emission
+    # classifies exactly like its wire-responses twin; otherwise the
+    # call drops silently and the raw genuine name rides downstream
+    # (live claude 2026-10-08: 11x `shell` tool_use answered `No such
+    # tool available: shell` by the CLI's own dispatcher). Text and
+    # thinking parts carry no call and never enter the classifier.
+    items: list = list(payload.get("output", []) or [])
+    for part in payload.get("content", []) or []:
+        if not isinstance(part, dict) or part.get("type") != "tool_use":
+            continue
+        # input arrives as parsed JSON upstream, so a dict check is the
+        # only guard needed; anything else is skipped, never guessed.
+        _input = part.get("input", {})
+        if not isinstance(_input, dict):
+            continue
+        items.append(
+            {
+                "type": "function_call",
+                "call_id": str(part.get("id", "")),
+                "id": str(part.get("id", "")),
+                "name": str(part.get("name", "")),
+                "arguments": json.dumps(_input),
+            }
+        )
+    for item in items:
         # Wire Custom items (non-streaming upstream shape: type
         # custom_tool_call, payload in `input`) feed the classifier
         # like the streaming fold's entries — the Custom-route branch
@@ -705,6 +732,21 @@ async def _steer_genuine_calls(
             except Exception:
                 break
             by_id = {}
+            # Messages-leg bodies carry calls as content[] tool_use
+            # parts (no output[]); index those too so a classifier
+            # rewrite (genuine->client rename + translated args) lands
+            # on the downstream part instead of replaying the raw
+            # genuine name the CLI's own dispatcher rejects (live
+            # claude 2026-10-08: 11x `No such tool available:
+            # shell`). The part's `input` dict takes the translated
+            # arguments as parsed JSON (messages input is an object,
+            # not a string); the id key matches the classifier entry.
+            for part in payload.get("content", []) or []:
+                if not isinstance(part, dict) or part.get("type") != "tool_use":
+                    continue
+                key = str(part.get("id", ""))
+                if key:
+                    by_id[key] = part
             for item in payload.get("output", []) or []:
                 # Wire Custom items carry the executable payload in
                 # `input` (no call_id when the upstream announce lacks
@@ -741,7 +783,18 @@ async def _steer_genuine_calls(
                     # namespace for the dispatch replay.
                     translated = call.pop("__translated_args__", None)
                     if isinstance(translated, str):
-                        by_id[key]["arguments"] = translated
+                        if by_id[key].get("type") == "tool_use":
+                            # Messages-leg part: input is a JSON object,
+                            # not a string — parse the translated
+                            # arguments (fall back to {} on failure;
+                            # never a string where the CLI parses an
+                            # object).
+                            try:
+                                by_id[key]["input"] = json.loads(translated)
+                            except Exception:
+                                by_id[key]["input"] = {}
+                        else:
+                            by_id[key]["arguments"] = translated
                     elif "arguments" in call and isinstance(call["arguments"], str):
                         by_id[key]["arguments"] = call["arguments"]
                     # The classifier split code-mode `ns__name` to the

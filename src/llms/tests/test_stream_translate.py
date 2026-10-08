@@ -707,3 +707,94 @@ def test_streaming_fold_first_turn_overflow_passes_through():
     assert len(seen) == 1
     assert seen[0].input_tokens == 2
     assert seen[0].output_tokens == 3
+
+
+def test_streaming_rename_genuine_shell_to_claude_bash():
+    """Streaming translate renames genuine `shell` onto client `Bash`.
+
+    Live claude 2026-10-08: upstream `shell` replayed verbatim
+    downstream 15x while the CLI's own dispatcher answered `No such
+    tool available: shell` every time (it only dispatches `Bash`) —
+    the file-write probe ended FAIL: not created. The rename applies
+    to the call's FIRST ToolArgsDelta chunk (the emitter opens the
+    tool_use block on it and the CLI folds every following
+    partial_json chunk, so a later rename cannot retract the genuine
+    name + partial genuine args already serialized). Same-name
+    ownership wins, untranslatable names/args pass verbatim, and
+    None to_client keeps today's verbatim behavior (genuine legs).
+    """
+    import asyncio as _asyncio
+
+    import httpx as _httpx
+
+    from llms.proxy import forward as _forward
+    from tests.test_compat_table import _claude_tools
+
+    body = (
+        "event: response.output_item.added\n"
+        'data: {"type":"response.output_item.added","output_index":1,'
+        '"item":{"id":"c1","type":"function_call","name":"shell",'
+        '"arguments":""}}\n\n'
+        "event: response.function_call_arguments.delta\n"
+        'data: {"type":"response.function_call_arguments.delta",'
+        '"output_index":1,"item_id":"c1",'
+        '"delta":"{\\"command\\":\\"echo shape-ok\\"}"}\n\n'
+        "event: response.function_call_arguments.done\n"
+        'data: {"type":"response.function_call_arguments.done",'
+        '"output_index":1,"item_id":"c1","name":"shell",'
+        '"arguments":"{\\"command\\":\\"echo shape-ok\\"}"}\n\n'
+        "event: response.completed\n"
+        'data: {"type":"response.completed","response":{"id":"r1",'
+        '"status":"completed","usage":{"input_tokens":1,'
+        '"output_tokens":1}}}\n\n'
+    )
+
+    async def handler(request):
+        return _httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def run_case(to_client):
+        client = _httpx.AsyncClient(transport=_httpx.MockTransport(handler))
+        req = client.build_request("POST", "http://x", json={"model": "m"})
+        upstream = await client.send(req, stream=True)
+        out = []
+        async for chunk in _forward.translate_streaming(
+            upstream,
+            "messages",
+            "responses",
+            "t1",
+            "m",
+            "responses",
+            None,
+            to_client=to_client,
+        ):
+            out.append(chunk)
+        return b"".join(out).decode()
+
+    tools = _claude_tools()
+    renamed = _asyncio.run(
+        run_case(
+            {
+                "tools": tools,
+                "genuine": ("shell", "read", "write", "edit"),
+                "family": "claude",
+            }
+        )
+    )
+    assert '"name": "Bash"' in renamed or '"name":"Bash"' in renamed
+    assert '"shell"' not in renamed
+    assert '{\\"command\\": \\"echo shape-ok\\"}' in renamed.replace("\\\\", "\\") or (
+        "echo shape-ok" in renamed
+    )
+    # None to_client (genuine legs): today's verbatim behavior.
+    verbatim = _asyncio.run(run_case(None))
+    assert '"name":"shell"' in verbatim or '"name": "shell"' in verbatim
+    # Unknown family: no claude rows apply, verbatim (never a
+    # wrong-family rewrite).
+    unknown = _asyncio.run(
+        run_case({"tools": tools, "genuine": ("shell",), "family": "unknown"})
+    )
+    assert '"name":"shell"' in unknown or '"name": "shell"' in unknown
