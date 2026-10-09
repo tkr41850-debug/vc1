@@ -684,3 +684,65 @@ the earlier 1/5 was the 300s harness cap vs slow upstream, not
 translation); 53 codex-leg turns with zero guard trips and no new
 `no compat entry` name. No new proxy defect found — the stress loop
 is closed on this leg.
+
+### Round 13: mitm goal-leg — write-loop recurs with zero proxy involvement; no fix (2026-10-09)
+
+Setup: codex via :8080 and claude via :8081 through mitmdump
+reverse proxies onto :8790 (captures: mitm-codex 146 recs,
+mitm-claude 38, mitm-goal 116 — 300 total). Goal cell prompt:
+get_goal -> create_goal -> write goal-file.txt -> update_goal ->
+GOAL-DONE. Claude goal probe queued behind it to serialize quota
+(per the goal-in-claude ask; claude leg declares no goal tools, so
+the expectation is the GOAL-ABSENT / undeclared-name path).
+
+Results:
+- get_goal / create_goal: passthrough, steer=[] (traces
+  e94e6dc8a9bf, c6e5e53e5549). All 9 declared tools incl. the goal
+  trio present in req0.
+- write: every emission passthrough=[exec_command] steer=[]
+  (printf-argument shape live-confirmed again); file byte-exact
+  `goal-yes\n` (9 bytes, od-verified).
+- 185 `steer fold iter` verdicts total, ZERO `budget exhausted` /
+  `failing closed` / `stalled`; 4 non-empty steers, all `read` (no
+  codex-plain `read` row by design — generic steer, EXPECTED per
+  rounds 7/8/12).
+- History-echo census over 58 goal requests: get_goal x57,
+  create_goal x56, exec_command x162, update_goal x0, write x0.
+  Every genuine write replayed renamed; zero verbatim dead-name
+  echoes. Rename path hermetically pinned
+  (test_history_genuine_call_replays_translated,
+  test_history_genuine_write_replays_as_exec_channel_patch — both
+  green in re-stress).
+- The loop: the model re-emitted identical `write` ~50+ times and
+  never emitted update_goal (0 call verdicts; the 537 update_goal
+  log hits are declarations/gates). Its own turn text: "File write
+  used the wrong tool — redoing it with the genuine write tool."
+  Mechanism: renamed-history + empty success output (`Output:`
+  blank) reads as wrong-tool success, so it retries the genuine
+  name — which passes through transparently and succeeds again.
+  Model-side attribution gap; every proxy leg (translate ->
+  classify -> replay -> echo) verified correct. No proxy fix: a
+  successfully-executed repeating call is not a steer situation,
+  and this leg is genuine-opencode (exact fidelity — no notice
+  computed by design, pipeline.py:1297), so notice guidance cannot
+  apply here either.
+- Quota, not proxy, ended both cells: codex goal cell RC=1 FAIL
+  (file correct, no GOAL-DONE — `429 Too Many Requests` in the
+  STDERR tail; 158 429s in the proxy log); claude goal probe T1
+  burned its 600s timeout against `429 FreeUsageLimitError`
+  (retry-after 60) — the claude goal-leg verdict is deferred to
+  the next quota window, not code-gated.
+- Non-goal mitm cells: codex cell file byte-exact `mitm-ok\n`
+  (driver hit the 900s cap on 429s, MITM-DONE unconfirmed —
+  harness-side); claude 3-turn session PASS clean (shell->Bash
+  rename, write->Write, MITM-CLAUDE-DONE).
+
+Hermetic re-stress: 32 passed across test_pipeline /
+test_client_tools / test_compat_table steer/guard/echo selections;
+1 failed — the known pre-existing missing claude-schema.jsonl
+fixture (same as round 12).
+
+Stability verdict: no new proxy defect across 300 captured records
+/ 185 verdicts. Guards idle throughout. The stress loop is closed
+on this leg; the one open item is quota-gated (claude goal-leg
+probe), not code-gated.
