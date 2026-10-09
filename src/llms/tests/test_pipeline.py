@@ -888,6 +888,69 @@ def test_overlay_case_variant_keeps_genuine_and_appends_client(app_client):
     assert next(t for t in tools if t.get("name") == "Read")["description"] == "mine"
 
 
+def test_classify_dotted_declaration_valid_calls_pass():
+    """Dotted-declared tools validate on the bare name.
+
+    A harness declaring `default.exec_command` (classic codex shape)
+    must pass valid calls — dotted, bare, and genuine-translated —
+    instead of steering them with a self-contradictory redirect naming
+    the same tool unavailable (live: every valid call steered, model
+    retried each audit step, repeat-guard fail-closed).
+    """
+    from llms.proxy.client_tools import (
+        client_tool_defs,
+        dispatchable_names,
+        owned_tool_names,
+    )
+    from llms.proxy.ir import ToolDef
+    from llms.proxy.pipeline import _classify_calls
+
+    runner = ToolDef(
+        "default.exec_command",
+        "run shell",
+        {"type": "object", "properties": {"cmd": {}}, "required": ["cmd"]},
+    )
+    reader = ToolDef(
+        "default.read",
+        "read file",
+        {"type": "object", "properties": {"path": {}}, "required": ["path"]},
+    )
+    client_tools = (runner, reader)
+    owned = owned_tool_names(client_tools)
+    defs = client_tool_defs(client_tools)
+    route = dispatchable_names(client_tools)
+    calls = [
+        {
+            "type": "function_call",
+            "call_id": "c1",
+            "name": "default.exec_command",
+            "arguments": '{"cmd": "cat /tmp/codex-audit/01_shell.txt"}',
+        },
+        {
+            "type": "function_call",
+            "call_id": "c2",
+            "name": "exec_command",
+            "arguments": '{"cmd": "cat f"}',
+        },
+        {
+            "type": "function_call",
+            "call_id": "c3",
+            "name": "shell",
+            "arguments": '{"command": "cat f"}',
+        },
+    ]
+    passed, steer = _classify_calls(
+        calls, owned, defs, route, client_tools, (), "codex-plain", "t"
+    )
+    assert steer == []
+    assert [c["name"] for c in passed] == [
+        "default.exec_command",
+        "default.exec_command",
+        "default.exec_command",
+    ]
+    assert "__route_namespace__" not in passed[0]
+
+
 def test_classify_namespaced_owned_call_passes_without_default_marker():
     """Code-mode `default.exec_command` classifies on the bare name and
     passes WITHOUT a route marker: the harness fills its own default

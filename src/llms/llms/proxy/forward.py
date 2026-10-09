@@ -497,13 +497,13 @@ async def fold_and_steer_streaming(
     _nested_lowered = {n.lower() for n in _owned if isinstance(n, str)}
     if _nested_lowered:
         lowered = _nested_lowered
-    _defs = {t.name.lower(): t for t in client_tools if t.name}
+    _defs = {}
     _route: dict = {}
     try:
+        from llms.proxy.client_tools import client_tool_defs as _client_defs
         from llms.proxy.client_tools import dispatchable_names as _route_names
-        from llms.proxy.client_tools import nested_tool_defs as _nested_defs
 
-        _defs.update(_nested_defs(client_tools))
+        _defs = _client_defs(client_tools)
         _route = _route_names(client_tools)
     except Exception:
         pass
@@ -1374,7 +1374,7 @@ async def translate_streaming(
     _buffered_names: dict[str, str] = {}
     if to_client is not None:
         from llms.proxy.client_tools import (
-            nested_tool_defs as _to_client_nested,
+            client_tool_defs as _to_client_defs_fn,
         )
         from llms.proxy.client_tools import (
             owned_tool_names as _to_client_owned,
@@ -1385,11 +1385,10 @@ async def translate_streaming(
 
         _to_client_tools = to_client.get("tools", ()) or ()
         _to_client_owned = _to_client_owned(_to_client_tools)
-        _to_client_defs = {t.name.lower(): t for t in _to_client_tools if t.name}
         try:
-            _to_client_defs.update(_to_client_nested(_to_client_tools))
+            _to_client_defs = _to_client_defs_fn(_to_client_tools)
         except Exception:
-            pass
+            _to_client_defs = {}
         _to_client_genuine = {
             g.lower()
             for g in (to_client.get("genuine", ()) or ())

@@ -14,6 +14,7 @@ from llms.proxy.admin_hub import get_hub
 from llms.proxy.affinity import bucket_for
 from llms.proxy.client_tools import (
     build_tool_notice,
+    client_tool_defs,
     convert_call_name,
     missing_required_keys,
     owned_tool_names,
@@ -612,11 +613,10 @@ def _genuine_calls_in(
         calls.append(item)
     if not client_tools:
         return [], calls
-    from llms.proxy.client_tools import dispatchable_names, nested_tool_defs
+    from llms.proxy.client_tools import dispatchable_names
 
     owned = owned_tool_names(client_tools)
-    defs = {t.name.lower(): t for t in client_tools if t.name}
-    defs.update(nested_tool_defs(client_tools))
+    defs = client_tool_defs(client_tools)
     return _classify_calls(
         calls,
         owned,
@@ -717,10 +717,7 @@ async def _steer_genuine_calls(
             trace_id=trace_id,
         )
         owned = owned_tool_names(client_tools)
-        defs = {t.name.lower(): t for t in client_tools if t.name}
-        from llms.proxy.client_tools import nested_tool_defs as _nested_defs
-
-        defs.update(_nested_defs(client_tools))
+        defs = client_tool_defs(client_tools)
         if passed and not steer_calls:
             # Every call is client-owned and valid: convert casing on the
             # response body so the client dispatches its own declarations.

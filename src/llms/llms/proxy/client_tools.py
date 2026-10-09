@@ -92,6 +92,33 @@ def _is_freeform_decl(decl: str) -> bool:
     return re.search(r"\(\s*input\s*:\s*string\s*\)", decl) is not None
 
 
+def client_tool_defs(tools: tuple[ToolDef, ...]) -> dict[str, ToolDef]:
+    """Lowered name -> ToolDef for classifier validation, bare-name keyed.
+
+    `owned_tool_names`/`dispatchable_names` key both the declared form
+    AND the bare name (the harness fills its default namespace when
+    absent, so both directions of the `default.` asymmetry resolve).
+    This map must agree: a dotted declaration (`default.exec_command`)
+    validates the lookup the classifier actually performs (bare
+    `exec_command`), otherwise every valid dotted-leg call falls
+    through validation to the steer path with a self-contradictory
+    redirect (live: "Tool 'default.exec_command' is not available...
+    Use one of these instead: default.exec_command"). The declared
+    form keys too (exact-name lookups elsewhere must not miss); the
+    bare key only fills when absent (first declaration wins).
+    Nested synthetic entries merge the same way.
+    """
+    defs: dict[str, ToolDef] = {}
+    for t in tools:
+        if t.name:
+            defs.setdefault(t.name.lower(), t)
+            _, bare = split_call_name(t.name)
+            if bare and bare.lower() not in defs:
+                defs[bare.lower()] = t
+    defs.update(nested_tool_defs(tools))
+    return defs
+
+
 def nested_tool_defs(tools: tuple[ToolDef, ...]) -> dict[str, ToolDef]:
     """Lowered nested-tool name -> synthetic ToolDef for validation.
 
