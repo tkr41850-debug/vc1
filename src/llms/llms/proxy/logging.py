@@ -61,7 +61,7 @@ def log_ingress(trace_id: str, path: str, body: dict) -> None:
 
 def log_upstream(trace_id: str, url: str, headers: dict, body: dict) -> None:
     try:
-        rendered = json.dumps(body)[:4000]
+        rendered = json.dumps(body)[:12000]
     except Exception:
         rendered = "<unserializable>"
     logger.info(
