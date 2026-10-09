@@ -631,3 +631,56 @@ exhausted` / stall / repeat lines. Cell 4 exercised the fixed path
 `exec_command`, no tail warning, file byte-exact `codex-ok`,
 `od -c` verified `0000011 / 9 bytes`). Affected-area hermetic: 155
 passed (2 pre-existing fixture failures excluded).
+
+### Round 12: heredoc shape was a silent no-op; printf-argument fix (2026-10-09)
+
+The `{"cmd": "<heredoc>"}` fix unblocked the tail (no more
+fail-closed) but the six tmux turns that followed still left
+`stress-b.txt` at 0 bytes with RC=0 — and the model looped
+re-emitting `write`, rationally. Exact repro via `/bin/bash -lc`
+showed why: `printf %s` with NO argument prints empty and NEVER
+reads stdin, so `printf %s > path <<'EOF'...` exits 0 having
+consumed nothing. The duplication loop on this leg was a
+success-with-empty-output retry, not a proxy ack bug: every one of
+the six "successful" turns did exactly nothing. Fix (045e5bc):
+`_write_to_shell_redirect` now emits
+`{"cmd": "printf '%s' '<content>' > <path>"}` — the content rides a
+single-quoted printf ARGUMENT (embedded quotes escape as `'\''`,
+byte-exact through bash; empty content writes an empty file, correct
+semantics). Hermetic: converter + `/bin/bash -lc` execution proof
+(plain/quotes/multiline/empty) + loop/tail agreement on
+single/multi/delta/done-only shapes; full suite 536 passed, 8 failed
+— all 8 `FileNotFoundError` on the absent
+`/home/uqmm/.claude/jobs/.../claude-schema.jsonl` capture fixture,
+pre-existing on HEAD (fails identically on the clean tree).
+
+Live on the printf-argument fix (tmux `codex-stress` session, :8790
+restarted on 045e5bc): 53 `steer fold iter` verdicts, ZERO
+`budget exhausted` / `failing closed` / `stalled` lines; every
+`write` turn `passthrough=[exec_command] steer=[]` and pane shows
+`/bin/bash -lc "printf '%s' 'betan' > ..."` succeeding with
+`stress-b.txt` non-empty (`od -c`: 6-byte `alphan`, 5-byte `betan`;
+later turns `beta\n` with trailing newline as emitted). Two `no
+compat entry: read (family=codex-plain)` lines — EXPECTED: no
+codex-plain `read` row ships by design (same wont-translate class as
+the round-7/8 luna log reviews); the lone steered `read` turn
+completed via generic steer.
+
+Session caveats (harness-side, not proxy defects): the stress
+prompt's `stress-step-1` / `stress-done` validators never existed on
+PATH (shell mangled the backticks/`\n` in the tmux prompt), so step 1
+exited 127 until PATH shims were installed mid-session (`STEP1-OK /
+EXIT:0` first observed after); the model drifted into off-task
+source-tree greps late in the run; the session died on upstream
+`429 Too Many Requests` (free-tier quota after ~339k tokens), never
+emitting step-4 `STRESS-DONE` — convergence of the full 5-step
+sequence was NOT observed, though every proxy-leg step (1–3) is
+green in isolation.
+
+Stability verdict: spark + claude verify cells PASS clean with
+guards idle; luna 900s rerun PASS byte-exact (`matrix-luna.txt`,
+CELL_RC=0; 26/27 turns via mechanism-13 rewrap, zero guard trips —
+the earlier 1/5 was the 300s harness cap vs slow upstream, not
+translation); 53 codex-leg turns with zero guard trips and no new
+`no compat entry` name. No new proxy defect found — the stress loop
+is closed on this leg.
