@@ -132,11 +132,7 @@ def test_anonymous_dialogue_without_tools_gets_genuine_tools(app_client):
     ]
 
 
-def test_anonymous_tooled_turn_sends_genuine_only(app_client):
-    # Outbound is genuine-12 ONLY: client extras never ride the wire
-    # (any one can fail the upstream validator and 400 the whole
-    # request — seen live as `tools[12].description` length on a codex
-    # session). The client tool lives in the notice instead.
+def test_anonymous_tooled_turn_sends_genuine_superset(app_client):
     from llms.proxy.zen_tools import GENUINE_TOOLS
 
     tc, seen = app_client
@@ -159,8 +155,10 @@ def test_anonymous_tooled_turn_sends_genuine_only(app_client):
     )
     assert r.status_code == 200
     sent_tools = seen["json"]["tools"]
-    assert [t["name"] for t in sent_tools] == [t["name"] for t in GENUINE_TOOLS]
-    assert sent_tools == GENUINE_TOOLS
+    assert [t["name"] for t in sent_tools[: len(GENUINE_TOOLS)]] == [
+        t["name"] for t in GENUINE_TOOLS
+    ]
+    assert sent_tools[-1]["name"] == "bash"
     # Client tool notice appends after client instructions.
     assert seen["json"]["instructions"].startswith("Be brief.")
     assert "'bash'" in seen["json"]["instructions"]
@@ -443,8 +441,9 @@ def test_client_named_genuine_tool_call_case_insensitive_passthrough(tmp_path):
 def test_client_named_genuine_tool_call_passes_through_unsteered(tmp_path):
     """A call naming a client-declared tool colliding with a genuine name
     (read) is returned verbatim: no steer follow-up (exactly 1 upstream
-    call). Outbound is genuine-12 ONLY — the client variant rides the
-    notice (model-facing) and the response convert (client-facing)."""
+    call). Outbound is the genuine superset — the client variant rides
+    its overlay slot (model-facing) and the response convert
+    (client-facing)."""
     from tests.conftest import TEST_HEADERS
 
     tc_ctx, calls = _steer_app_client(
@@ -477,10 +476,9 @@ def test_client_named_genuine_tool_call_passes_through_unsteered(tmp_path):
         )
     assert r.status_code == 200
     assert len(calls) == 1
-    from llms.proxy.zen_tools import GENUINE_TOOLS
-
-    assert calls[0]["tools"] == GENUINE_TOOLS
-    assert "'read'" in calls[0].get("instructions", "")
+    sent = {t.get("name"): t for t in calls[0]["tools"]}
+    assert sent["read"]["description"] == "mine"
+    assert sent["mine"]["description"] == "extra"
     returned = [
         i for i in r.json().get("output", []) if i.get("type") == "function_call"
     ]
@@ -1344,15 +1342,13 @@ def test_deferred_only_tools_notice_lists_them_e2e(app_client):
         for i in seen["json"].get("input", [])
         if isinstance(i, dict) and i.get("type") == "additional_tools"
     ]
-    # ...but the dissolved tool is named in the notice (instructions),
-    # never in outbound tools (genuine-12 ONLY — client extras must not
-    # ride the wire where the upstream validator can 400 them).
+    # ...but the dissolved tool is in tools and named in the notice.
     names = [
         t.get("name")
         for t in seen["json"].get("tools", [])
         if isinstance(t, dict) and t.get("name")
     ]
-    assert "deferred_exec" not in names
+    assert "deferred_exec" in names
     assert "'deferred_exec'" in seen["json"]["instructions"]
 
 

@@ -850,19 +850,10 @@ def to_zen_responses(
         # Responses mirrors the chat wire shape (string or function-form
         # dict); a messages-shaped {"type": "tool"} choice canonicalized
         # at ingress into {"name": ...} would otherwise leak through.
-        # Outbound carries genuine-12 ONLY (client extras never ride the
-        # wire — any one can fail the upstream validator and 400 the
-        # whole request), so a choice pinning a client tool is dropped:
-        # pinning a name the model was never offered reads as a dangling
-        # reference upstream. "none" (tool ban) still forwards — it names
-        # no tool, so nothing dangles.
         choice = req.tool_choice
         if isinstance(choice, dict) and choice.get("type") == "tool":
             choice = {"name": choice.get("name", "")}
-        if isinstance(choice, dict):
-            choice = None
-        if choice is not None:
-            body["tool_choice"] = choice
+        body["tool_choice"] = choice
     if req.params.temperature is not None:
         body["temperature"] = req.params.temperature
     if req.params.top_p is not None:

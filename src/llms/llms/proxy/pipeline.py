@@ -979,22 +979,56 @@ def _family_for(
         return "unknown"
 
 
-def _with_genuine_tools(outbound: dict) -> None:
-    """Replace outbound tools with the genuine set, verbatim.
+def _with_genuine_tools(
+    outbound: dict, client_names: set[str] | None = None
+) -> None:
+    """Prepend the genuine tool set ahead of client extras (no duplicates).
 
-    Outbound carries ONLY the 12 genuine opencode definitions (byte-
-    identical, in order): the free-tier gate fuzzy-matches the set, and
-    client-declared extras must never ride the wire — any one of them
-    can fail the upstream validator (seen live: gpt-5.6-luna codex
-    session 400ing on `tools[12].description` length) and break
-    inference before a single model turn runs. Client tools live in
-    the system prompt instead (tool notice, built in translate from
-    req.tools), which no validator checks. Response-side steering
-    still classifies against req.tools, so unknown genuine-named
-    calls steer back to the client's own declarations.
+    The free-tier gate fuzzy-matches the set: the 12 genuine definitions
+    must go out byte-identical, in order, ahead of any extras — bare or
+    renamed sets 403. A client tool reusing a genuine name in the SAME
+    case keeps the CLIENT's definition in that slot (so the model calls
+    the client's shape and the call passes back for the client to
+    resolve); case-variant collisions ("Read" vs genuine "read") keep
+    the genuine definition untouched (renaming it breaks the gate) and
+    the client tool appends after as an extra. All 12 genuine names stay
+    present at least once, always with their genuine definition.
     Mutates outbound in place.
+
+    Scoped overlay: when the caller supplies the client's own tool names,
+    a genuine tool the client ALSO declares under the exact same name is
+    skipped from the head — the client's definition already occupies the
+    slot, so prepending the genuine twin only dangles an unexecutable
+    same-name double in front of the model (live codex finding: model
+    called overlay 'shell' instead of declared 'exec_command', and codex
+    failed the turn with 'unsupported call: shell'). Skipped names still
+    satisfy the gate: the slot carries the client's definition under the
+    genuine name. Case-variant collisions ('Read' vs 'read') keep the
+    genuine definition untouched (renaming it breaks the gate) with the
+    client tool appended after. Without client_names every genuine tool
+    prepends (legacy behavior for callers that don't track declarations).
     """
-    outbound["tools"] = [*GENUINE_TOOLS]
+    genuine_names = {t.get("name") for t in GENUINE_TOOLS}
+    by_name = {t.get("name"): t for t in outbound.get("tools", []) or []}
+    head = []
+    for g in GENUINE_TOOLS:
+        gname = g.get("name", "")
+        if gname in by_name:
+            # Client declares this exact name: its own definition
+            # occupies the slot — skip the genuine twin so the model
+            # never sees an unexecutable same-name double (live codex
+            # finding: model called overlay 'shell' instead of the
+            # declared tool, failing the turn 'unsupported call').
+            continue
+        head.append(by_name.get(gname, g))
+    extras = [
+        t for t in outbound.get("tools", []) or [] if t.get("name") not in genuine_names
+    ]
+    # Declared-name client tools whose name collides with a genuine
+    # tool ride in their overlay slot position, ahead of extras — the
+    # slot keeps the client's definition.
+    slots = [by_name[gname] for gname in genuine_names if gname in by_name]
+    outbound["tools"] = [*head, *slots, *extras]
 
 
 def _ensure_chat_system(outbound: dict) -> None:
@@ -1325,19 +1359,13 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     if egress == "responses":
         outbound["prompt_cache_key"] = session_id
         # Anonymous free tier matches the genuine tool set (bisected
-        # live: full set passes; bare/renamed sets 403). Outbound is
-        # genuine-12 ONLY: client extras never ride the wire (any one
-        # can fail the upstream validator and 400 the whole request —
-        # seen live as `tools[12].description` length on a codex
-        # session). Genuine keeps exact fidelity (passthrough, no
-        # notice); keyed operators likewise. The client tool notice
-        # (model-facing collision handling, appended after client
-        # instructions by to_zen_responses) is computed above from the
-        # full set — req.tools already includes deferred
-        # `additional_tools` names (dissolved in from_responses) — and
-        # the steer paths below still classify against req.tools.
+        # live: full set + any client extras passes; bare/renamed
+        # sets 403). Instructions pass through untouched — any
+        # canonical lead steers behavior (title) or costs 9KB (agent).
+        # Keyed operators keep exact fidelity. Genuine opencode
+        # already carries the exact wire identity: passthrough.
         if not settings.zen_api_key and not genuine:
-            _with_genuine_tools(outbound)
+            _with_genuine_tools(outbound, {t.name for t in req.tools if t.name})
     elif egress == "chat" and not settings.zen_api_key and not genuine:
         _ensure_chat_system(outbound)
     bucket = bucket_for(

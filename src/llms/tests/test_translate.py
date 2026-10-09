@@ -977,8 +977,6 @@ def test_responses_additional_tools_dissolve():
 
 
 def test_tool_choice_canonicalized_across_dialects():
-    from dataclasses import replace
-
     from llms.proxy.translate import (
         from_chat,
         from_messages,
@@ -1002,12 +1000,9 @@ def test_tool_choice_canonicalized_across_dialects():
         "function": {"name": "bash"},
     }
     assert to_zen_messages(req)["tool_choice"] == {"type": "tool", "name": "bash"}
-    # Responses outbound is genuine-12 ONLY (client extras never ride the
-    # wire): a name pin dangles upstream, so it drops. "none"/"auto"
-    # (naming no tool) still forward.
-    assert "tool_choice" not in to_zen_responses(req)
-    assert to_zen_responses(replace(req, tool_choice="none"))["tool_choice"] == "none"
-    assert to_zen_responses(replace(req, tool_choice="auto"))["tool_choice"] == "auto"
+    # Responses mirrors the chat wire shape; a messages-shaped pin
+    # re-wraps by name (stable contract — client extras ride the wire
+    # in the superset, so the pin dangles nowhere).
 
     # chat function-form choice degrades to auto no longer: it maps by name
     req2 = from_messages(

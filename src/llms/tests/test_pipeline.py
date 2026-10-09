@@ -163,11 +163,11 @@ def test_genuine_opencode_chat_passthrough(app_client):
 
 
 def test_nongenuine_overlapping_tools_client_definition_wins(app_client):
-    # Exact-name collision: outbound is genuine-12 ONLY — the client
-    # variant rides the notice (instructions), never the wire. The
-    # steer paths still classify against req.tools, so a model call
-    # naming the client tool resolves client-side.
-    from llms.proxy.zen_tools import GENUINE_TOOLS
+    # A third-party client reusing a genuine tool name keeps its OWN
+    # definition in that slot (so the model calls the client's shape and
+    # the call returns for the client to resolve); all genuine names
+    # still ride at least once and true extras append after.
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
 
     tc, seen = app_client
     r = tc.post(
@@ -193,11 +193,12 @@ def test_nongenuine_overlapping_tools_client_definition_wins(app_client):
         headers=TEST_HEADERS,
     )
     assert r.status_code == 200
-    assert seen["json"]["tools"] == GENUINE_TOOLS
-    # Notice carries the collision: client instructions + full schemas.
-    instructions = seen["json"].get("instructions", "")
-    assert "'read'" in instructions and "override" in instructions
-    assert "'mine'" in instructions
+    tools = seen["json"]["tools"]
+    assert [t.get("name") for t in tools].count("read") == 1
+    sent_read = next(t for t in tools if t.get("name") == "read")
+    assert sent_read["description"] == "mine"
+    assert GENUINE_TOOL_NAMES <= {t.get("name") for t in tools}
+    assert tools[-1]["name"] == "mine"
 
 
 def test_is_genuine_opencode_detection():
@@ -377,11 +378,8 @@ def test_genuine_calls_in_sees_wire_custom_tool_call_items():
 
 def test_server_tool_specs_forwarded_never_500(app_client):
     # Their curl repros #5/#6 against our proxy: unknown server-tool
-    # shapes (web_fetch, server_tool_use-as-tool) on the messages leg
-    # no longer ride the wire (outbound is genuine-12 ONLY — any client
-    # extra can fail the upstream validator and 400 the request).
-    # They live in the notice instead; downstream stays JSON, never a
-    # plaintext 500.
+    # shapes (web_fetch, server_tool_use-as-tool) forward verbatim for
+    # upstream to judge — JSON downstream, never a plaintext 500.
     tc, seen = app_client
     r = tc.post(
         "/v1/messages",
@@ -399,10 +397,8 @@ def test_server_tool_specs_forwarded_never_500(app_client):
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("application/json")
     kinds = [t.get("type") for t in seen["json"]["tools"] if isinstance(t, dict)]
-    assert "web_fetch_20260209" not in kinds
-    assert "server_tool_use" not in kinds
-    instructions = seen["json"].get("instructions", "")
-    assert "'web_fetch'" in instructions and "'web_search'" in instructions
+    assert "web_fetch_20260209" in kinds
+    assert "server_tool_use" in kinds
 
 
 def test_same_dialect_passes_through_untouched(app_client):
@@ -641,13 +637,9 @@ def test_malformed_tool_specs_are_json_never_plaintext_500(app_client):
 
 
 def test_codex_web_search_tool_forwarded(app_client):
-    # Outbound is genuine-12 ONLY: the client web_search declaration
-    # rides the notice (instructions), never the wire — any client
-    # extra can fail the upstream validator and 400 the request.
-    # Execution stays the backend's job: the model still sees the
-    # genuine websearch definition in the tool array.
-    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
-
+    # Codex equivalent of the web_search report: the declaration must
+    # reach upstream (execution is the backend's job, never the proxy's
+    # to fake by dropping).
     tc, seen = app_client
     r = tc.post(
         "/v1/responses",
@@ -659,7 +651,7 @@ def test_codex_web_search_tool_forwarded(app_client):
         headers=TEST_HEADERS,
     )
     assert r.status_code == 200
-    assert {t.get("name") for t in seen["json"]["tools"]} == GENUINE_TOOL_NAMES
+    assert seen["json"]["tools"][-1] == {"type": "web_search"}
 
 
 def test_distinct_codex_threads_get_distinct_sessions(app_client):
@@ -750,12 +742,13 @@ def test_messages_rebuild_is_byte_stable_across_turns(app_client):
 
 
 def test_case_variant_client_tool_appends_beside_genuine(app_client):
-    # Client "Read" vs genuine "read": outbound is genuine-12 ONLY —
-    # the client variant rides the notice, never the wire. Steering
-    # still treats them as the same name (see _genuine_calls_in
-    # case-insensitive rule), so the call passes back for the client
-    # to resolve.
-    from llms.proxy.zen_tools import GENUINE_TOOLS
+    # Client "Read" vs genuine "read": the gate needs the 12 genuine
+    # definitions byte-identical, so genuine "read" stays untouched and
+    # the client tool appends after as an extra (never replaces, never
+    # dedups). Steering still treats them as the same name (see
+    # _genuine_calls_in case-insensitive rule), so the call passes
+    # back for the client to resolve.
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES, GENUINE_TOOLS
 
     tc, seen = app_client
     r = tc.post(
@@ -776,18 +769,22 @@ def test_case_variant_client_tool_appends_beside_genuine(app_client):
     )
     assert r.status_code == 200
     tools = seen["json"]["tools"]
-    assert tools == GENUINE_TOOLS
-    # The client variant rides the notice, never the wire.
-    assert "'Read'" in seen["json"].get("instructions", "")
+    names = [t.get("name") for t in tools]
+    # All 12 genuine names present with genuine definitions, in order...
+    assert names[:12] == [t["name"] for t in GENUINE_TOOLS]
+    assert GENUINE_TOOL_NAMES <= set(names)
+    genuine_read = next(t for t in tools if t.get("name") == "read")
+    assert genuine_read["description"] != "mine"
+    # ...and the client variant rides after as an extra.
+    assert names[12:] == ["Read"]
 
 
 def test_genuine_tool_order_and_identity_preserved(app_client):
-    """The 12 genuine definitions go out byte-identical, in order, ONLY.
+    """The 12 genuine definitions go out byte-identical, in order, first.
 
-    Fingerprint contract: Zen's free-tier gate fuzzy-matches the set,
-    and any client extra can fail the upstream validator (seen live as
-    `tools[12].description` length), so client extras never ride the
-    wire — they live in the notice instead.
+    Fingerprint contract: Zen's free-tier gate fuzzy-matches the set, so
+    no reorder, no rename, no client definition in a genuine slot unless
+    the client used the EXACT same name.
     """
     from llms.proxy.zen_tools import GENUINE_TOOLS
 
@@ -810,17 +807,20 @@ def test_genuine_tool_order_and_identity_preserved(app_client):
     )
     assert r.status_code == 200
     tools = seen["json"]["tools"]
-    assert tools == GENUINE_TOOLS
-    assert [t.get("name") for t in tools] == [t["name"] for t in GENUINE_TOOLS]
+    assert tools[:12] == GENUINE_TOOLS
+    assert [t.get("name") for t in tools][12:] == ["mine"]
 
 
-def test_overlay_keeps_genuine_and_client_same_name_verbatim(app_client):
-    """Exact-name collision: outbound is genuine-12 ONLY.
+def test_overlay_skips_genuine_twin_of_declared_name(app_client):
+    """A client-declared 'shell' sees one shell slot: its own definition.
 
-    The client variant rides the notice (model-facing); response-side
-    convert/validate still classifies against it (client-facing).
+    Regression (live codex wire capture): the overlay prepended genuine
+    'shell' ahead of codex's declared extras; the model called the
+    overlay twin and codex failed the turn ('unsupported call: shell').
+    Now the genuine twin is skipped and the client's definition rides
+    in the slot position — exactly one shell, client-owned.
     """
-    from llms.proxy.zen_tools import GENUINE_TOOLS
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
 
     tc, seen = app_client
     r = tc.post(
@@ -847,22 +847,23 @@ def test_overlay_keeps_genuine_and_client_same_name_verbatim(app_client):
     )
     assert r.status_code == 200
     tools = seen["json"]["tools"]
-    assert tools == GENUINE_TOOLS
-    # Collision handling lives in the notice, not the wire.
-    instructions = seen["json"].get("instructions", "")
-    assert "'shell'" in instructions and "override" in instructions
-    assert "'exec_command'" in instructions
+    assert [t.get("name") for t in tools].count("shell") == 1
+    sent_shell = next(t for t in tools if t.get("name") == "shell")
+    assert sent_shell["description"] == "codex shell"
+    # Gate safety: every other genuine name still rides at least once,
+    # and declared extras keep their slot-ahead-of-extras position.
+    assert (GENUINE_TOOL_NAMES - {"shell"}) <= {t.get("name") for t in tools}
+    assert tools.index(sent_shell) < tools.index(
+        next(t for t in tools if t.get("name") == "exec_command")
+    )
 
 
 def test_overlay_case_variant_keeps_genuine_and_appends_client(app_client):
-    """Client 'Read' vs genuine 'read': outbound is genuine-12 ONLY.
+    """Client 'Read' vs genuine 'read': genuine untouched, client appends.
 
-    The client variant rides the notice; steering still treats the
-    names as one (case-insensitive rule), so the call passes back for
-    the client to resolve.
+    Case-insensitive skip must not collapse the variant: renaming the
+    genuine definition breaks the gate, so both ride (existing contract).
     """
-    from llms.proxy.zen_tools import GENUINE_TOOLS
-
     tc, seen = app_client
     r = tc.post(
         "/v1/responses",
@@ -882,8 +883,9 @@ def test_overlay_case_variant_keeps_genuine_and_appends_client(app_client):
     )
     assert r.status_code == 200
     tools = seen["json"]["tools"]
-    assert tools == GENUINE_TOOLS
-    assert "'Read'" in seen["json"].get("instructions", "")
+    sent_read = next(t for t in tools if t.get("name") == "read")
+    assert sent_read["description"] != "mine"
+    assert next(t for t in tools if t.get("name") == "Read")["description"] == "mine"
 
 
 def test_classify_namespaced_owned_call_passes_without_default_marker():
