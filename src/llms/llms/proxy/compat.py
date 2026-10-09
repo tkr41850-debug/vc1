@@ -304,22 +304,19 @@ def _write_to_shell_redirect(payload: dict, required: list) -> str | None:
     """genuine `write {path, content}` onto a cmd-runner shell redirect.
 
     Family-gated (codex-plain only — the row carries the family):
-    emits `{"cmd": "printf %s > <path> <<'EOF' ... EOF"}` — the
-    synthesized shell command wrapped as the client runner's `cmd`
-    argument (JSON object, same contract every other translation
-    returns). The harness executes `cmd`'s value; a bare command
-    string is not valid arguments and steers as owned-but-invalid
-    (live spark stress 2026-10-09: the loop passed the bare-string
-    translation, then the tail refold steered the proxy's own
-    replayed frames `exec_command <raw printf...>` as missing
-    `cmd` and failed closed — every ~1/4 write turn). Proven live
-    2026-10-07 (round 4, spark leg: `printf 'hello-shell\\\\n' >
-    shell-write.txt` executed, file byte-exact). Heredoc with a
-    quoted delimiter (no interpolation, no expansion); the content
-    rides the body lines verbatim. Delimiter collision (content
-    contains a line equal to the delimiter) or non-string
-    path/content: None — never synthesize a command that would
-    truncate or corrupt the file (the generic steer applies).
+    emits `{"cmd": "printf '%s' '<content>' > <path>"}` — the content
+    as a single-quoted printf ARGUMENT (same contract every other
+    translation returns: a JSON object with the client runner's
+    `cmd` key). The content must ride the argument, never stdin: an
+    earlier heredoc shape (`printf %s > path <<'EOF' ...`) exited 0
+    but wrote 0 bytes (live tmux stress 2026-10-09: `printf` with no
+    argument prints empty — it never reads stdin — so six
+    consecutive "successful" turns left the file empty and the model
+    looped re-emitting `write`). Single quotes are literal (no
+    interpolation/expansion); embedded quotes escape as `'\''`
+    (verified byte-exact through `/bin/bash -lc`). Empty content
+    writes an empty file (correct semantics). Non-string
+    path/content: None (the generic steer applies).
     """
     path = payload.get("path")
     content = payload.get("content")
@@ -329,16 +326,10 @@ def _write_to_shell_redirect(payload: dict, required: list) -> str | None:
         return None
     if "cmd" not in set(required or []):
         return None
-    delimiter = "EOF"
-    for line in content.split("\n"):
-        if line.strip() == delimiter:
-            return None
-    body = content if content.endswith("\n") else content + "\n"
     import json as _json
 
-    return _json.dumps(
-        {"cmd": f"printf %s > {path} <<'{delimiter}'\n{body}{delimiter}"}
-    )
+    quoted = "'" + content.replace("'", "'\\''") + "'"
+    return _json.dumps({"cmd": f"printf '%s' {quoted} > {path}"})
 
 
 # Dispatch table: (genuine name, family ["*" = any], client lowered name,

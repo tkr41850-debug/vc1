@@ -790,8 +790,30 @@ def test_write_edit_classifier_rides_exec_rewrite_marker():
     assert steer == []
     assert [c["name"] for c in passed] == ["exec_command"]
     assert passed[0]["__translated_args__"] == (
-        '{"cmd": "printf %s > s.txt <<\'EOF\'\\nhi\\nEOF"}'
+        '{"cmd": "printf \'%s\' \'hi\\n\' > s.txt"}'
     )
+
+
+def test_write_to_shell_redirect_executes_byte_exact(tmp_path):
+    # The synthesis must EXECUTE, not just classify: an earlier
+    # heredoc shape (`printf %s > path <<'EOF' ...`) passed the
+    # classifier but wrote 0 bytes at runtime (`printf` with no
+    # argument prints empty — it never reads stdin; live tmux stress
+    # 2026-10-09: six consecutive exit-0 turns left the file empty
+    # and the model looped re-emitting `write`). The single-quoted
+    # argument shape runs here through the harness shell path.
+    import subprocess
+
+    from llms.proxy.compat import _write_to_shell_redirect
+
+    for content in ("hi\n", "it's\nmulti\nline\n", ""):
+        out = tmp_path / "probe.txt"
+        tra = _write_to_shell_redirect(
+            {"path": str(out), "content": content}, ["cmd"]
+        )
+        assert tra is not None
+        subprocess.run(["/bin/bash", "-lc", __import__("json").loads(tra)["cmd"]], check=True)
+        assert out.read_text() == content
 
 
 def test_write_to_shell_redirect_proven_live():
@@ -805,9 +827,10 @@ def test_write_to_shell_redirect_proven_live():
     # command string is not valid arguments and steered the proxy's
     # own replayed frames as owned-but-invalid at the tail check
     # (live 2026-10-09: loop passed, tail failed closed, ~1/4 write
-    # turns). The write->exec_command row ships on codex-plain only,
-    # and refuses delimiter collisions (content carrying a bare `EOF`
-    # line) rather than synthesize a truncating command.
+    # turns). The content rides a single-quoted printf argument —
+    # never stdin (an earlier heredoc shape exited 0 but wrote 0
+    # bytes; see test_write_to_shell_redirect_executes_byte_exact).
+    # The write->exec_command row ships on codex-plain only.
     from llms.proxy.client_tools import nested_tool_defs, owned_tool_names
     from llms.proxy.compat import translate_to_client
     from tests.test_client_tools import _spark_runner
@@ -825,19 +848,22 @@ def test_write_to_shell_redirect_proven_live():
         runner,
     ) == (
         "exec_command",
-        '{"cmd": "printf %s > shell-write.txt <<\'EOF\'\\nhello-shell\\nEOF"}',
+        '{"cmd": "printf \'%s\' \'hello-shell\\n\' > shell-write.txt"}',
     )
-    # Delimiter collision: content with a bare EOF line — no guess.
+    # No delimiter games: content with quotes/newlines stays inline.
     assert (
         translate_to_client(
             "write",
-            '{"path": "x.txt", "content": "a\\nEOF\\nb"}',
+            '{"path": "x.txt", "content": "it\'s\\nEOF\\nok"}',
             "codex-plain",
             owned,
             defs,
             runner,
         )
-        is None
+        == (
+            "exec_command",
+            '{"cmd": "printf \'%s\' \'it\'\\\\\'\'s\\nEOF\\nok\' > x.txt"}',
+        )
     )
     # Missing/non-string fields: no guess.
     assert (
@@ -1135,12 +1161,12 @@ def test_schema_audit_dropped_keys_pinned():
         )
         is None
     )
-    # Spark shell synthesis consumes path+content into the `cmd`
-    # argument (JSON object — a bare command string is not valid
-    # arguments); the heredoc body carries content verbatim.
+    # Spark shell synthesis puts path+content into the `cmd`
+    # argument (JSON object); the content rides a single-quoted
+    # printf argument (never stdin — the heredoc shape wrote 0 bytes).
     assert (
         _write_to_shell_redirect({"path": "s.txt", "content": "hi\n"}, ["cmd"])
-        == '{"cmd": "printf %s > s.txt <<\'EOF\'\\nhi\\nEOF"}'
+        == '{"cmd": "printf \'%s\' \'hi\\n\' > s.txt"}'
     )
     # Claude rows (capture: claude-cli 2.1.293, 23 tools): per-entry
     # drops/renames vs the genuine-12 above.
