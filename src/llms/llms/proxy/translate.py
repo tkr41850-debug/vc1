@@ -786,7 +786,7 @@ def to_zen_responses(
                     # call (a bare genuine name with Success output
                     # would re-teach the dead name as working).
                     from llms.proxy.client_tools import (
-                        nested_tool_defs as _nested_defs,
+                        client_tool_defs as _client_defs,
                     )
                     from llms.proxy.client_tools import (
                         owned_tool_names as _owned_names,
@@ -796,8 +796,7 @@ def to_zen_responses(
                     )
 
                     _owned = _owned_names(req.tools)
-                    _defs = {t.name.lower(): t for t in req.tools if t.name}
-                    _defs.update(_nested_defs(req.tools))
+                    _defs = _client_defs(req.tools)
                     _hist = _translate(
                         b.name,
                         b.arguments,
