@@ -568,11 +568,13 @@ async def fold_and_steer_streaming(
                     )
                 ],
             )
-        # Fold outcome per iteration (debug): the steer INFO below only
+        # Fold outcome per iteration: the steer INFO below only
         # fires when the loop body steers, and the tail check can fail
         # closed without passing it — this records clean folds and
-        # fold-vs-tail disagreements too (live spark leg, 2026-10-05).
-        logger.debug(
+        # fold-vs-tail disagreements too (live spark leg, 2026-10-05;
+        # INFO so a live fail-closed carries its loop verdicts).
+        # Bounded: names + 200ch argument prefixes per call.
+        logger.info(
             "[%s] steer fold iter detail=%s",
             trace_id,
             {
