@@ -2237,6 +2237,85 @@ def test_streaming_delta_shell_translates_without_steer(tmp_path):
     assert '"name": "shell"' not in r.text
 
 
+def test_streaming_corrupt_delta_recovers_via_done(tmp_path):
+    """Duplicated delta chunks fold to invalid JSON while the done frame
+    carries the valid payload (live: heredoc write-calls steered as
+    owned-but-invalid, tail-check fail-closed, file never written).
+    The fold must judge the done payload — exactly 1 upstream call."""
+    import httpx
+
+    from tests.conftest import TEST_HEADERS, TEST_SECRET, build_app_client
+    from tests.conftest import make_settings as _make_settings
+
+    import json as _json
+
+    args = _json.dumps({"cmd": "printf %s > /tmp/x <<'EOF'\ncodex-ok\nEOF"})
+    half = len(args) // 2
+    body = (
+        'data: {"type":"response.output_item.added","output_index":2,'
+        '"item":{"id":"fc_dup1","type":"function_call","status":"in_progress",'
+        '"name":"exec_command","call_id":"call_dup1","arguments":""}}\n\n'
+        'data: {"type":"response.function_call_arguments.delta",'
+        '"output_index":2,"item_id":"fc_dup1",'
+        '"delta":' + _json.dumps(args[:half]) + '}\n\n'
+        'data: {"type":"response.function_call_arguments.delta",'
+        '"output_index":2,"item_id":"fc_dup1",'
+        '"delta":' + _json.dumps(args[:half]) + '}\n\n'
+        'data: {"type":"response.function_call_arguments.delta",'
+        '"output_index":2,"item_id":"fc_dup1",'
+        '"delta":' + _json.dumps(args[half:]) + '}\n\n'
+        'data: {"type":"response.function_call_arguments.done",'
+        '"output_index":2,"item_id":"fc_dup1",'
+        '"arguments":' + _json.dumps(args) + ',"name":"exec_command"}\n\n'
+        'data: {"type":"response.completed",'
+        '"response":{"id":"resp_dup1","status":"completed",'
+        '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+    )
+    calls: list = []
+
+    async def handler(request):
+        import json as _json2
+
+        calls.append(_json2.loads(request.content.decode()))
+        return httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+    )
+    with build_app_client(
+        _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "write file",
+                "stream": True,
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "exec_command",
+                        "description": "run",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"cmd": {"type": "string"}},
+                            "required": ["cmd"],
+                        },
+                    },
+                ],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    assert "codex-ok" in r.text
+    assert "Retry as" not in r.text
+
+
 def test_streaming_done_only_shell_translates_without_steer(tmp_path):
     """Live Zen shape (resp-26): added frame announces with
     arguments:"", NO delta frames, payload rides solely the done

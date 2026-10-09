@@ -47,6 +47,25 @@ def is_cost_frame(line: bytes) -> bool:
     return b"inference-cost" in line
 
 
+def _valid_json_fragment(text: str) -> bool:
+    """True when text is empty or parses as JSON.
+
+    Empty means "no payload announced yet" (a steerable shape, not
+    corruption); non-empty must parse, else the delta accumulation
+    is corrupt (duplicated/reordered chunks) and the fold should
+    fall back to the added/done snapshots.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+    try:
+        import json as _json
+
+        _json.loads(text)
+        return True
+    except Exception:
+        return False
+
+
 def passthrough_headers(upstream_headers) -> dict:
     out: dict = {}
     retry_after = upstream_headers.get("retry-after")
@@ -258,15 +277,26 @@ def fold_stream_calls(lines: list[str], ingress: str) -> list[dict]:
             args[cid] = ""
     for cid, cname in names.items():
         folded = args.get(cid, "")
-        if not folded:
-            # No delta frames carried the payload: fall back to the
+        if not _valid_json_fragment(folded):
+            # No (or corrupt) delta-carried payload: fall back to the
             # added frame's own arguments snapshot, then to the done
             # frame's payload (live: Zen announces with arguments:""
             # and omits deltas on some turns — the done frame is the
-            # only copy). Deltas win when present (the done frame
+            # only copy). Deltas win when valid (the done frame
             # repeats them; concatenating both doubles the payload
-            # into invalid JSON) — hence fallback, never merge.
-            folded = announced_args.get(cid, "") or done_args.get(cid, "")
+            # into invalid JSON) — hence fallback, never merge. A
+            # corrupt delta accumulation (live: duplicated/reordered
+            # chunks on heredoc payloads fold to invalid JSON and
+            # steer a valid call as owned-but-invalid) recovers via
+            # the done frame when it parses; otherwise the corrupt
+            # text rides through and the steer names it accurately.
+            for candidate in (
+                announced_args.get(cid, ""),
+                done_args.get(cid, ""),
+            ):
+                if _valid_json_fragment(candidate):
+                    folded = candidate
+                    break
         entry = {"call_id": cid, "name": cname, "arguments": folded}
         if custom.get(cid) or cid in announced_custom:
             entry["type"] = "custom_tool_call"
