@@ -601,3 +601,33 @@ turns via mechanism-13 rewrap, zero guard trips; earlier 1/5 was the
 any stress output.
 
 Hermetic: 541 passed, ruff clean.
+
+### Round 11: write->shell-redirect emitted bare-string args (2026-10-09)
+
+Residual ~1/4 heredoc FAIL across fix3/fix4/fix5 batches
+(`tail ["exec_command printf %s > ... <<'EOF'..."]`, file missing,
+RC=0): the tail detail shows RAW COMMAND TEXT as the arguments — a
+shape no upstream JSON-args turn produces. The promoted loop-verdict
+line (aba8cd1) settled it on the first instrumented death (trace
+0a2ea3db627c): `loop calls=[{write {"content","path"}}]
+passthrough=[exec_command] steer=[]` — the loop PASSED the turn via
+the `write -> exec_command` compat-table translation, and the tail
+steered the proxy's OWN replayed frames as `exec_command` missing
+`cmd`. Root cause in `compat._write_to_shell_redirect`: it returned
+the synthesized heredoc as a BARE STRING, the only translation in
+the table not returning a JSON object. The replay wrote that string
+into the added/delta/done frames; the tail refold judged
+`exec_command` + raw text as owned-but-invalid (missing `cmd`) and
+failed closed. Fix (8babec2): the converter returns
+`{"cmd": "<heredoc>"}` — same contract as every other translation.
+Hermetic: loop+tail agree on all three delta shapes (single, multi,
+done-only) against the real spark fixture; the two
+`test_compat_table` claude-fixture failures are pre-existing on HEAD
+(missing `/home/uqmm/.claude/jobs/.../claude-schema.jsonl`).
+
+Live on the fix (fix7 batch, :8790): 4/4 PASS, zero `budget
+exhausted` / stall / repeat lines. Cell 4 exercised the fixed path
+(trace 4426ece73ba8: `write {content,path}` -> passthrough
+`exec_command`, no tail warning, file byte-exact `codex-ok`,
+`od -c` verified `0000011 / 9 bytes`). Affected-area hermetic: 155
+passed (2 pre-existing fixture failures excluded).
