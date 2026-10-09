@@ -304,7 +304,15 @@ def _write_to_shell_redirect(payload: dict, required: list) -> str | None:
     """genuine `write {path, content}` onto a cmd-runner shell redirect.
 
     Family-gated (codex-plain only — the row carries the family):
-    synthesizes `printf %s > <path> <<'EOF' ... EOF` proven live
+    emits `{"cmd": "printf %s > <path> <<'EOF' ... EOF"}` — the
+    synthesized shell command wrapped as the client runner's `cmd`
+    argument (JSON object, same contract every other translation
+    returns). The harness executes `cmd`'s value; a bare command
+    string is not valid arguments and steers as owned-but-invalid
+    (live spark stress 2026-10-09: the loop passed the bare-string
+    translation, then the tail refold steered the proxy's own
+    replayed frames `exec_command <raw printf...>` as missing
+    `cmd` and failed closed — every ~1/4 write turn). Proven live
     2026-10-07 (round 4, spark leg: `printf 'hello-shell\\\\n' >
     shell-write.txt` executed, file byte-exact). Heredoc with a
     quoted delimiter (no interpolation, no expansion); the content
@@ -326,7 +334,11 @@ def _write_to_shell_redirect(payload: dict, required: list) -> str | None:
         if line.strip() == delimiter:
             return None
     body = content if content.endswith("\n") else content + "\n"
-    return f"printf %s > {path} <<'{delimiter}'\n{body}{delimiter}"
+    import json as _json
+
+    return _json.dumps(
+        {"cmd": f"printf %s > {path} <<'{delimiter}'\n{body}{delimiter}"}
+    )
 
 
 # Dispatch table: (genuine name, family ["*" = any], client lowered name,

@@ -789,7 +789,9 @@ def test_write_edit_classifier_rides_exec_rewrite_marker():
     )
     assert steer == []
     assert [c["name"] for c in passed] == ["exec_command"]
-    assert passed[0]["__translated_args__"] == ("printf %s > s.txt <<'EOF'\nhi\nEOF")
+    assert passed[0]["__translated_args__"] == (
+        '{"cmd": "printf %s > s.txt <<\'EOF\'\\nhi\\nEOF"}'
+    )
 
 
 def test_write_to_shell_redirect_proven_live():
@@ -798,8 +800,13 @@ def test_write_to_shell_redirect_proven_live():
     # 'hello-shell\\\\n' > shell-write.txt"}` executed with `Process
     # exited with code 0`, file byte-exact `hello-shell\n` (od
     # verified; first spark-leg file ever created through any path).
-    # The write->exec_command row ships on codex-plain only, and
-    # refuses delimiter collisions (content carrying a bare `EOF`
+    # The converter returns the client runner's `cmd` argument as a
+    # JSON object (same contract as every other translation): a bare
+    # command string is not valid arguments and steered the proxy's
+    # own replayed frames as owned-but-invalid at the tail check
+    # (live 2026-10-09: loop passed, tail failed closed, ~1/4 write
+    # turns). The write->exec_command row ships on codex-plain only,
+    # and refuses delimiter collisions (content carrying a bare `EOF`
     # line) rather than synthesize a truncating command.
     from llms.proxy.client_tools import nested_tool_defs, owned_tool_names
     from llms.proxy.compat import translate_to_client
@@ -818,7 +825,7 @@ def test_write_to_shell_redirect_proven_live():
         runner,
     ) == (
         "exec_command",
-        "printf %s > shell-write.txt <<'EOF'\nhello-shell\nEOF",
+        '{"cmd": "printf %s > shell-write.txt <<\'EOF\'\\nhello-shell\\nEOF"}',
     )
     # Delimiter collision: content with a bare EOF line — no guess.
     assert (
@@ -1128,11 +1135,12 @@ def test_schema_audit_dropped_keys_pinned():
         )
         is None
     )
-    # Spark shell synthesis consumes path+content; the heredoc body
-    # carries content verbatim (no key renames involved).
+    # Spark shell synthesis consumes path+content into the `cmd`
+    # argument (JSON object — a bare command string is not valid
+    # arguments); the heredoc body carries content verbatim.
     assert (
         _write_to_shell_redirect({"path": "s.txt", "content": "hi\n"}, ["cmd"])
-        == "printf %s > s.txt <<'EOF'\nhi\nEOF"
+        == '{"cmd": "printf %s > s.txt <<\'EOF\'\\nhi\\nEOF"}'
     )
     # Claude rows (capture: claude-cli 2.1.293, 23 tools): per-entry
     # drops/renames vs the genuine-12 above.
