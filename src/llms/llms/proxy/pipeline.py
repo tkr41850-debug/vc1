@@ -1405,6 +1405,18 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     headers = build_zen_headers(settings, session_id=session_id)
     url = settings.zen_base_url.rstrip("/") + ENDPOINT_PATH[egress]
     log_upstream(trace_id, url, headers, outbound)
+    try:
+        logger.info(
+            "[%s] client tool shapes=%s",
+            trace_id,
+            [
+                (t.name, sorted((t.parameters or {}).get("required") or []))
+                for t in req.tools
+                if t.name
+            ],
+        )
+    except Exception:
+        pass
     egress_provider = request.app.state.egress
     started = time.monotonic()
     provider_id: str | None = None
