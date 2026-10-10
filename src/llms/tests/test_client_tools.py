@@ -830,3 +830,130 @@ def test_steer_execute_genuine_points_at_nested_channel():
         steer_to_equivalent("execute", '{"code": "x"}', owned, defs, GENUINE_TOOL_NAMES)
         is None
     )
+
+
+def _multi_agent_ns():
+    # Live codex shape: multi_agent_v1 namespace container with nested
+    # sub-agent tools (no exec orchestrator — plain namespace).
+    from llms.proxy.translate import from_responses
+
+    req = from_responses(
+        {
+            "model": "m",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "multi_agent_v1",
+                    "description": "Tools for spawning and managing sub-agents.",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "spawn_agent",
+                            "description": "Spawn a subagent.",
+                            "parameters": {"type": "object"},
+                        },
+                        {
+                            "type": "function",
+                            "name": "wait_agent",
+                            "description": "Wait for agents.",
+                            "parameters": {
+                                "type": "object",
+                                "required": ["targets"],
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    return req.tools
+
+
+def test_plain_namespace_container_neither_owned_nor_routed():
+    # Live repro (2026-10-10): the model emits the container name
+    # `multi_agent_v1`, the proxy passes it as owned+routed, and the
+    # harness fails it client-side (`unsupported call`) — the turn
+    # halts with no steer ever firing. The container must own and
+    # route NOTHING; the nested tools own/route by bare name.
+    from llms.proxy.client_tools import dispatchable_names, owned_tool_names
+
+    tools = _multi_agent_ns()
+    owned = owned_tool_names(tools)
+    route = dispatchable_names(tools)
+    # Container stays owned (same precedent as the `functions`
+    # container) but must NEVER route: an owned-but-unrouted call
+    # steers instead of replaying dead client-side.
+    assert "multi_agent_v1" in owned
+    assert "multi_agent_v1" not in route
+    assert owned["spawn_agent"] == "spawn_agent"
+    assert owned["wait_agent"] == "wait_agent"
+    assert route["spawn_agent"] == ("function_call", "spawn_agent")
+    assert route["wait_agent"] == ("function_call", "wait_agent")
+
+
+def test_plain_namespace_nested_defs_validate():
+    # Nested specs need validation stand-ins or valid nested calls
+    # steer as undeclared instead of passing through.
+    from llms.proxy.client_tools import nested_tool_defs
+
+    defs = nested_tool_defs(_multi_agent_ns())
+    assert "spawn_agent" in defs
+    assert "wait_agent" in defs
+    assert "multi_agent_v1" not in defs
+
+
+def test_plain_namespace_container_call_steers():
+    # The dead container call must steer (generic redirect names the
+    # nested tools via the display list), never passthrough.
+    from llms.proxy.pipeline import _classify_calls
+
+    tools = _multi_agent_ns()
+    from llms.proxy.client_tools import (
+        dispatchable_names,
+        nested_tool_defs,
+        owned_tool_names,
+    )
+
+    owned = owned_tool_names(tools)
+    route = dispatchable_names(tools)
+    defs = dict(nested_tool_defs(tools))
+    passed, steered = _classify_calls(
+        [{"name": "multi_agent_v1", "arguments": "{}"}],
+        owned,
+        defs,
+        route,
+        tools,
+        (),
+        "codex-plain",
+        "t",
+    )
+    assert passed == []
+    assert [c["name"] for c in steered] == ["multi_agent_v1"]
+    # ...while a valid nested call passes through.
+    passed, steered = _classify_calls(
+        [{"name": "spawn_agent", "arguments": "{}"}],
+        owned,
+        defs,
+        route,
+        tools,
+        (),
+        "codex-plain",
+        "t",
+    )
+    assert [c["name"] for c in passed] == ["spawn_agent"]
+    assert steered == []
+
+
+def test_plain_namespace_notice_lists_nested_not_container():
+    # The notice must teach the nested names, never the container.
+    from llms.proxy.client_tools import build_tool_notice, display_tool_names
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+
+    tools = _multi_agent_ns()
+    assert "multi_agent_v1" not in display_tool_names(tools)
+    assert "spawn_agent" in display_tool_names(tools)
+    notice = build_tool_notice(tools, GENUINE_TOOL_NAMES)
+    assert "not itself a callable tool" in notice
+    assert "'spawn_agent'" in notice
+    assert "'wait_agent'" in notice

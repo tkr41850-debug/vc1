@@ -32,6 +32,21 @@ def owned_tool_names(tools: tuple[ToolDef, ...]) -> dict[str, str]:
         # namespace on the wire), so they are owned too: description-
         # parsed entries first (they carry the call signatures), then
         # raw nested specs not documented in the exec description.
+        # Namespaces WITHOUT an exec orchestrator (live codex
+        # multi_agent_v1: close_agent/spawn_agent/wait_agent/...)
+        # nest the same way: their tools dispatch bare, and the
+        # container itself is not callable (a bare call to it fails
+        # harness lookup with `unsupported call`, then the turn
+        # halts — the model obeys the declared list and re-emits the
+        # dead container name, no steer ever firing).
+        nested = t.options.get("tools")
+        if isinstance(nested, list) and t.kind == "namespace":
+            for n in nested:
+                if not isinstance(n, dict) or not n.get("name"):
+                    continue
+                nname = str(n.get("name"))
+                if nname.lower() not in owned:
+                    owned[nname.lower()] = nname
         exec_desc = _namespace_exec_desc(t)
         if exec_desc:
             for nname, _ in _nested_exec_tools(exec_desc):
@@ -143,6 +158,27 @@ def nested_tool_defs(tools: tuple[ToolDef, ...]) -> dict[str, ToolDef]:
     for t in tools:
         exec_desc = _namespace_exec_desc(t)
         if not exec_desc:
+            # Plain namespace container WITHOUT an exec orchestrator
+            # (live codex multi_agent_v1): the raw nested specs still
+            # need validation stand-ins — otherwise an owned+routed
+            # nested call (spawn_agent) hits a missing def and steers
+            # as undeclared instead of validating its arguments.
+            if t.kind == "namespace":
+                nested = t.options.get("tools")
+                if isinstance(nested, list):
+                    for n in nested:
+                        if not isinstance(n, dict) or not n.get("name"):
+                            continue
+                        nname = str(n.get("name"))
+                        if nname.lower() in defs:
+                            continue
+                        params = n.get("parameters")
+                        defs[nname.lower()] = ToolDef(
+                            nname,
+                            str(n.get("description") or ""),
+                            dict(params) if isinstance(params, dict) else {},
+                            kind=str(n.get("type", "function")),
+                        )
             continue
         for nname, entry in _nested_exec_tools(exec_desc):
             # Required inner fields: non-optional (`?`-less) keys of
@@ -218,6 +254,31 @@ def dispatchable_names(tools: tuple[ToolDef, ...]) -> dict[str, tuple[str, str]]
     out: dict[str, tuple[str, str]] = {}
     for t in tools:
         exec_desc = _namespace_exec_desc(t)
+        if t.kind == "namespace" and not exec_desc:
+            # Plain namespace container WITHOUT an exec orchestrator
+            # (live codex multi_agent_v1): the nested tools route by
+            # declared type, and the container itself NEVER routes —
+            # it is not callable (a bare call fails harness lookup
+            # with `unsupported call`, then the turn halts — the
+            # model obeys the declared list and re-emits the dead
+            # container name, no steer ever firing). Same rule as the
+            # exec-namespace container below, stated separately
+            # because there is no description to parse here.
+            nested = t.options.get("tools")
+            if isinstance(nested, list):
+                for n in nested:
+                    if not isinstance(n, dict) or not n.get("name"):
+                        continue
+                    nname = str(n.get("name"))
+                    if nname.lower() in out:
+                        continue
+                    item_type = (
+                        "function_call"
+                        if n.get("type", "function") == "function"
+                        else "custom_tool_call"
+                    )
+                    out[nname.lower()] = (item_type, nname)
+            continue
         if exec_desc:
             # Deferred exec namespace: the nested tools dispatch by
             # name alone (no namespace on the wire). The container
@@ -686,6 +747,23 @@ def display_tool_names(tools: tuple[ToolDef, ...]) -> list[str]:
     seen: set[str] = set()
     for t in tools:
         exec_desc = _namespace_exec_desc(t)
+        if t.kind == "namespace" and not exec_desc:
+            # Plain namespace container WITHOUT an exec orchestrator
+            # (live codex multi_agent_v1): list the nested tools, never
+            # the container — a bare call to it fails harness lookup
+            # (same mis-teaching as the `functions` entry: "Use one of
+            # these tools instead: functions, wait" taught a name the
+            # model cannot use).
+            nested = t.options.get("tools")
+            if isinstance(nested, list):
+                for n in nested:
+                    if not isinstance(n, dict) or not n.get("name"):
+                        continue
+                    nname = str(n.get("name"))
+                    if nname.lower() not in seen:
+                        seen.add(nname.lower())
+                        names.append(nname)
+            continue
         if exec_desc:
             for nname, _ in _nested_exec_tools(exec_desc):
                 if nname.lower() not in seen:
@@ -1057,6 +1135,39 @@ def build_tool_notice(
             )
             lines.extend(nested)
             continue
+        if t.kind == "namespace":
+            # Plain namespace container WITHOUT an exec orchestrator
+            # (live codex multi_agent_v1: spawn_agent/wait_agent/...):
+            # the container itself is not callable — list the nested
+            # tools with their call shapes instead of the bare
+            # container (same mis-teaching as the `functions` entry
+            # above: the model emits the container name, the harness
+            # fails it with `unsupported call`, and the turn halts
+            # with no steer ever firing).
+            nested = t.options.get("tools")
+            if isinstance(nested, list) and nested:
+                lines.append(
+                    f"- '{t.name}'{marker}: is not itself a callable "
+                    "tool — call the nested tools below by bare name:"
+                )
+                for n in nested:
+                    if not isinstance(n, dict) or not n.get("name"):
+                        continue
+                    nname = str(n.get("name"))
+                    ndesc = str(n.get("description") or "").split("\n")[0][:160]
+                    nparams = n.get("parameters") if isinstance(n.get("parameters"), dict) else {}
+                    nrequired = (nparams or {}).get("required") or []
+                    nprops = (nparams or {}).get("properties") or {}
+                    bits = []
+                    for key in nrequired:
+                        kind = (nprops.get(key) or {}).get("type", "string")
+                        bits.append(f'"{key}": "<{kind}>"')
+                    example = "{" + ", ".join(bits) + "}"
+                    if ndesc:
+                        lines.append(f"  - '{nname}': {ndesc} Call as {example}.")
+                    else:
+                        lines.append(f"  - '{nname}': Call as {example}.")
+                continue
         # Plain function leg: the tool already travels upstream as a
         # genuine-12 entry with its full schema — the notice only needs
         # the name, the call shape, and one example. Dumping the full
