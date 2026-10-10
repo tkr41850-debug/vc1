@@ -746,3 +746,37 @@ Stability verdict: no new proxy defect across 300 captured records
 / 185 verdicts. Guards idle throughout. The stress loop is closed
 on this leg; the one open item is quota-gated (claude goal-leg
 probe), not code-gated.
+
+### Round 14: quota recovered — claude goal-leg PASS; loop fully closed (2026-10-10)
+
+The deferred claude goal probe (/tmp/mitm-claude-goal.sh) ran once
+quota recovered (single tiny probe returned 200; the 2026-10-09
+429s were the 60s tier after all, not the 24h tier — no warp cycle
+was needed). Result: **PASS** — T1 `goal-turn-one` RC=0, T2
+`GOAL-ABSENT` RC=0 (the model correctly reported no goal tool among
+its Bash/Read/Write set and called nothing undeclared), T3 Write
+`claude-goal.txt` byte-exact `claude-goal-ok\n` + CLAUDE-GOAL-DONE
+RC=0.
+
+Proxy-side: 4 messages-leg traces (one per turn + session estab),
+all `upstream status=200`, client shapes = the claude native set
+(Bash/Read/Write/Edit/...), zero goal names declared, zero steers
+(the messages leg takes the non-streaming path — no fold verdicts
+by design, stop_reasons end_turn/tool_use/end_turn clean). Capture
+at 52 records / 26 req / 26 resp. Combined census: 314 records,
+185 fold verdicts, 0 guard trips, 4 EXPECTED read steers (unchanged
+since round 13 — no new steer class).
+
+Hermetic re-stress (test_pipeline + test_client_tools +
+test_compat_table + test_translate, full files): 134 passed,
+4 failed — all 4 the same pre-existing missing
+claude-schema.jsonl capture fixture (`/home/uqmm/.claude/jobs/
+8c5ef74f/tmp/`, another session's path), failing identically on
+earlier runs; no regression.
+
+Final stability verdict: every cell green — codex goal leg
+(file byte-exact, goal tools passthrough), claude goal leg (PASS,
+GOAL-ABSENT path), claude 3-turn session (PASS), spark verify
+cells (PASS, prior rounds), luna 900s rerun (PASS byte-exact,
+CELL_RC=0). No new proxy defect across the full mitm program; the
+stress loop finds nothing further wrong with the proxy. STOPPING.
