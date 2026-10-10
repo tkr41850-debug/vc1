@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from llms.proxy.store import ApiKey, ModelEntry, Store, StoreError, is_secret_key
 
 
@@ -37,28 +39,21 @@ def test_key_allowed(tmp_path: Path):
     assert store.key_allowed("sk-missing") is False
 
 
-def test_corrupt_keys_file_raises_store_error(tmp_path: Path):
-    import pytest
-
-    (tmp_path / "keys.yaml").write_text("{unclosed: [bracket\n  - nope")
+@pytest.mark.parametrize(
+    ("filename", "content", "loader"),
+    [
+        ("keys.yaml", "{unclosed: [bracket\n  - nope", "load_keys"),
+        ("keys.yaml", "key: sk-x\n", "load_keys"),
+        ("models.yaml", "{unclosed: [bracket\n  - nope", "load_models"),
+    ],
+    ids=["corrupt-keys", "non-list-keys", "corrupt-models"],
+)
+def test_corrupt_store_file_raises_store_error(
+    tmp_path: Path, filename: str, content: str, loader: str
+):
+    (tmp_path / filename).write_text(content)
     with pytest.raises(StoreError):
-        Store(data_dir=tmp_path).load_keys()
-
-
-def test_non_list_keys_file_raises_store_error(tmp_path: Path):
-    import pytest
-
-    (tmp_path / "keys.yaml").write_text("key: sk-x\n")
-    with pytest.raises(StoreError):
-        Store(data_dir=tmp_path).load_keys()
-
-
-def test_corrupt_models_file_raises_store_error(tmp_path: Path):
-    import pytest
-
-    (tmp_path / "models.yaml").write_text("{unclosed: [bracket\n  - nope")
-    with pytest.raises(StoreError):
-        Store(data_dir=tmp_path).load_models()
+        getattr(Store(data_dir=tmp_path), loader)()
 
 
 def test_missing_models_file_seeds_free_models(tmp_path: Path):

@@ -19,24 +19,9 @@ def test_success_does_not_clear_active_backoff(app_client):
     assert registry.runtime("noproxy").retry_until == before
 
 
-def test_interleaved_success_keeps_sibling_backoff():
-    import time
-
-    from llms.proxy.providers import ProviderRuntime
-
-    rt = ProviderRuntime()
-    rt.note_ratelimited(60.0, "sibling limited")
-    before = rt.retry_until
-    # Simulate an earlier-started request finishing fine: no code path
-    # on success touches retry_until.
-    assert rt.retry_until == before
-    assert rt.retry_in() > 0
-
-
 def test_bounce_ok_clear_guarded_against_sibling_429():
     """A sibling 429 landing mid-bounce must survive the bounce-ok clear."""
     import asyncio as _asyncio
-    import time as _time
 
     from llms.proxy.providers import ProviderRuntime
 
@@ -58,20 +43,6 @@ def test_bounce_ok_clear_guarded_against_sibling_429():
         assert rt.retry_in() > 0
 
     _asyncio.run(scenario())
-
-
-def test_bounce_ok_clear_applies_when_no_sibling_429():
-    """Bounce-ok still clears when the epoch is unchanged (happy path)."""
-    from llms.proxy.providers import ProviderRuntime
-
-    rt = ProviderRuntime()
-    rt.note_ratelimited(60.0, "original 429")
-    bounce_epoch = rt.retry_epoch
-    if bounce_epoch == rt.retry_epoch:
-        rt.retry_until = 0.0
-        rt.retry_reason = ""
-    assert rt.retry_in() == 0.0
-    assert rt.retry_reason == ""
 
 
 def test_reconnect_clear_bumps_epoch(admin_client):

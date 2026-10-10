@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from llms.proxy.stream_translate import (
     chat_to_responses,
     messages_to_responses,
@@ -405,34 +407,29 @@ def test_messages_terminal_carries_cache_read_tokens():
     assert delta["usage"]["cache_creation_input_tokens"] == 0
 
 
-def test_truncated_chat_stream_is_incomplete_not_completed():
+@pytest.mark.parametrize(
+    ("parser_cls", "payload"),
+    [
+        (
+            "chat",
+            '{"choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}',
+        ),
+        ("responses", '{"type":"response.output_text.delta","delta":"hi"}'),
+        (
+            "messages",
+            '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}',
+        ),
+    ],
+    ids=["chat", "responses", "messages"],
+)
+def test_truncated_stream_is_incomplete_not_completed(parser_cls, payload):
     """EOF with no finish_reason must not synthesize a clean completion."""
-    from llms.proxy.stream_translate import ChatParser
+    from llms.proxy.stream_translate import ChatParser, MessagesParser, ResponsesParser
 
-    p = ChatParser()
-    for payload in [
-        '{"choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}'
-    ]:
-        p.feed_payload(payload)
-    done = p.finish()
-    assert done.status == "incomplete"
-
-
-def test_truncated_responses_stream_is_incomplete():
-    from llms.proxy.stream_translate import ResponsesParser
-
-    p = ResponsesParser()
-    p.feed_payload('{"type":"response.output_text.delta","delta":"hi"}')
-    assert p.finish().status == "incomplete"
-
-
-def test_truncated_messages_stream_is_incomplete():
-    from llms.proxy.stream_translate import MessagesParser
-
-    p = MessagesParser()
-    p.feed_payload(
-        '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}'
-    )
+    p = {"chat": ChatParser, "responses": ResponsesParser, "messages": MessagesParser}[
+        parser_cls
+    ]()
+    p.feed_payload(payload)
     assert p.finish().status == "incomplete"
 
 

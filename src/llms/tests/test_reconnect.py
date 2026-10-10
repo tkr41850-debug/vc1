@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 
 class FakePool:
     """Stand-in for the in-process WarpPool behind ProviderRegistry."""
@@ -72,22 +74,18 @@ def test_reconnect_bounces_pool_and_resyncs(admin_client, tmp_path, monkeypatch)
     assert body["lifecycle"] in ("preparing", "ready", "unhealthy", "ratelimited")
 
 
-def test_reconnect_rejects_noproxy(admin_client):
+@pytest.mark.parametrize(
+    ("provider_id", "expected"),
+    [("noproxy", 400), ("nope", 404)],
+    ids=["noproxy", "unknown"],
+)
+def test_reconnect_errors(admin_client, provider_id, expected):
     tc, _ = admin_client
     r = tc.post(
-        "/api/admin/providers/noproxy/reconnect",
+        f"/api/admin/providers/{provider_id}/reconnect",
         headers={"Authorization": "Bearer sk-test"},
     )
-    assert r.status_code == 400
-
-
-def test_reconnect_unknown_provider_404(admin_client):
-    tc, _ = admin_client
-    r = tc.post(
-        "/api/admin/providers/nope/reconnect",
-        headers={"Authorization": "Bearer sk-test"},
-    )
-    assert r.status_code == 404
+    assert r.status_code == expected
 
 
 def test_local_reconnect_pool_uses_secret_key(app_client, tmp_path, monkeypatch):
@@ -121,22 +119,18 @@ def test_local_reconnect_pool_requires_key(app_client):
     assert tc.post("/api/providers/pool1/reconnect").status_code == 401
 
 
-def test_local_reconnect_pool_rejects_noproxy(app_client):
+@pytest.mark.parametrize(
+    ("provider_id", "expected"),
+    [("noproxy", 400), ("nope", 404)],
+    ids=["noproxy", "unknown"],
+)
+def test_local_reconnect_pool_errors(app_client, provider_id, expected):
     tc, _ = app_client
     r = tc.post(
-        "/api/providers/noproxy/reconnect",
+        f"/api/providers/{provider_id}/reconnect",
         headers={"Authorization": "Bearer sk-test"},
     )
-    assert r.status_code == 400
-
-
-def test_local_reconnect_pool_unknown_404(app_client):
-    tc, _ = app_client
-    r = tc.post(
-        "/api/providers/nope/reconnect",
-        headers={"Authorization": "Bearer sk-test"},
-    )
-    assert r.status_code == 404
+    assert r.status_code == expected
 
 
 def test_reconnect_clears_retry(admin_client, tmp_path, monkeypatch):

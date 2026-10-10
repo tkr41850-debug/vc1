@@ -919,17 +919,19 @@ def test_write_to_shell_redirect_proven_live():
 
 
 def _claude_tools():
-    # REAL 23-tool fixture: claude-cli 2.1.293 declaration captured live
-    # 2026-10-08 (compat-matrix-claude-proxy.log steer gates
-    # names=[...23...] family=claude). Bash takes {command},
-    # Write {file_path, content}, Read {file_path}, Edit
+    # REAL 23-tool fixture: claude-cli declaration captured live via
+    # the repo stub (scripts/refresh_claude_schema.py, zero quota;
+    # checked in as tests/fixtures/claude-schema.jsonl). Bash takes
+    # {command}, Write {file_path, content}, Read {file_path}, Edit
     # {file_path, old_string, new_string} — key renames vs the
     # genuine-12 (command/file_path/...) are the rows' exact contract.
     import json as _json
+    from pathlib import Path as _Path
 
     from llms.proxy.ir import ToolDef
 
-    with open("/home/uqmm/.claude/jobs/8c5ef74f/tmp/claude-schema.jsonl") as f:
+    fixture = _Path(__file__).parent / "fixtures" / "claude-schema.jsonl"
+    with open(fixture) as f:
         body = _json.loads(f.readline())["body"]
     return tuple(
         ToolDef(

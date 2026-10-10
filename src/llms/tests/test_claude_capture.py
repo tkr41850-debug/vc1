@@ -1,7 +1,8 @@
 """Hermetic: claude-leg captured schemas drive notice + translate paths.
 
-Uses the REAL 23-tool declaration captured from claude-cli 2.1.291
-(stub server, zero quota — claude-schema.jsonl) to pin:
+Uses the REAL 23-tool declaration captured from the claude CLI via the
+repo stub (scripts/refresh_claude_schema.py, zero quota — checked in as
+tests/fixtures/claude-schema.jsonl) to pin:
 1. build_tool_notice renders the claude tools as model-facing text
    (the outbound contract: client tools ride the systemprompt, never
    the wire on the anon tier);
@@ -12,8 +13,9 @@ Uses the REAL 23-tool declaration captured from claude-cli 2.1.291
 """
 
 import json
+from pathlib import Path
 
-CAPTURE = "/home/uqmm/.claude/jobs/8c5ef74f/tmp/claude-schema.jsonl"
+CAPTURE = Path(__file__).parent / "fixtures" / "claude-schema.jsonl"
 
 
 def _claude_tools():
@@ -43,7 +45,7 @@ def test_claude_capture_drives_notice_and_family():
     assert len(tools) == 23
     # Family: claude-cli UA prefix -> claude (also messages-leg fallback).
     assert (
-        detect_family("claude-cli/2.1.291 (external, sdk-cli)", "messages", tools)
+        detect_family("claude-cli/2.1.296 (external, sdk-cli)", "messages", tools)
         == CLAUDE
     )
     assert detect_family(None, "messages", tools) == CLAUDE

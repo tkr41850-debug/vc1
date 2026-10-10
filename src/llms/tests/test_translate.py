@@ -1040,7 +1040,16 @@ def test_stop_sequences_round_trip_on_messages_leg():
     assert to_zen_messages(req2)["stop_sequences"] == ["END"]
 
 
-def test_empty_tool_arguments_coerced_to_empty_object():
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ("", "{}"),
+        ("not-json{{{", "{}"),
+        ('{"path":"/home/node"}', '{"path":"/home/node"}'),
+    ],
+    ids=["empty", "non-json", "valid"],
+)
+def test_tool_arguments_coercion(arguments, expected):
     from llms.proxy.translate import from_responses, to_zen_responses
 
     req = from_responses(
@@ -1051,56 +1060,14 @@ def test_empty_tool_arguments_coerced_to_empty_object():
                     "type": "function_call",
                     "call_id": "c1",
                     "name": "read",
-                    "arguments": "",
+                    "arguments": arguments,
                 }
             ],
         }
     )
     body = to_zen_responses(req)
     call = next(i for i in body["input"] if i["type"] == "function_call")
-    assert call["arguments"] == "{}"
-
-
-def test_non_json_tool_arguments_coerced():
-    from llms.proxy.translate import from_responses, to_zen_responses
-
-    req = from_responses(
-        {
-            "model": "m",
-            "input": [
-                {
-                    "type": "function_call",
-                    "call_id": "c1",
-                    "name": "read",
-                    "arguments": "not-json{{{",
-                }
-            ],
-        }
-    )
-    body = to_zen_responses(req)
-    call = next(i for i in body["input"] if i["type"] == "function_call")
-    assert call["arguments"] == "{}"
-
-
-def test_valid_tool_arguments_preserved_verbatim():
-    from llms.proxy.translate import from_responses, to_zen_responses
-
-    req = from_responses(
-        {
-            "model": "m",
-            "input": [
-                {
-                    "type": "function_call",
-                    "call_id": "c1",
-                    "name": "read",
-                    "arguments": '{"path":"/home/node"}',
-                }
-            ],
-        }
-    )
-    body = to_zen_responses(req)
-    call = next(i for i in body["input"] if i["type"] == "function_call")
-    assert call["arguments"] == '{"path":"/home/node"}'
+    assert call["arguments"] == expected
 
 
 def test_none_tool_choice_survives_round_trip():

@@ -630,16 +630,18 @@ def test_notice_shell_directive_claude_bash_runner():
     # upstream `shell` and demote `Bash` to a pointer — the classifier
     # rewrites `shell` onto `Bash` via the compat row.
     import json as _json
+    from pathlib import Path as _Path
 
     from llms.proxy.client_tools import (
         build_tool_notice,
         has_nested_exec_channel,
     )
+    from llms.proxy.ir import ToolDef as _ToolDef
     from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
 
-    with open("/home/uqmm/.claude/jobs/8c5ef74f/tmp/claude-schema.jsonl") as f:
+    fixture = _Path(__file__).parent / "fixtures" / "claude-schema.jsonl"
+    with open(fixture) as f:
         body = _json.loads(f.readline())["body"]
-    from llms.proxy.ir import ToolDef as _ToolDef
 
     claude = tuple(
         _ToolDef(t["name"], t.get("description", ""), t.get("input_schema", {}))
@@ -665,13 +667,15 @@ def test_notice_ban_exempts_table_rows():
     # turns). A banned name with a compat row is exempt; names with no
     # row stay banned (fail open — the steer teaches them).
     import json as _json
+    from pathlib import Path as _Path
 
     from llms.proxy.client_tools import build_tool_notice
+    from llms.proxy.ir import ToolDef as _ToolDef
     from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
 
-    with open("/home/uqmm/.claude/jobs/8c5ef74f/tmp/claude-schema.jsonl") as f:
+    fixture = _Path(__file__).parent / "fixtures" / "claude-schema.jsonl"
+    with open(fixture) as f:
         body = _json.loads(f.readline())["body"]
-    from llms.proxy.ir import ToolDef as _ToolDef
 
     claude = tuple(
         _ToolDef(t["name"], t.get("description", ""), t.get("input_schema", {}))

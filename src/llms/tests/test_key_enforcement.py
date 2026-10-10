@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from llms.proxy.store import Store
 from tests.conftest import TEST_HEADERS, TEST_SECRET
 
@@ -15,34 +17,23 @@ def test_api_hello_open_without_secret(app_client):
     assert tc.head("/api/hello").status_code == 200
 
 
-def test_sk_ant_prefix_falls_back_to_allowlisted_key(app_client):
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"Authorization": "Bearer sk-ant-test"}, 200),
+        ({"Authorization": "Bearer sk-ant-nope"}, 401),
+        ({"x-api-key": "sk-ant-test"}, 200),
+    ],
+    ids=["bearer-fallback", "bearer-unknown-base", "x-api-key"],
+)
+def test_sk_ant_prefix_auth(app_client, headers, expected):
     tc, _ = app_client
     r = tc.post(
         "/v1/responses",
         json={"input": "hi"},
-        headers={"Authorization": "Bearer sk-ant-test"},
+        headers=headers,
     )
-    assert r.status_code == 200
-
-
-def test_sk_ant_prefix_without_allowlisted_base_rejected(app_client):
-    tc, _ = app_client
-    r = tc.post(
-        "/v1/responses",
-        json={"input": "hi"},
-        headers={"Authorization": "Bearer sk-ant-nope"},
-    )
-    assert r.status_code == 401
-
-
-def test_sk_ant_prefix_via_x_api_key_header(app_client):
-    tc, _ = app_client
-    r = tc.post(
-        "/v1/responses",
-        json={"input": "hi"},
-        headers={"x-api-key": "sk-ant-test"},
-    )
-    assert r.status_code == 200
+    assert r.status_code == expected
 
 
 def test_sk_ant_fallback_rejected_when_canonical_disabled(app_client, tmp_path):

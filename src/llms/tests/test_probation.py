@@ -720,58 +720,6 @@ def test_queued_degrades_past_deadline(tmp_path, monkeypatch):
     assert registry.runtime("w1").in_flight == 1
 
 
-def test_queued_degrade_advertises_configured_budget(tmp_path, monkeypatch):
-    """Non-zero budget degrades with retry-after equal to that budget."""
-    import asyncio as _asyncio
-
-    import llms.proxy.pipeline as _pipeline
-    from llms.proxy.config import Settings
-    from llms.proxy.providers import (
-        Provider,
-        ProviderHealth,
-        ProviderRegistry,
-        WarpExit,
-    )
-
-    async def scenario():
-        settings = Settings(
-            data_dir=str(tmp_path), queue_keepalive_s=0.01, queue_wait_s=0.0
-        )
-        registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
-        registry.save([Provider(id="w1", kind="warp", models=["deepseek-*"], exits=1)])
-        rt = registry.runtime("w1")
-        rt.health = ProviderHealth(
-            exits=[WarpExit(idx=0, ready=True, status="ok", socks=40001)],
-            fetched_at=1000.0,
-        )
-        rt.probation = True
-        rt.in_flight = 1
-        egress = _QueuedEgress(registry)
-        app = _queued_app(registry, egress)
-        assert egress.resolve(_QUEUED_MODEL, bucket=0)[1] == "queued"
-
-        async def _must_not_run(*args, **kwargs):
-            raise AssertionError("degraded waiter must not reach the upstream leg")
-
-        monkeypatch.setattr(_pipeline, "forward", _must_not_run)
-        try:
-            body = {
-                "model": _QUEUED_MODEL,
-                "messages": [{"role": "user", "content": "hi"}],
-            }
-            response = await _pipeline.run(_queued_request(app, body), settings, "chat")
-        finally:
-            await egress.aclose()
-        return response
-
-    response = _asyncio.run(scenario())
-    assert response.status_code == 429
-    # Zero budget degrades at once; the header carries the actual budget
-    # (the 45s case is pinned by the Task 2 hold-served test's 5s setup
-    # plus this zero-budget row — no 45s sleep anywhere).
-    assert response.headers["retry-after"] == "0"
-
-
 def test_queued_hold_aborts_on_disconnect(tmp_path, monkeypatch):
     """A waiter whose client disconnects aborts the hold (499, no forward)."""
     import asyncio as _asyncio

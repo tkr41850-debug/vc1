@@ -13,3 +13,15 @@
 Regenerate: point a streaming request at the gateway or Zen with
 `curl -N`, saving raw bytes. Keep fixtures small (<10KB): drop
 >2KB lines (reasoning blobs) and cap at ~14 data events.
+
+- `claude-schema.jsonl` — the installed claude CLI's live tool
+  declaration (single-line JSON: `{"body": {"tools": [...], "model":
+  ...}}`), captured via the repo stub. Pins the claude rename rows
+  (shell/read/write/edit onto Bash/Read/Write/Edit) in
+  test_claude_capture.py, test_compat_table.py, test_client_tools.py
+  (notice shape) and test_stream_translate.py (streaming renames).
+
+Regenerate: `python scripts/refresh_claude_schema.py` (stub server,
+zero quota — nothing leaves the machine). Re-run when the CLI
+version changes the declared toolset; the tests assert the count, so
+drift fails LOUDLY instead of testing a stale declaration.
