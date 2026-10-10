@@ -444,6 +444,23 @@ class ProviderRegistry:
             return health
         try:
             pool = await self.ensure_pool(provider)
+        except Exception as exc:
+            # Pool boot failure (e.g. slow/failing daemon bring-up) must
+            # still move fetched_at: derive_lifecycle reads a never-polled
+            # runtime as `preparing` forever (the boot-grace arm
+            # short-circuits on boot_epoch <= 0 OR fetched_at <= 0), so a
+            # provider whose pool failed to start sat on boot state until
+            # a manual Debug forced-refresh. Record the failure as the
+            # health error with a stamped fetch — the row ages into
+            # `unhealthy` past the grace instead of sticking on boot.
+            health.error = str(exc)[:300]
+            rt.health = health
+            try:
+                self.save_warp_status(provider.id, health)
+            except OSError:
+                pass
+            return health
+        try:
             await pool.refresh_statuses()
             snap = pool.snapshot()
             health.error = str(snap.get("error", "") or "")

@@ -98,8 +98,27 @@ async def lifespan(app: FastAPI):
 
         for provider in app.state.providers.load():
             if provider.kind == "warp" and provider.enabled:
-                await app.state.providers.ensure_pool(provider)
-                app.state.providers.runtime(provider.id).boot_epoch = _time.monotonic()
+                rt = app.state.providers.runtime(provider.id)
+                try:
+                    await app.state.providers.ensure_pool(provider)
+                except Exception as exc:
+                    # Pool boot failure must not orphan the epoch: an
+                    # unstamped runtime reads `preparing` forever (the
+                    # derive grace arm short-circuits on boot_epoch <= 0
+                    # and fetched_at never moves), so a provider whose
+                    # pool failed to start sat on boot state until a
+                    # manual Debug forced-refresh. Stamp first, then let
+                    # the poll below record the failure as health error.
+                    rt.boot_epoch = _time.monotonic()
+                    logger.warning("provider %s pool boot failed: %r", provider.id, exc)
+                    try:
+                        await app.state.providers.refresh_health(provider, force=True)
+                    except Exception as exc2:
+                        logger.warning(
+                            "provider %s boot poll failed: %r", provider.id, exc2
+                        )
+                    continue
+                rt.boot_epoch = _time.monotonic()
                 try:
                     await app.state.providers.refresh_health(provider, force=True)
                 except Exception as exc:

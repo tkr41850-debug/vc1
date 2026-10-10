@@ -168,3 +168,66 @@ def test_reconnect_clears_retry(admin_client, tmp_path, monkeypatch):
     assert r.status_code == 200
     assert rt.retry_until == 0.0
     assert rt.retry_reason == ""
+
+
+@pytest.mark.parametrize("raiser", ["ensure_pool", "refresh_statuses"])
+def test_boot_failure_still_moves_health_off_preparing(tmp_path, monkeypatch, raiser):
+    """Boot-time pool failure must not orphan the lifecycle row.
+
+    Live finding: warps sat in `preparing` for 4h+ until a manual Debug
+    forced-refresh. Root cause: the lifespan boot block called
+    ensure_pool() before stamping boot_epoch and before the inner
+    refresh_health — a raise skipped all three, leaving fetched_at 0
+    and boot_epoch 0, so derive_lifecycle's preparing arm (fetched_at
+    <= 0, short-circuiting even the boot-grace expiry) held forever.
+    The fix stamps the epoch and moves fetched_at on both failure
+    paths; the row ages into `unhealthy` past the grace and the error
+    surfaces in the snapshot instead of sticking on boot.
+    """
+    import asyncio as _asyncio
+    import time as _time
+
+    from llms.proxy.providers import (
+        BOOT_GRACE_S,
+        Provider,
+        ProviderRegistry,
+        derive_lifecycle,
+    )
+
+    registry = ProviderRegistry(data_dir=tmp_path)
+
+    class _FailPool:
+        async def refresh_statuses(self):
+            if raiser == "refresh_statuses":
+                raise RuntimeError("daemon bring-up timed out")
+
+        def snapshot(self):
+            return {"error": "", "exits": []}
+
+    async def _ensure_pool(provider):
+        if raiser == "ensure_pool":
+            raise RuntimeError("registration failed: ratelimited")
+        return _FailPool()
+
+    monkeypatch.setattr(registry, "ensure_pool", _ensure_pool)
+    provider = Provider(id="warp-1", kind="warp", exits=1, models=["*"])
+    registry.save([provider])
+    rt = registry.runtime("warp-1")
+    # Lifespan boot ordering (main.py): stamp epoch even when the pool
+    # fails, then still poll so fetched_at moves and the error lands.
+    try:
+        _asyncio.run(registry.ensure_pool(provider))
+    except Exception:
+        rt.boot_epoch = _time.monotonic()
+    else:
+        rt.boot_epoch = _time.monotonic()
+    _asyncio.run(registry.refresh_health(provider, force=True))
+
+    assert rt.health.fetched_at > 0
+    assert "registration failed" in rt.health.error or "timed out" in rt.health.error
+    lc, _ = derive_lifecycle(provider, rt, None, now=_time.monotonic())
+    assert lc == "preparing"
+    lc, _ = derive_lifecycle(
+        provider, rt, None, now=_time.monotonic() + BOOT_GRACE_S + 1
+    )
+    assert lc == "unhealthy", lc
