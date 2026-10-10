@@ -780,3 +780,23 @@ GOAL-ABSENT path), claude 3-turn session (PASS), spark verify
 cells (PASS, prior rounds), luna 900s rerun (PASS byte-exact,
 CELL_RC=0). No new proxy defect across the full mitm program; the
 stress loop finds nothing further wrong with the proxy. STOPPING.
+
+### Round 15: tmux tool stress — codex + claude both PASS (2026-10-10)
+
+Fresh `tool-stress` tmux session (compat.sock, two panes), both
+legs through mitm onto :8790:
+- Codex (trace efcbdd2e99f1): 5-step dependent session PASS RC=0 —
+  exact `session-sum=110`, intermediate files verified
+  (numbers 1..10, sum 55, doubled 110). The step-3 `read
+  sum.txt` steered once (no codex-plain `read` row by design —
+  same EXPECTED class as rounds 7/8/12/13); the model recovered
+  next turn via `exec_command cat` (passthrough, steer=[]) and
+  completed. Steer-then-recover working as designed.
+- Claude: 3-turn `--continue` session PASS — `tool-turn-one`,
+  `tool-answer=42` (Bash-computed 6*7, file `42\n`), Write
+  `final.txt` byte-exact `tool-stress-ok\n` + TOOL-STRESS-DONE,
+  all RC=0.
+
+Census: 342 captures, 191 fold verdicts, 0 guard trips; 5
+non-empty steers, all `read` (no new steer class). No new proxy
+defect — the stress loop remains closed.
