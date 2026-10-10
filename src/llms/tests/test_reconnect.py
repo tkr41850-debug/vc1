@@ -231,3 +231,193 @@ def test_boot_failure_still_moves_health_off_preparing(tmp_path, monkeypatch, ra
         provider, rt, None, now=_time.monotonic() + BOOT_GRACE_S + 1
     )
     assert lc == "unhealthy", lc
+
+
+def _self_heal_world(tmp_path, monkeypatch, states: dict[str, str]):
+    """Registry with canned lifecycle states per provider id.
+
+    states maps provider id -> one of ready / ready-probation /
+    ratelimited / unhealthy / preparing. Ready states get a ready exit
+    in health; ratelimited gets retry_until set; reconnects are counted.
+    """
+    import time as _time
+
+    from llms.proxy.providers import Provider, ProviderRegistry, WarpExit
+
+    registry = ProviderRegistry(data_dir=tmp_path)
+    registry.save(
+        [Provider(id=pid, kind="warp", exits=1, models=["*"]) for pid in states]
+    )
+    reconnects: list[str] = []
+
+    class _Pool:
+        async def reconnect(self):
+            return {"ok": True}
+
+        async def refresh_statuses(self):
+            return None
+
+        def snapshot(self):
+            return {"error": "", "exits": []}
+
+    async def _ensure_pool(provider):
+        return _Pool()
+
+    async def _bounce(provider):
+        # Production bounce() restarts exits WITHOUT clearing the
+        # backoff — the provider stays ratelimited until the cooldown
+        # elapses or a post-bounce success clears it. Record the bounce;
+        # leave runtime state untouched. (The sweep reports bounce
+        # success, not post-bounce lifecycle, so no state change is
+        # needed for the outcome.)
+        reconnects.append(provider.id)
+        return {"ok": True}
+
+    monkeypatch.setattr(registry, "ensure_pool", _ensure_pool)
+    monkeypatch.setattr(registry, "bounce", _bounce)
+    for pid, lc in states.items():
+        rt = registry.runtime(pid)
+        if lc in ("ready", "ready-probation"):
+            from llms.proxy.providers import ProviderHealth
+
+            rt.health = ProviderHealth(
+                fetched_at=_time.monotonic(),
+                exits=[WarpExit(idx=0, ready=True, socks=40001)],
+            )
+            rt.probation = lc == "ready-probation"
+        elif lc == "ratelimited":
+            from llms.proxy.providers import ProviderHealth
+
+            rt.health = ProviderHealth(
+                fetched_at=_time.monotonic(),
+                exits=[WarpExit(idx=0, ready=False)],
+            )
+            rt.note_ratelimited(60.0, "limited")
+    return registry, reconnects
+
+
+def test_self_heal_restarts_limited_when_half_pool_dry(tmp_path, monkeypatch):
+    """2/3 running providers ratelimited -> both restart, staggered."""
+    import asyncio as _asyncio
+
+    registry, reconnects = _self_heal_world(
+        tmp_path,
+        monkeypatch,
+        {"w1": "ratelimited", "w2": "ratelimited", "w3": "ready"},
+    )
+    sleeps: list[float] = []
+    real_sleep = _asyncio.sleep
+
+    async def _spy_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(_asyncio, "sleep", _spy_sleep)
+    try:
+        done = _asyncio.run(registry.maybe_self_heal("*", "t1"))
+    finally:
+        monkeypatch.setattr(_asyncio, "sleep", real_sleep)
+    assert sorted(done) == ["w1", "w2"]
+    assert sorted(reconnects) == ["w1", "w2"]
+    assert sleeps == [1.0]
+
+
+def test_self_heal_quiet_below_half(tmp_path, monkeypatch):
+    """1/3 ratelimited -> no restart."""
+    import asyncio as _asyncio
+
+    registry, reconnects = _self_heal_world(
+        tmp_path,
+        monkeypatch,
+        {"w1": "ratelimited", "w2": "ready", "w3": "ready"},
+    )
+    done = _asyncio.run(registry.maybe_self_heal("*", "t1"))
+    assert done == []
+    assert reconnects == []
+
+
+def test_self_heal_skips_already_recovered(tmp_path, monkeypatch):
+    """A provider that left Ratelimit before its turn is never bounced."""
+    import asyncio as _asyncio
+    import time as _time
+
+    registry, reconnects = _self_heal_world(
+        tmp_path,
+        monkeypatch,
+        {"w1": "ratelimited", "w2": "ratelimited"},
+    )
+    real_sleep = _asyncio.sleep
+
+    async def _sibling_recovers_w2(delay):
+        # The 1s stagger before w2's turn: a sibling sweep restarts w2
+        # first, so the pre-restart skip must fire and the bounce never
+        # happens (reconnects stays ["w1"]).
+        rt = registry.runtime("w2")
+        rt.retry_until = 0.0
+        rt.retry_reason = ""
+        from llms.proxy.providers import ProviderHealth, WarpExit
+
+        rt.health = ProviderHealth(
+            fetched_at=_time.monotonic(),
+            exits=[WarpExit(idx=0, ready=True, socks=40001)],
+        )
+
+    monkeypatch.setattr(_asyncio, "sleep", _sibling_recovers_w2)
+    try:
+        done = _asyncio.run(registry.maybe_self_heal("*", "t1"))
+    finally:
+        monkeypatch.setattr(_asyncio, "sleep", real_sleep)
+    assert done == ["w1"]
+    assert reconnects == ["w1"]
+
+
+def test_self_heal_serializes_overlapping_sweeps(tmp_path, monkeypatch):
+    """Concurrency=1: a second sweep while one holds the lock is a no-op."""
+    import asyncio as _asyncio
+
+    registry, reconnects = _self_heal_world(
+        tmp_path,
+        monkeypatch,
+        {"w1": "ratelimited", "w2": "ready"},
+    )
+
+    async def scenario():
+        async with registry._self_heal_lock:
+            done = await registry.maybe_self_heal("*", "t1")
+            assert done == []
+        return reconnects
+
+    assert _asyncio.run(scenario()) == []
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "expected"),
+    [
+        ("ready", "ratelimited", True),
+        ("ready-probation", "unhealthy", True),
+        ("ready", "ready-probation", False),
+        ("ready-probation", "ready", False),
+        ("ready", "ready", False),
+        ("unhealthy", "ratelimited", False),
+        (None, "ratelimited", False),
+        ("ready", None, False),
+    ],
+)
+def test_left_ready_trigger_predicate(before, after, expected):
+    from llms.proxy.pipeline import _left_ready
+
+    assert _left_ready(before, after) is expected
+
+
+def test_distinct_sessions_hash_distinct_buckets():
+    """Same key + same model + distinct sessions must spread buckets."""
+    from llms.proxy.affinity import bucket_for
+
+    buckets = {
+        bucket_for(None, "muse-spark-1.3-contributor-free", 6, "sk-x", f"ses_{i:026d}")
+        for i in range(10)
+    }
+    assert len(buckets) > 1
+    # Same session still pins (prompt cache stays warm).
+    assert bucket_for(None, "m", 1024, "sk-x", "ses_same") == bucket_for(
+        None, "m", 1024, "sk-x", "ses_same"
+    )

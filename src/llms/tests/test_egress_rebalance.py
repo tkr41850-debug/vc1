@@ -109,6 +109,22 @@ def _model_in_slot(slot: int, prefix: str = "probe-model") -> str:
     raise AssertionError("no model found for slot")
 
 
+_PINNED_SESSION = "ses_pinnedtest000000"
+
+
+def _model_in_pinned_slot(slot: int, prefix: str = "probe-model") -> str:
+    """Model whose *pinned-session* hash lands on slot (see pin below)."""
+    for i in range(500):
+        model = f"{prefix}-{i}"
+        if (
+            bucket_for("ak-team1", model, NUM_BUCKETS, "sk-team1", _PINNED_SESSION)
+            % NUM_SLOTS
+            == slot
+        ):
+            return model
+    raise AssertionError("no model found for pinned slot")
+
+
 def _model_in_affinity_slot(affinity: str, slot: int, prefix: str = "aff-model") -> str:
     for i in range(500):
         model = f"{prefix}-{i}"
@@ -117,10 +133,16 @@ def _model_in_affinity_slot(affinity: str, slot: int, prefix: str = "aff-model")
     raise AssertionError("no model found for affinity slot")
 
 
-def test_ratelimit_fails_fast_and_rebalances(fake_world):
+def test_ratelimit_fails_fast_and_rebalances(fake_world, monkeypatch):
     tc, table, calls = fake_world
-    model = _model_in_slot(0)
-    bucket = bucket_for("ak-team1", model, NUM_BUCKETS, "sk-team1")
+    # Pin the session: fresh mints hash per-session (distinct sessions
+    # spread buckets), so a fixed mint keeps this test's slot-0 model
+    # selection valid while production traffic still spreads.
+    import llms.proxy.sessions as _sessions
+
+    monkeypatch.setattr(_sessions, "mint_session_id", lambda: _PINNED_SESSION)
+    model = _model_in_pinned_slot(0)
+    bucket = bucket_for("ak-team1", model, NUM_BUCKETS, "sk-team1", _PINNED_SESSION)
     first = _post(tc, "/ak-team1/v1/responses", {"model": model, "input": "hi"})
     assert first.status_code == 429
     assert first.headers.get("retry-after") == "1"
@@ -130,11 +152,17 @@ def test_ratelimit_fails_fast_and_rebalances(fake_world):
     assert calls == [0, 1]
 
 
-def test_affinity_prefix_routes_and_buckets_independently(fake_world):
+def test_affinity_prefix_routes_and_buckets_independently(fake_world, monkeypatch):
     tc, table, calls = fake_world
+    # Pin the session like the rebalance tests above: unpinned mints
+    # land on unpredictable buckets that earlier tests' slot-0 429 may
+    # have rotated, so this 200-assertion would flake on slot state.
+    import llms.proxy.sessions as _sessions
+
+    monkeypatch.setattr(_sessions, "mint_session_id", lambda: _PINNED_SESSION)
     model = _model_in_affinity_slot("ak-team1", 1)
     plain_bucket = bucket_for(None, model, NUM_BUCKETS, "sk-team1")
-    aff_bucket = bucket_for("ak-team1", model, NUM_BUCKETS, "sk-team1")
+    aff_bucket = bucket_for("ak-team1", model, NUM_BUCKETS, "sk-team1", _PINNED_SESSION)
     r = _post(tc, "/ak-team1/v1/responses", {"model": model, "input": "hi"})
     assert r.status_code == 200
     assert calls == [1]
@@ -142,10 +170,15 @@ def test_affinity_prefix_routes_and_buckets_independently(fake_world):
     assert table.slot_for(plain_bucket) == plain_bucket % NUM_SLOTS
 
 
-def test_stream_ratelimit_rebalances_next_request(fake_world):
+def test_stream_ratelimit_rebalances_next_request(fake_world, monkeypatch):
     tc, table, calls = fake_world
-    model = _model_in_slot(0)
-    bucket = bucket_for("ak-team1", model, NUM_BUCKETS, "sk-team1")
+    # Same session pin as above: the slot-0 model selection assumes
+    # the pinned hash, while production mints still spread.
+    import llms.proxy.sessions as _sessions
+
+    monkeypatch.setattr(_sessions, "mint_session_id", lambda: _PINNED_SESSION)
+    model = _model_in_pinned_slot(0)
+    bucket = bucket_for("ak-team1", model, NUM_BUCKETS, "sk-team1", _PINNED_SESSION)
     first = _post(
         tc, "/ak-team1/v1/responses", {"model": model, "input": "hi", "stream": True}
     )

@@ -976,9 +976,7 @@ def _family_for(
         return "unknown"
 
 
-def _with_genuine_tools(
-    outbound: dict, client_names: set[str] | None = None
-) -> None:
+def _with_genuine_tools(outbound: dict, client_names: set[str] | None = None) -> None:
     """Prepend the genuine tool set ahead of client extras (no duplicates).
 
     The free-tier gate fuzzy-matches the set: the 12 genuine definitions
@@ -1328,7 +1326,6 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     # Chat has no such field/gate; messages needs a real API key instead.
     session_id = stable_session_id(settings.zen_api_key)
     is_new_conversation = False
-    session_tracked = False
     session_tracker = getattr(request.app.state, "sessions", None)
     if session_tracker is not None and ingress == "responses":
         ref = sessions.conversation_ref(ingress, body, request.headers)
@@ -1347,7 +1344,6 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             hit = session_tracker.lookup(secret_key, ref)
             if hit is not None:
                 session_id = hit
-                session_tracked = True
             elif not ref.startswith("chain:"):
                 session_id = sessions.mint_session_id()
                 session_tracker.remember(secret_key, ref, session_id)
@@ -1370,12 +1366,15 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         req.model,
         settings.num_buckets,
         secret_key,
-        # Tracked continuations only: a tracker hit means a real ongoing
-        # conversation, so its turns pin to one bucket (cache stays warm)
-        # while distinct conversations spread across slots. Fresh mints
-        # stay on the stable hash — no identity exists yet to pin, and
-        # this keeps untracked traffic (and its tests) deterministic.
-        session_id if session_tracked else None,
+        # Every responses-leg request carries a real session identity (a
+        # tracker hit for a known conversation, or a fresh mint for a new
+        # one shared with prompt_cache_key above), so distinct sessions
+        # hash to distinct buckets. Gating on session_tracked collapsed
+        # all fresh mints onto the stable hash: same key + same model
+        # landed on one bucket no matter how many sessions ran (live:
+        # 10-way concurrency over 6 buckets never spread). Same session
+        # still pins to one bucket, so the prompt cache stays warm.
+        session_id if ingress == "responses" else None,
     )
     table = request.app.state.bucket_table
     slot = table.slot_for(bucket)
@@ -1912,6 +1911,10 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             if provider_id:
                 registry.runtime(provider_id).note_ratelimited(retry_after, reason)
                 _maybe_auto_cycle(request, provider_id, via_warp, trace_id)
+                # Entering ratelimited is a self-heal trigger: when half
+                # the running model pool is limited, restart the limited
+                # ones (staggered, concurrency-guarded, skip recovered).
+                await registry.maybe_self_heal(req.model, trace_id)
             else:
                 # Direct path (fail-open or noproxy-routed): record on the
                 # noproxy runtime so the pool-dry gate can see direct's
@@ -1954,6 +1957,12 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         )
     _inflight_release(request, provider_id)
     if registry is not None and provider_id:
+        try:
+            before_lc = registry.lifecycle_of(
+                next(p for p in registry.load() if p.id == provider_id)
+            )
+        except Exception:
+            before_lc = None
         _settle_probation(request, registry, provider_id, response)
         status = response.status_code if hasattr(response, "status_code") else 0
         error = ""
@@ -1976,7 +1985,31 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 error=str(error)[:200],
             )
         )
+        # Self-heal check: a provider leaving Ready/Ready-Probation for a
+        # worse state (but NOT ready <-> ready-probation churn) may mean
+        # the model pool is going dry — sweep when half of it is limited.
+        try:
+            after_lc = registry.lifecycle_of(
+                next(p for p in registry.load() if p.id == provider_id)
+            )
+        except Exception:
+            after_lc = None
+        if _left_ready(before_lc, after_lc):
+            await registry.maybe_self_heal(req.model, trace_id)
     return response
+
+
+def _left_ready(before: str | None, after: str | None) -> bool:
+    """True when a provider left Ready/Ready-Probation for a worse state.
+
+    Ready <-> ready-probation moves are promotion/demotion churn, not
+    capacity loss — they must not trigger the self-heal sweep.
+    """
+    return (
+        before in ("ready", "ready-probation")
+        and after is not None
+        and after not in ("ready", "ready-probation")
+    )
 
 
 def _arm_probation_on_expiry(registry, provider_id: str | None) -> bool:

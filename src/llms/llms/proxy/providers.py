@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger("zen_proxy")
 
 PROVIDERS_FILE = "providers.yaml"
 WARPS_DIR = "warps"
@@ -175,6 +178,9 @@ class ProviderRegistry:
         # Populated by ProviderEgress.resolve() so refresh_health() can keep
         # each warp egress's slot spread in sync with ready exits.
         self._egresses: dict | None = None
+        # Self-heal sweep guard (concurrency=1): at most one
+        # maybe_self_heal sweep in flight per registry (see below).
+        self._self_heal_lock = asyncio.Lock()
 
     def _pool_config(self, provider: Provider):
         from llms.proxy import warp as _warp
@@ -389,19 +395,34 @@ class ProviderRegistry:
         }
 
     async def reconnect(self, provider: Provider) -> dict:
-        """Manual reconnect: bounce local exits, clear backoff, re-poll."""
+        """Manual restart: bounce local exits, clear backoff, re-poll."""
+        return await self._restart(provider, clear_backoff=True)
+
+    async def bounce(self, provider: Provider) -> dict:
+        """Restart exits without touching backoff (self-heal path)."""
+        return await self._restart(provider, clear_backoff=False)
+
+    async def _restart(self, provider: Provider, clear_backoff: bool) -> dict:
+        """Shared bounce + re-poll; optionally clears the 429 backoff.
+
+        clear_backoff=False (self-heal sweep) leaves retry_until /
+        retry_reason untouched: a bounce whose upstream limit is still
+        in force must keep its cooldown instead of hammering the limit.
+        """
         before = self._health_summary(self.runtime(provider.id).health)
         try:
             pool = await self.ensure_pool(provider)
             result = await pool.reconnect()
         except Exception as exc:
             result = {"ok": False, "error": str(exc)[:300]}
-        self.runtime(provider.id).retry_until = 0.0
-        self.runtime(provider.id).retry_reason = ""
-        self.runtime(provider.id).retry_epoch += 1
-        # Reconnect is a becoming-ready path: arm probation so the next
-        # request probes at concurrency 1 instead of riding straight in.
-        self.runtime(provider.id).probation = True
+        if clear_backoff:
+            self.runtime(provider.id).retry_until = 0.0
+            self.runtime(provider.id).retry_reason = ""
+            self.runtime(provider.id).retry_epoch += 1
+            # Reconnect is a becoming-ready path: arm probation so the
+            # next request probes at concurrency 1 instead of riding
+            # straight in.
+            self.runtime(provider.id).probation = True
         health = await self.refresh_health(provider, force=True)
         return {
             "ok": result.get("ok", False),
@@ -529,6 +550,116 @@ class ProviderRegistry:
             return await pool.debug_config()
         except Exception as exc:
             return {"error": str(exc)[:300]}
+
+    def lifecycle_of(self, provider: Provider) -> str:
+        """Current derived lifecycle for one provider (never raises)."""
+        try:
+            lc, _ = derive_lifecycle(provider, self.runtime(provider.id), self)
+        except Exception:
+            lc = "off"
+        return lc
+
+    async def maybe_self_heal(self, model: str, trace_id: str = "-") -> list[str]:
+        """Restart ratelimited providers when the model pool is half-dry.
+
+        Trigger: call after a provider enters ratelimited, or leaves
+        Ready/Ready-Probation for any other non-ready state (but NOT on
+        ready <-> ready-probation moves — promotion/demotion churn, not
+        capacity loss). When >= 50% of the *running* providers serving
+        this model (Ready / Ready-Probation / Ratelimit) are Ratelimit,
+        bounce every ratelimited one, staggered 1s apart.
+
+        The bounce restarts exits WITHOUT clearing the local backoff: a
+        restart whose upstream limit is still in force must keep its
+        cooldown (traffic re-arms it on the next 429; a recovered
+        provider is cleared on the next success via the bounce-ok path).
+        Whether the bounce actually cleared the limit is only knowable
+        from subsequent traffic, so "restarted" here means "bounced
+        without error".
+
+        Concurrency=1 via the registry lock: overlapping triggers
+        serialize, and each bounce re-checks Ratelimit just before
+        firing — a provider that already recovered (e.g. a sibling
+        sweep bounced it) is skipped, never double-bounced. Never
+        raises; the request path must not fail because the heal did.
+        Returns the bounced provider ids.
+        """
+        restarted: list[str] = []
+        try:
+            if self._self_heal_lock.locked():
+                logger.info("[%s] self-heal already in flight, skipping", trace_id)
+                return restarted
+            async with self._self_heal_lock:
+                try:
+                    providers = [
+                        p
+                        for p in self.load()
+                        if p.enabled and p.kind == "warp" and p.serves(model)
+                    ]
+                except Exception:
+                    return restarted
+                if not providers:
+                    return restarted
+                states = {p.id: self.lifecycle_of(p) for p in providers}
+                running = [
+                    pid
+                    for pid, lc in states.items()
+                    if lc in ("ready", "ready-probation", "ratelimited")
+                ]
+                limited = [pid for pid in running if states[pid] == "ratelimited"]
+                if not running or len(limited) * 2 < len(running):
+                    return restarted
+                logger.info(
+                    "[%s] self-heal: %d/%d serving %s ratelimited, restarting %s",
+                    trace_id,
+                    len(limited),
+                    len(running),
+                    model,
+                    ",".join(limited),
+                )
+                by_id = {p.id: p for p in providers}
+                for i, pid in enumerate(limited):
+                    if i:
+                        await asyncio.sleep(1.0)
+                    # Re-check under the lock: a sibling sweep may already have
+                    # bounced this provider back to ready — never
+                    # double-bounce. lifecycle_of re-derives from live
+                    # runtime state, so a recovery that landed after the
+                    # sweep started is visible here.
+                    if self.lifecycle_of(by_id[pid]) != "ratelimited":
+                        logger.info(
+                            "[%s] self-heal: %s already recovered, skipping",
+                            trace_id,
+                            pid,
+                        )
+                        continue
+                    try:
+                        # bounce(), not reconnect(): a restart whose exits
+                        # reconnect but whose upstream limit is still in
+                        # force must NOT clear the local backoff — traffic
+                        # re-arms it on the next 429 via note_ratelimited,
+                        # and a cleared backoff would hammer the limit.
+                        await self.bounce(by_id[pid])
+                    except Exception as exc:
+                        logger.warning(
+                            "[%s] self-heal: %s restart failed: %r",
+                            trace_id,
+                            pid,
+                            exc,
+                        )
+                        continue
+                    # A bounce that completed without error counts as
+                    # restarted: whether it actually cleared the upstream
+                    # limit is only knowable from subsequent traffic (the
+                    # backoff stays armed, so a still-limited provider
+                    # keeps its cooldown and a recovered one clears on
+                    # the next success). The pre-bounce skip above is the
+                    # race guard; this is outcome reporting.
+                    restarted.append(pid)
+                    logger.info("[%s] self-heal: %s bounced", trace_id, pid)
+        except Exception as exc:
+            logger.warning("[%s] self-heal sweep failed: %r", trace_id, exc)
+        return restarted
 
     async def aclose(self) -> None:
         if self._supervisor is not None:
