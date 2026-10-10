@@ -800,3 +800,41 @@ legs through mitm onto :8790:
 Census: 342 captures, 191 fold verdicts, 0 guard trips; 5
 non-empty steers, all `read` (no new steer class). No new proxy
 defect — the stress loop remains closed.
+
+### Round 16: namespace-container halt — subagents fixed locally (2026-10-10)
+
+User report: codex turn ends early on subagent-flavored prompts
+("ok working on it" then halt); claude fine with the same model.
+Remote repro via user-minted llm.citr.uk key confirmed it is NOT
+the model: the harness stderr names the killer —
+`ERROR codex_core::tools::router: error=unsupported call:
+multi_agent_v1`, twice, then an empty final message. Same model
+passes on claude (leg never declares the container) and on local
+codex tool sessions (prompt never reaches for it).
+
+Intended shape (goal check): `multi_agent_v1` IS the harness's
+subagent surface — a `type: namespace` container with 5 nested
+tools (spawn_agent/wait_agent/send_input/resume_agent/
+close_agent). The model must call the NESTED names (dotted
+`multi_agent_v1.spawn_agent` or bare); the container name itself
+is not callable. The proxy violated its own documented rule
+("the deferred namespace's OWN name never routes") for plain
+namespaces: `functions` was excluded but `multi_agent_v1` fell
+into the generic branch and routed as function_call — owned+
+routed, so no steer ever fired and the dead call replayed until
+the turn died.
+
+Fix (f635f81, client_tools.py + 4 regression tests): plain
+namespace containers never route; nested bare names own/route/
+validate; display + notice teach nested names, never the
+container. Hermetic: 138 passed, 4 failed — all 4 proven
+pre-existing on the clean tree (missing claude-schema.jsonl
+fixture).
+
+Local verify (:8790 restarted on the fix, repro through mitm
+:8080): PASS `subagent-answer=42` RC=0, zero `unsupported call`
+in harness output. Proxy proof: dotted
+`multi_agent_v1.spawn_agent` -> passthrough=[spawn_agent]; bare
+`wait_agent {}` steered once (missing targets) then recovered
+with targets next turn; real collab SpawnAgent/Wait executed
+harness-side. Guards idle.
