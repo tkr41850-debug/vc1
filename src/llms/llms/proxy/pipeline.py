@@ -2182,12 +2182,25 @@ def _maybe_auto_cycle(
         rt = registry.runtime(provider_id)
         now = time.monotonic()
         if rt.cycling:
+            # A strand (bounce leaked its clear) must not wedge this
+            # gate: resolve() already rejoins stale cordons to the ring,
+            # so consult the same staleness here and re-arm (live
+            # 2026-10-11: warp-4 sat ratelimited + cycling past cooldown,
+            # never re-bouncing).
+            from llms.proxy.egress import _cordon_stale
+
+            if not _cordon_stale(rt, provider_id):
+                logger.info(
+                    "[%s] warp provider %s already cycling, skipping auto-cycle",
+                    trace_id,
+                    provider_id,
+                )
+                return
             logger.info(
-                "[%s] warp provider %s already cycling, skipping auto-cycle",
+                "[%s] warp provider %s stale auto-cycle cordon cleared, re-arming",
                 trace_id,
                 provider_id,
             )
-            return
         cooldown = _auto_cycle_cooldown_s(request)
         if now - rt.last_auto_cycle < cooldown:
             logger.info(
@@ -2212,6 +2225,7 @@ def _maybe_auto_cycle(
             return
         rt.last_auto_cycle = now
         rt.cycling = True
+        rt.cycling_since = now
         rt.cycle_hits = 0
         bounce_epoch = rt.retry_epoch
         bounce_gen = rt.gen

@@ -376,6 +376,57 @@ def test_auto_cycle_clears_retry_on_finish(cycle_world):
     assert rt.retry_in() == 0.0
 
 
+def test_stale_cycling_flag_does_not_wedge_auto_cycle_gate(cycle_world):
+    """A stranded cycling=True must not wedge the auto-cycle gate forever.
+
+    Live 2026-10-11 (citr warp-4): ratelimited + cycling:true + cooldown
+    expired + in_flight 0 — the gate early-returned on the bare flag, the
+    set site never stamped cycling_since, and the pool never re-bounced.
+    The gate must consult cordon staleness and re-arm.
+
+    Direct gate-level call (no request traversal: a stranded flag fails
+    the shim over to noproxy, which never reaches the gate). Runs inside
+    a loop so the re-armed bounce task can actually land.
+    """
+    import asyncio
+    import time
+
+    from starlette.requests import Request
+
+    from llms.proxy.egress import CYCLING_STALL_S
+    from llms.proxy.pipeline import _maybe_auto_cycle
+
+    tc, registry, pool, _calls = cycle_world
+    rt = registry.runtime("pool1")
+    # Strand: a bounce leaked its clear long ago; cooldown long expired.
+    rt.cycling = True
+    rt.cycling_since = time.monotonic() - CYCLING_STALL_S - 10.0
+    rt.last_auto_cycle = 0.0
+    req = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "headers": [],
+            "app": tc.app,
+        }
+    )
+
+    async def _call_and_join() -> None:
+        _maybe_auto_cycle(req, "pool1", {"socks_port": 40001}, "test-trace")
+        assert rt.cycle_task is not None
+        await asyncio.wait_for(rt.cycle_task, 10)
+
+    asyncio.run(_call_and_join())
+    # Gate must treat the strand as no live bounce: fresh stamp and the
+    # bounce re-armed and landed. Unfixed, the gate early-returns and the
+    # pool never re-bounces.
+    assert rt.cycling_since > time.monotonic() - CYCLING_STALL_S
+    assert rt.last_auto_cycle > 0.0
+    assert pool.bounces == [0] or pool.bounces == [1]
+    assert rt.cycling is False
+
+
 def test_failed_bounce_keeps_retry(cycle_world, monkeypatch):
     """A bounce that lands nowhere keeps the backoff (no hot-looping)."""
     import time
