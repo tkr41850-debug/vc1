@@ -419,17 +419,17 @@ async def _do_reconnect(request: Request, provider_id: str) -> dict:
     provider = _find(registry, provider_id)
     if provider.kind != "warp":
         raise HTTPException(status_code=400, detail="only warp providers reconnect")
-    # Ack: clear backoff now, stamp the intent generation, publish the
-    # transition frame and return it at once. The bounce + refresh run
-    # in a background task. Fixes the tens-of-seconds HTTP block.
+    # Ack: stamp the intent generation, publish the transition frame and
+    # return it at once. The bounce + refresh run in a background task.
+    # Fixes the tens-of-seconds HTTP block. The backoff is NOT cleared
+    # here: it covers the full unready window (c4d202d discipline) and
+    # is cleared by _restart only after the bounce completes — clearing
+    # at ack would route traffic straight into a disconnecting pool.
+    # Probation arms here so the first post-bounce flight probes at
+    # concurrency 1; _restart re-arms it after the clear anyway.
     rt = registry.runtime(provider_id)
     rt.gen += 1
     gen = rt.gen
-    rt.retry_until = 0.0
-    rt.retry_reason = ""
-    rt.retry_epoch += 1
-    # Reconnect is a becoming-ready path: arm probation so the next
-    # request probes at concurrency 1 instead of riding straight in.
     rt.probation = True
     _sync_slots(request)
     await get_hub(request).publish("providers")

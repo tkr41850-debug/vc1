@@ -21,7 +21,7 @@ class FakeCyclePool:
         self.bounces: list[int] = []
         self.block = False
 
-    async def bounce_exit(self, idx: int) -> dict:
+    async def bounce_exit(self, idx: int, bounce_guard=None) -> dict:
         import asyncio
 
         self.bounces.append(idx)

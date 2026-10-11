@@ -220,7 +220,7 @@ async def test_providers_stream_pushes_reconnect(live_server, monkeypatch):
     state without refetching (would hang without the publish)."""
 
     class _FakePool:
-        async def reconnect(self):
+        async def reconnect(self, bounce_guard=None):
             return {"ok": True}
 
         async def refresh_statuses(self):

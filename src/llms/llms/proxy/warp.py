@@ -298,10 +298,22 @@ class WarpPool:
             return None
         return sum(1 for w in self.instances if w.ready)
 
-    async def reconnect(self) -> dict:
-        """Bounce the exits (disconnect + full boot), re-poll — local restart."""
+    async def reconnect(self, bounce_guard=None) -> dict:
+        """Bounce the exits (disconnect + full boot), re-poll — local restart.
+
+        bounce_guard, when given, is a shared mutex held across the
+        disconnect + bring-up window so a concurrent per-exit bounce of
+        the same pool serializes behind the whole-pool bring-up
+        instead of driving disconnect/connect on overlapping slots.
+        """
         before = sum(1 for w in self.instances if w.ready)
         total = len(self.instances)
+        if bounce_guard is None:
+            return await self._reconnect_locked(before, total)
+        async with bounce_guard:
+            return await self._reconnect_locked(before, total)
+
+    async def _reconnect_locked(self, before: int, total: int) -> dict:
         async with self.lock:
             for w in self.instances:
                 w.ready = False
@@ -330,13 +342,22 @@ class WarpPool:
             "after": {"ready": after, "exits": len(self.instances)},
         }
 
-    async def bounce_exit(self, idx: int) -> dict:
+    async def bounce_exit(self, idx: int, bounce_guard=None) -> dict:
         """Bounce one exit (disconnect + bring-up), leaving siblings serving.
 
         Auto-cycle path for a ratelimited exit — unlike reconnect() this does
         not clear other slots or take the pool lock. Concurrent bounces of the
-        same slot dedupe via _bouncing.
+        same slot dedupe via _bouncing. bounce_guard, when given, serializes
+        against a concurrent whole-pool reconnect of the same pool.
         """
+        if idx in self._bouncing:
+            return {"ok": False, "idx": idx, "deduped": True}
+        if bounce_guard is not None:
+            async with bounce_guard:
+                return await self._bounce_exit_locked(idx)
+        return await self._bounce_exit_locked(idx)
+
+    async def _bounce_exit_locked(self, idx: int) -> dict:
         if idx in self._bouncing:
             return {"ok": False, "idx": idx, "deduped": True}
         inst = next((w for w in self.instances if w.idx == idx), None)
@@ -867,6 +888,12 @@ class WarpSupervisor:
     data_dir: str | Path
     pools: dict[str, WarpPool] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Per-pool bounce mutexes: the self-heal sweep (whole-pool
+    # reconnect) and auto-cycle (single-exit bounce_exit) drive
+    # disconnect/connect on the same slots. Per-path guards (sweep
+    # lock, cycling flag, _bouncing set) are blind to the other path,
+    # so both bounce through here — one bring-up per pool at a time.
+    bounce_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
 
     async def ensure(
         self, provider_id: str, config: WarpPoolConfig | None = None
@@ -881,6 +908,14 @@ class WarpSupervisor:
 
     def get(self, provider_id: str) -> WarpPool | None:
         return self.pools.get(provider_id)
+
+    def bounce_lock(self, provider_id: str) -> asyncio.Lock:
+        """The per-pool bounce mutex (created on first use)."""
+        lock = self.bounce_locks.get(provider_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.bounce_locks[provider_id] = lock
+        return lock
 
     async def drop(self, provider_id: str) -> None:
         async with self.lock:

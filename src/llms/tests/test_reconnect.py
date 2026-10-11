@@ -10,7 +10,7 @@ class FakePool:
         self.ready = ready
         self.reconnects = 0
 
-    async def reconnect(self) -> dict:
+    async def reconnect(self, bounce_guard=None) -> dict:
         self.reconnects += 1
         return {
             "ok": True,
@@ -144,7 +144,7 @@ def test_reconnect_clears_retry(admin_client, tmp_path, monkeypatch):
     registry.save([Provider(id="pool1", kind="warp", exits=1, models=["*"])])
 
     class _Pool:
-        async def reconnect(self):
+        async def reconnect(self, bounce_guard=None):
             return {"ok": True}
 
         async def refresh_statuses(self):
@@ -166,6 +166,13 @@ def test_reconnect_clears_retry(admin_client, tmp_path, monkeypatch):
         headers={"Authorization": "Bearer sk-test"},
     )
     assert r.status_code == 200
+    # Deferred clear (#4): the ack arms probation but leaves the backoff
+    # covering the bounce window — _restart clears it only after the
+    # bounce completes. The TestClient portal runs the app loop in a
+    # background thread, so pump wall-clock until the bounce lands.
+    deadline = time.monotonic() + 10.0
+    while rt.retry_in() > 0 and time.monotonic() < deadline:
+        time.sleep(0.05)
     assert rt.retry_until == 0.0
     assert rt.retry_reason == ""
 
@@ -233,6 +240,21 @@ def test_boot_failure_still_moves_health_off_preparing(tmp_path, monkeypatch, ra
     assert lc == "unhealthy", lc
 
 
+async def _await_task(coro):
+    """Drive a maybe_self_heal decision coro to its sweep result."""
+
+    task = await coro
+    if task is None:
+        return []
+    return await task
+
+
+def _await_sweep(coro):
+    import asyncio as _asyncio
+
+    return _asyncio.run(_await_task(coro))
+
+
 def _self_heal_world(tmp_path, monkeypatch, states: dict[str, str]):
     """Registry with canned lifecycle states per provider id.
 
@@ -251,7 +273,7 @@ def _self_heal_world(tmp_path, monkeypatch, states: dict[str, str]):
     reconnects: list[str] = []
 
     class _Pool:
-        async def reconnect(self):
+        async def reconnect(self, bounce_guard=None):
             return {"ok": True}
 
         async def refresh_statuses(self):
@@ -313,7 +335,7 @@ def test_self_heal_restarts_limited_when_half_pool_dry(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_asyncio, "sleep", _spy_sleep)
     try:
-        done = _asyncio.run(registry.maybe_self_heal("*", "t1"))
+        done = _await_sweep(registry.maybe_self_heal("*", "t1"))
     finally:
         monkeypatch.setattr(_asyncio, "sleep", real_sleep)
     assert sorted(done) == ["w1", "w2"]
@@ -323,14 +345,13 @@ def test_self_heal_restarts_limited_when_half_pool_dry(tmp_path, monkeypatch):
 
 def test_self_heal_quiet_below_half(tmp_path, monkeypatch):
     """1/3 ratelimited -> no restart."""
-    import asyncio as _asyncio
 
     registry, reconnects = _self_heal_world(
         tmp_path,
         monkeypatch,
         {"w1": "ratelimited", "w2": "ready", "w3": "ready"},
     )
-    done = _asyncio.run(registry.maybe_self_heal("*", "t1"))
+    done = _await_sweep(registry.maybe_self_heal("*", "t1"))
     assert done == []
     assert reconnects == []
 
@@ -363,7 +384,7 @@ def test_self_heal_skips_already_recovered(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_asyncio, "sleep", _sibling_recovers_w2)
     try:
-        done = _asyncio.run(registry.maybe_self_heal("*", "t1"))
+        done = _await_sweep(registry.maybe_self_heal("*", "t1"))
     finally:
         monkeypatch.setattr(_asyncio, "sleep", real_sleep)
     assert done == ["w1"]
@@ -382,8 +403,8 @@ def test_self_heal_serializes_overlapping_sweeps(tmp_path, monkeypatch):
 
     async def scenario():
         async with registry._self_heal_lock:
-            done = await registry.maybe_self_heal("*", "t1")
-            assert done == []
+            task = await registry.maybe_self_heal("*", "t1")
+            assert task is None
         return reconnects
 
     assert _asyncio.run(scenario()) == []
@@ -432,26 +453,24 @@ def test_self_heal_skips_recently_bounced(tmp_path, monkeypatch):
     bounced within SELF_HEAL_COOLDOWN_S is skipped (stays counted in
     the ratio, so the gate still fires for its siblings).
     """
-    import asyncio as _asyncio
 
     registry, reconnects = _self_heal_world(
         tmp_path,
         monkeypatch,
         {"w1": "ratelimited", "w2": "ratelimited", "w3": "ready"},
     )
-    first = _asyncio.run(registry.maybe_self_heal("*", "t1"))
+    first = _await_sweep(registry.maybe_self_heal("*", "t1"))
     assert sorted(first) == ["w1", "w2"]
     assert sorted(reconnects) == ["w1", "w2"]
     # Immediate second sweep: gate still fires (2/3 limited) but both
     # providers are inside the cooldown — no re-bounce.
-    second = _asyncio.run(registry.maybe_self_heal("*", "t2"))
+    second = _await_sweep(registry.maybe_self_heal("*", "t2"))
     assert second == []
     assert sorted(reconnects) == ["w1", "w2"]
 
 
 def test_self_heal_rebounces_after_cooldown(tmp_path, monkeypatch):
     """A still-limited provider is bounced again past the cooldown."""
-    import asyncio as _asyncio
     import time as _time
 
     from llms.proxy.providers import SELF_HEAL_COOLDOWN_S
@@ -461,12 +480,12 @@ def test_self_heal_rebounces_after_cooldown(tmp_path, monkeypatch):
         monkeypatch,
         {"w1": "ratelimited", "w2": "ready"},
     )
-    assert _asyncio.run(registry.maybe_self_heal("*", "t1")) == ["w1"]
+    assert _await_sweep(registry.maybe_self_heal("*", "t1")) == ["w1"]
     # Age the bounce past the cooldown; the provider never recovered
     # (backoff re-armed by traffic), so the next sweep re-bounces it.
     registry.runtime("w1").last_self_heal -= SELF_HEAL_COOLDOWN_S + 1.0
     registry.runtime("w1").note_ratelimited(60.0, "still limited")
-    assert _asyncio.run(registry.maybe_self_heal("*", "t2")) == ["w1"]
+    assert _await_sweep(registry.maybe_self_heal("*", "t2")) == ["w1"]
     assert reconnects == ["w1", "w1"]
     _ = _time.monotonic()
 
@@ -504,9 +523,11 @@ def test_self_heal_drains_in_flight_before_bounce(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "bounce", _spy_bounce)
 
     async def scenario():
-        task = _asyncio.create_task(_drain())
-        done = await registry.maybe_self_heal("*", "t1")
-        await task
+        drainer = _asyncio.create_task(_drain())
+        sweep = await registry.maybe_self_heal("*", "t1")
+        assert sweep is not None
+        done = await sweep
+        await drainer
         return done
 
     assert _asyncio.run(scenario()) == ["w1"]
@@ -514,8 +535,7 @@ def test_self_heal_drains_in_flight_before_bounce(tmp_path, monkeypatch):
 
 
 def test_self_heal_drain_expiry_bounces_anyway(tmp_path, monkeypatch):
-    """A wedged body must not pin the concurrency-1 lock: expiry bounces."""
-    import asyncio as _asyncio
+    """A wedged body must not pin the sweep: expiry bounces."""
 
     from llms.proxy.providers import SELF_HEAL_DRAIN_S
 
@@ -526,5 +546,5 @@ def test_self_heal_drain_expiry_bounces_anyway(tmp_path, monkeypatch):
         {"w1": "ratelimited", "w2": "ready"},
     )
     registry.runtime("w1").in_flight = 5  # never drains
-    assert _asyncio.run(registry.maybe_self_heal("*", "t1")) == ["w1"]
+    assert _await_sweep(registry.maybe_self_heal("*", "t1")) == ["w1"]
     assert _reconnects == ["w1"]

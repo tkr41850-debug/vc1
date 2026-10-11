@@ -125,7 +125,7 @@ def test_reconnect_invalidates_ips(admin_client, tmp_path, monkeypatch):
     tc, _ = admin_client
 
     class FakePool:
-        async def reconnect(self):
+        async def reconnect(self, bounce_guard=None):
             return {"ok": True, "before": {}, "after": {}}
 
         async def refresh_statuses(self):

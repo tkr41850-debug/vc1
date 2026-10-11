@@ -216,7 +216,7 @@ def test_reconnect_route_arms_probation(admin_client, monkeypatch):
     from llms.proxy.providers import ProviderHealth, WarpExit, derive_lifecycle
 
     class _Pool:
-        async def reconnect(self):
+        async def reconnect(self, bounce_guard=None):
             return {"ok": True}
 
         async def refresh_statuses(self):
@@ -264,6 +264,11 @@ def test_reconnect_route_arms_probation(admin_client, monkeypatch):
         headers={"Authorization": "Bearer sk-test"},
     )
     assert r.status_code == 200
+    # Deferred clear (#4): backoff covers the background bounce window;
+    # _restart clears it on completion. Pump until the bounce lands.
+    deadline = _time.monotonic() + 10.0
+    while rt.retry_in() > 0 and _time.monotonic() < deadline:
+        _time.sleep(0.05)
     assert rt.retry_until == 0.0
     assert rt.probation is True
     rc1 = next(x for x in registry.load() if x.id == "rc1")

@@ -1924,7 +1924,8 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 _maybe_auto_cycle(request, provider_id, via_warp, trace_id)
                 # Entering ratelimited is a self-heal trigger: when half
                 # the running model pool is limited, restart the limited
-                # ones (staggered, concurrency-guarded, skip recovered).
+                # ones (decision inline, sweep in background — the 429
+                # response is never delayed by drain/stagger/bring-up).
                 await registry.maybe_self_heal(req.model, trace_id)
             else:
                 # Direct path (fail-open or noproxy-routed): record on the
@@ -1968,12 +1969,6 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         )
     _inflight_release(request, provider_id)
     if registry is not None and provider_id:
-        try:
-            before_lc = registry.lifecycle_of(
-                next(p for p in registry.load() if p.id == provider_id)
-            )
-        except Exception:
-            before_lc = None
         _settle_probation(request, registry, provider_id, response)
         status = response.status_code if hasattr(response, "status_code") else 0
         error = ""
@@ -1996,17 +1991,6 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 error=str(error)[:200],
             )
         )
-        # Self-heal check: a provider leaving Ready/Ready-Probation for a
-        # worse state (but NOT ready <-> ready-probation churn) may mean
-        # the model pool is going dry — sweep when half of it is limited.
-        try:
-            after_lc = registry.lifecycle_of(
-                next(p for p in registry.load() if p.id == provider_id)
-            )
-        except Exception:
-            after_lc = None
-        if _left_ready(before_lc, after_lc):
-            await registry.maybe_self_heal(req.model, trace_id)
     return response
 
 
@@ -2015,6 +1999,11 @@ def _left_ready(before: str | None, after: str | None) -> bool:
 
     Ready <-> ready-probation moves are promotion/demotion churn, not
     capacity loss — they must not trigger the self-heal sweep.
+
+    Retained for tests; the post-settle call site was removed (#6: the
+    before snapshot was taken after note_ratelimited already armed, so
+    nothing between the measurements could cross the boundary — the
+    429 arm is the single trigger now).
     """
     return (
         before in ("ready", "ready-probation")
@@ -2237,7 +2226,14 @@ def _maybe_auto_cycle(
         async def _bounce_and_clear() -> None:
             bounced_ok = False
             try:
-                result = await pool.bounce_exit(inst.idx)
+                guard = None
+                try:
+                    sup = getattr(registry, "_supervisor", None)
+                    get_guard = getattr(sup, "bounce_lock", None)
+                    guard = get_guard(provider.id) if callable(get_guard) else None
+                except Exception:
+                    guard = None
+                result = await pool.bounce_exit(inst.idx, bounce_guard=guard)
                 bounced_ok = isinstance(result, dict) and bool(result.get("ok", False))
                 logger.info(
                     "[%s] warp provider %s exit %s bounce done: %s",
