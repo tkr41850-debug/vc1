@@ -469,6 +469,58 @@ def test_self_heal_skips_recently_bounced(tmp_path, monkeypatch):
     assert sorted(reconnects) == ["w1", "w2"]
 
 
+def test_self_heal_parallel_sweeps_bounce_once(tmp_path, monkeypatch):
+    """Same-tick parallel sweeps claim targets: exactly one bounce each.
+
+    Regression for the live 08:43/09:46 stampedes: 4 requests decided
+    within ~2s, each past the decision lock before any bounce landed
+    (lock releases at decision; cooldown arms only after a bounce).
+    All four sweeps bounced warp-3/5/6 in parallel. The decision-time
+    claim makes the first sweep the owner — later same-tick sweeps see
+    the foreign claim and stand down at bounce time.
+    """
+    import asyncio as _asyncio
+
+    registry, reconnects = _self_heal_world(
+        tmp_path,
+        monkeypatch,
+        {
+            "w1": "ratelimited",
+            "w2": "ratelimited",
+            "w3": "ratelimited",
+            "w4": "ready",
+        },
+    )
+    # Slow the bounce so every sweep decides before any bounce lands
+    # (the live shape: decisions at +0/+2s, first bounce at +2s).
+    orig_bounce = registry.bounce
+
+    async def _slow_bounce(provider):
+        await _asyncio.sleep(0.2)
+        return await orig_bounce(provider)
+
+    monkeypatch.setattr(registry, "bounce", _slow_bounce)
+
+    async def scenario():
+        tasks = await _asyncio.gather(
+            registry.maybe_self_heal("*", "t1"),
+            registry.maybe_self_heal("*", "t2"),
+            registry.maybe_self_heal("*", "t3"),
+            registry.maybe_self_heal("*", "t4"),
+        )
+        done = []
+        for task in tasks:
+            if task is not None:
+                done.append(await task)
+        return done
+
+    results = _asyncio.run(scenario())
+    assert sorted(reconnects) == ["w1", "w2", "w3"]
+    # Exactly one sweep owned the targets; the rest stood down.
+    assert sorted(r for d in results for r in d) == ["w1", "w2", "w3"]
+    assert sum(1 for d in results if d) == 1
+
+
 def test_self_heal_rebounces_after_cooldown(tmp_path, monkeypatch):
     """A still-limited provider is bounced again past the cooldown."""
     import time as _time

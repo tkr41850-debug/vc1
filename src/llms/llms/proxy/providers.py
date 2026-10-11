@@ -125,6 +125,13 @@ class ProviderRuntime:
         # SELF_HEAL_COOLDOWN_S so a mid-handshake tunnel is never
         # re-bounced by a stale in-flight 429.
         self.last_self_heal: float = 0.0
+        # Sweep-claim marker: epoch of the sweep that claimed this
+        # provider at decision time (0 = unclaimed). Only the claiming
+        # sweep may bounce it — parallel same-tick sweeps each hold a
+        # distinct epoch, so all but the claimer skip at bounce time.
+        # Cleared on bounce completion (superseded by last_self_heal) and
+        # never consulted by the decision path (the cooldown owns that).
+        self.self_heal_claim: float = 0.0
 
     def retry_in(self) -> float:
         return max(0.0, self.retry_until - time.monotonic())
@@ -201,6 +208,15 @@ class ProviderRegistry:
         # Self-heal sweep guard (concurrency=1): at most one
         # maybe_self_heal sweep in flight per registry (see below).
         self._self_heal_lock = asyncio.Lock()
+        # Sweep-epoch marker: monotonic timestamp when the latest sweep
+        # launched. Stamps every sweep target at DECISION time so parallel
+        # sweeps (same tick, each past the decision lock before the first
+        # bounce lands) cannot each bounce the same provider — only the
+        # sweep whose stamp matches the runtime's may bounce it. Covers
+        # the window the decision lock + cooldown both miss: the lock is
+        # released before the background sweep starts, and the cooldown
+        # only arms after a bounce completes.
+        self._self_heal_epoch: float = 0.0
 
     def _pool_config(self, provider: Provider):
         from llms.proxy import warp as _warp
@@ -673,8 +689,19 @@ class ProviderRegistry:
                     model,
                     ",".join(sweep),
                 )
+                # Claim every target at decision time: parallel same-tick
+                # sweeps each pass the lock + cooldown before any bounce
+                # lands (the lock releases when the decision returns; the
+                # cooldown arms only after a bounce completes). The epoch
+                # stamp makes the first sweep to decide the owner — later
+                # same-tick sweeps see the claim and skip at bounce time
+                # instead of each bouncing the same provider.
+                epoch = time.monotonic()
+                self._self_heal_epoch = epoch
+                for pid in sweep:
+                    self.runtime(pid).self_heal_claim = epoch
                 task = asyncio.create_task(
-                    self._self_heal_sweep(by_id, sweep, model, trace_id)
+                    self._self_heal_sweep(by_id, sweep, model, trace_id, epoch)
                 )
                 return task
         except Exception as exc:
@@ -687,11 +714,15 @@ class ProviderRegistry:
         targets: list[str],
         model: str,
         trace_id: str,
+        epoch: float = 0.0,
     ) -> list[str]:
         """Background sweep body: drain, stagger, bounce each target.
 
         Runs outside the decision lock (per-provider cooldown + lifecycle
         re-checks are the race guards here, not the lock). Never raises.
+        `epoch` is this sweep's decision-time stamp: a target claimed by
+        a LATER same-tick sweep (its self_heal_claim moved on) is skipped
+        — parallel sweeps must not each bounce the same provider.
         """
         restarted: list[str] = []
         try:
@@ -699,6 +730,17 @@ class ProviderRegistry:
                 if i:
                     await asyncio.sleep(1.0)
                 rt = self.runtime(pid)
+                # Claim check: a later same-tick sweep re-decided while
+                # this sweep was draining/staggering and claimed this
+                # provider (its epoch is newer). Only the claim owner
+                # bounces — the stale sweep stands down.
+                if epoch and rt.self_heal_claim and rt.self_heal_claim != epoch:
+                    logger.info(
+                        "[%s] self-heal: %s claimed by a later sweep, skipping",
+                        trace_id,
+                        pid,
+                    )
+                    continue
                 # Post-drain re-check: the decision was taken under the
                 # lock before the background sweep started — a recovery
                 # (or disable/delete) that landed in between must skip
@@ -774,6 +816,11 @@ class ProviderRegistry:
                     )
                     continue
                 rt.last_self_heal = time.monotonic()
+                # The bounce supersedes the decision-time claim: later
+                # sweeps judge this provider by the cooldown, not the
+                # stale epoch (which would otherwise read as "claimed by
+                # another sweep" forever).
+                rt.self_heal_claim = 0.0
                 # A bounce that completed without error counts as
                 # restarted: whether it actually cleared the upstream
                 # limit is only knowable from subsequent traffic (the

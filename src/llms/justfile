@@ -102,6 +102,15 @@ test:
     here="."
     cd "$here" && uv run pytest -q
 
+battery *args:
+    #!/usr/bin/env bash
+    # Live CLI battery (codex/claude through a gateway). Opt-in: needs
+    # LLMS_BATTERY_LIVE=1 plus a key file, e.g.
+    #   LLMS_BATTERY_LIVE=1 BATTERY_BASE=<gateway-url> just battery codex/
+    set -u
+    here="."
+    cd "$here" && LLMS_BATTERY_LIVE=1 uv run --with pytest-xdist pytest battery/ -n 3 {{args}} -q
+
 probe:
     #!/usr/bin/env bash
     set -u
@@ -220,5 +229,5 @@ lint:
     #!/usr/bin/env bash
     set -u
     here="."
-    cd "$here" && uv run ruff check llms tests scripts
-    cd "$here" && uv run ruff format --check llms tests scripts
+    cd "$here" && uv run ruff check llms tests scripts battery
+    cd "$here" && uv run ruff format --check llms tests scripts battery
