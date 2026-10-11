@@ -665,16 +665,56 @@ def _responses_tool_from_ir(t: ToolDef) -> dict:
         return tool
     # Other built-in tools (file_search, computer, mcp, namespace, ...):
     # forward the definition as-is (fail-open; upstream validates).
-    # description rides along ALWAYS (even empty): Zen 400s server tools
-    # with a missing description key (seen live with codex namespace
-    # containers) — its validator reads like pydantic "field required",
-    # which an empty string satisfies but an absent key does not.
-    tool: dict = {"type": t.kind, "description": t.description or ""}
+    # description rides along ALWAYS and NEVER empty: Zen 400s server
+    # tools with a missing description key (seen live with codex
+    # namespace containers — its validator reads like pydantic "field
+    # required", which an empty string satisfies but an absent key does
+    # not), and now rejects the empty string too (live luna 2026-10-11:
+    # `tools[12].description` length >= 1 on the deferred `functions`
+    # namespace, whose harness declaration carries no description).
+    # Emit-time fill only: req.tools keeps "" so the notice renderer
+    # still sees the harness's own declaration shape.
+    desc = t.description or ""
+    if t.kind == "namespace" and not desc.strip():
+        nested = (t.options.get("tools") or []) if isinstance(t.options, dict) else []
+        names = sorted(
+            str(n.get("name", ""))
+            for n in nested
+            if isinstance(n, dict) and n.get("name")
+        )
+        desc = (
+            f"Namespace container for deferred tools ({', '.join(names)}); "
+            "invoke the nested tools, not the container itself."
+            if names
+            else "Namespace container for deferred tools."
+        )
+    tool: dict = {"type": t.kind, "description": desc}
     if t.name:
         tool["name"] = t.name
     if t.parameters:
         tool["parameters"] = t.parameters
     tool.update(t.options)
+    if t.kind == "namespace":
+        # Live Zen 2026-10-11: a nested `custom` entry (the deferred
+        # exec orchestrator) is rejected outright ("`custom` tools are
+        # not supported on this endpoint") while sibling function
+        # entries pass (a wait-only nested list returned 200). Strip
+        # custom entries from the EMITTED nested list only — every
+        # exec-channel mechanism (route/notice/fold/replay) reads
+        # req.tools at ingress, so the channel is unaffected (the
+        # harness executes exec; upstream can never dispatch it).
+        # Fail-open: when nothing but customs remains, keep the
+        # declaration verbatim (upstream validates; the verbatim shape
+        # preserves the debuggable contract).
+        nested = tool.get("tools")
+        if isinstance(nested, list):
+            kept = [
+                n
+                for n in nested
+                if not (isinstance(n, dict) and n.get("type") == "custom")
+            ]
+            if kept:
+                tool["tools"] = kept
     return tool
 
 

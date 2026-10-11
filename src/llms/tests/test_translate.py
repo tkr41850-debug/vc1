@@ -890,6 +890,9 @@ def test_responses_image_output_stays_viewable():
 
 def test_responses_namespace_tool_keeps_description():
     # Live Zen 400: codex namespace containers without description.
+    # Live Zen 2026-10-11 follow-up: the empty string is rejected too
+    # (length >= 1), so emit fills it from the nested tool names —
+    # ingress keeps "" for the notice renderer.
     req = from_responses(
         {
             "model": "m",
@@ -907,10 +910,61 @@ def test_responses_namespace_tool_keeps_description():
         }
     )
     assert req.tools[0].kind == "namespace"
+    assert req.tools[0].description == ""
     out = to_zen_responses(req)["tools"][0]
     assert out["type"] == "namespace"
-    assert "description" in out
+    assert "close_agent" in out["description"]
     assert out["tools"] == [{"type": "function", "name": "close_agent"}]
+
+
+def test_responses_namespace_strips_nested_custom_on_emit():
+    # Live Zen 2026-10-11: nested `custom` entries (the deferred exec
+    # orchestrator) are rejected outright ("`custom` tools are not
+    # supported on this endpoint") while sibling function entries pass
+    # (wait-only nested list returned 200). Emit drops customs only —
+    # ingress keeps the orchestrator so route/notice/fold/replay still
+    # see it. Fail-open: customs-only keeps the declaration verbatim.
+    from tests.test_client_tools import _luna_namespace
+
+    (ns,) = (_luna_namespace(),)
+    req = from_responses(
+        {
+            "model": "gpt-5.6-luna",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "functions",
+                    "description": "",
+                    "tools": ns.options["tools"],
+                }
+            ],
+        }
+    )
+    out = to_zen_responses(req)["tools"][0]
+    assert out["type"] == "namespace"
+    assert "exec" in out["description"] and "wait" in out["description"]
+    assert [n.get("name") for n in out["tools"]] == ["wait"]
+    nested_in = req.tools[0].options["tools"]
+    assert [n.get("name") for n in nested_in] == ["exec", "wait"]
+    customs_only = from_responses(
+        {
+            "model": "m",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "functions",
+                    "description": "",
+                    "tools": [
+                        {"type": "custom", "name": "exec", "description": "run js"}
+                    ],
+                }
+            ],
+        }
+    )
+    out2 = to_zen_responses(customs_only)["tools"][0]
+    assert [n.get("name") for n in out2["tools"]] == ["exec"]
 
 
 def test_responses_function_tool_sibling_keys_round_trip():
@@ -973,7 +1027,13 @@ def test_responses_additional_tools_dissolve():
     tools = out["tools"]
     assert tools[0]["type"] == "namespace"
     assert "description" in tools[0]
-    assert tools[0]["tools"][0]["name"] == "exec"
+    # Live Zen 2026-10-11 rejects nested `custom` entries outright
+    # ("`custom` tools are not supported on this endpoint"): the exec
+    # orchestrator never rides the wire — the harness executes it, and
+    # every exec-channel mechanism reads req.tools at ingress.
+    # Fail-open: this customs-only declaration rides verbatim.
+    assert [n.get("name") for n in tools[0]["tools"]] == ["exec"]
+    assert req.tools[0].options["tools"][0]["name"] == "exec"
 
 
 def test_tool_choice_canonicalized_across_dialects():
