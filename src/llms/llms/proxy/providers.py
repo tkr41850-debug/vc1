@@ -73,6 +73,13 @@ class RecentRequest:
 # own 45s bring-up window.
 BOOT_GRACE_S = 45.0
 
+# Self-heal re-bounce guard: a provider bounced by the sweep is skipped
+# by later sweeps for this long, so its tunnel has time to re-handshake
+# (45s bring-up window) before another sweep may bounce it again. Live
+# finding: without this, stale in-flight 429s re-fired the sweep every
+# ~15s and the same 3-4 warps bounced for 7+ minutes, never recovering.
+SELF_HEAL_COOLDOWN_S = 60.0
+
 
 class ProviderRuntime:
     """Live per-provider state: health snapshot, RetryIn, recent requests, SSE."""
@@ -105,6 +112,11 @@ class ProviderRuntime:
         # in-flight request until the first success promotes it. Probe 429
         # returns it to ratelimited (60s default / retry-after value).
         self.probation: bool = False
+        # Self-heal re-bounce guard: monotonic timestamp of the last
+        # sweep bounce (0 = never). Later sweeps skip providers inside
+        # SELF_HEAL_COOLDOWN_S so a mid-handshake tunnel is never
+        # re-bounced by a stale in-flight 429.
+        self.last_self_heal: float = 0.0
 
     def retry_in(self) -> float:
         return max(0.0, self.retry_until - time.monotonic())
@@ -621,6 +633,20 @@ class ProviderRegistry:
                 for i, pid in enumerate(limited):
                     if i:
                         await asyncio.sleep(1.0)
+                    # Re-bounce guard: a provider bounced by a recent sweep
+                    # is mid-handshake — another bounce tears down the
+                    # tunnel the last sweep just rebuilt. Skip it so the
+                    # cooldown window (not the sweep cadence) sets the
+                    # re-bounce rate; the provider stays counted in the
+                    # ratio, so the gate still fires for its siblings.
+                    rt = self.runtime(pid)
+                    if time.monotonic() - rt.last_self_heal < SELF_HEAL_COOLDOWN_S:
+                        logger.info(
+                            "[%s] self-heal: %s bounced recently, skipping",
+                            trace_id,
+                            pid,
+                        )
+                        continue
                     # Re-check under the lock: a sibling sweep may already have
                     # bounced this provider back to ready — never
                     # double-bounce. lifecycle_of re-derives from live
@@ -648,6 +674,7 @@ class ProviderRegistry:
                             exc,
                         )
                         continue
+                    rt.last_self_heal = time.monotonic()
                     # A bounce that completed without error counts as
                     # restarted: whether it actually cleared the upstream
                     # limit is only knowable from subsequent traffic (the

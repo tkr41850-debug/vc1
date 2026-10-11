@@ -421,3 +421,51 @@ def test_distinct_sessions_hash_distinct_buckets():
     assert bucket_for(None, "m", 1024, "sk-x", "ses_same") == bucket_for(
         None, "m", 1024, "sk-x", "ses_same"
     )
+
+
+def test_self_heal_skips_recently_bounced(tmp_path, monkeypatch):
+    """A sweep inside the re-bounce cooldown never re-bounces.
+
+    Regression for the live re-bounce churn: stale in-flight 429s
+    re-fired the sweep ~15s after the last bounce and the same 3-4
+    warps bounced for 7+ minutes without recovering. A provider
+    bounced within SELF_HEAL_COOLDOWN_S is skipped (stays counted in
+    the ratio, so the gate still fires for its siblings).
+    """
+    import asyncio as _asyncio
+
+    registry, reconnects = _self_heal_world(
+        tmp_path,
+        monkeypatch,
+        {"w1": "ratelimited", "w2": "ratelimited", "w3": "ready"},
+    )
+    first = _asyncio.run(registry.maybe_self_heal("*", "t1"))
+    assert sorted(first) == ["w1", "w2"]
+    assert sorted(reconnects) == ["w1", "w2"]
+    # Immediate second sweep: gate still fires (2/3 limited) but both
+    # providers are inside the cooldown — no re-bounce.
+    second = _asyncio.run(registry.maybe_self_heal("*", "t2"))
+    assert second == []
+    assert sorted(reconnects) == ["w1", "w2"]
+
+
+def test_self_heal_rebounces_after_cooldown(tmp_path, monkeypatch):
+    """A still-limited provider is bounced again past the cooldown."""
+    import asyncio as _asyncio
+    import time as _time
+
+    from llms.proxy.providers import SELF_HEAL_COOLDOWN_S
+
+    registry, reconnects = _self_heal_world(
+        tmp_path,
+        monkeypatch,
+        {"w1": "ratelimited", "w2": "ready"},
+    )
+    assert _asyncio.run(registry.maybe_self_heal("*", "t1")) == ["w1"]
+    # Age the bounce past the cooldown; the provider never recovered
+    # (backoff re-armed by traffic), so the next sweep re-bounces it.
+    registry.runtime("w1").last_self_heal -= SELF_HEAL_COOLDOWN_S + 1.0
+    registry.runtime("w1").note_ratelimited(60.0, "still limited")
+    assert _asyncio.run(registry.maybe_self_heal("*", "t2")) == ["w1"]
+    assert reconnects == ["w1", "w1"]
+    _ = _time.monotonic()
