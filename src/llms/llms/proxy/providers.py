@@ -80,6 +80,14 @@ BOOT_GRACE_S = 45.0
 # ~15s and the same 3-4 warps bounced for 7+ minutes, never recovering.
 SELF_HEAL_COOLDOWN_S = 60.0
 
+# Drain-before-bounce bound: a 429 only cordons the provider (new
+# requests steer away) — the tunnel stays open until the bounce tears
+# it down, so a queued restart waits this long for in-flight to finish
+# instead of killing live requests on sibling exits. Bounded: when
+# every candidate is limited, least-wait routing keeps landing new
+# flights here, so expiry bounces anyway.
+SELF_HEAL_DRAIN_S = 15.0
+
 
 class ProviderRuntime:
     """Live per-provider state: health snapshot, RetryIn, recent requests, SSE."""
@@ -659,6 +667,32 @@ class ProviderRegistry:
                             pid,
                         )
                         continue
+                    # Drain before bounce: the 429 only cordoned the
+                    # provider (new requests already steer away) — the
+                    # tunnel is still open with live flights on it, and
+                    # reconnect() disconnects ALL exits, killing healthy
+                    # requests on sibling exits that never 429'd. Wait
+                    # for in-flight to clear first, bounded: the sweep
+                    # holds the concurrency-1 lock, so siblings must not
+                    # wait on a slow body. Target <= 1, not 0: the
+                    # triggering 429's own request is still counted in
+                    # in_flight (its release runs after the sweep), so 0
+                    # would self-deadlock to the deadline every time.
+                    # Least-wait routing keeps landing new flights on an
+                    # all-limited pool, so expiry bounces anyway.
+                    drain_start = time.monotonic()
+                    while (
+                        max(0, int(getattr(rt, "in_flight", 0) or 0)) > 1
+                        and time.monotonic() - drain_start < SELF_HEAL_DRAIN_S
+                    ):
+                        await asyncio.sleep(0.2)
+                    if max(0, int(getattr(rt, "in_flight", 0) or 0)) > 1:
+                        logger.info(
+                            "[%s] self-heal: %s drain expired with %s in flight, bouncing anyway",
+                            trace_id,
+                            pid,
+                            rt.in_flight,
+                        )
                     try:
                         # bounce(), not reconnect(): a restart whose exits
                         # reconnect but whose upstream limit is still in

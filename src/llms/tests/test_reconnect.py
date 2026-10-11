@@ -469,3 +469,62 @@ def test_self_heal_rebounces_after_cooldown(tmp_path, monkeypatch):
     assert _asyncio.run(registry.maybe_self_heal("*", "t2")) == ["w1"]
     assert reconnects == ["w1", "w1"]
     _ = _time.monotonic()
+
+
+def test_self_heal_drains_in_flight_before_bounce(tmp_path, monkeypatch):
+    """A queued restart waits for in-flight to clear before bouncing.
+
+    The 429 only cordons (new traffic steers away); the tunnel stays
+    open with live flights, and reconnect() disconnects ALL exits —
+    bouncing immediately kills healthy sibling-exit requests. The
+    sweep must let in-flight drain (target <= 1: the triggering 429's
+    own request is still counted) before firing.
+    """
+    import asyncio as _asyncio
+
+    registry, _reconnects = _self_heal_world(
+        tmp_path,
+        monkeypatch,
+        {"w1": "ratelimited", "w2": "ready"},
+    )
+    rt = registry.runtime("w1")
+    rt.in_flight = 3
+    order: list[str] = []
+    orig_bounce = registry.bounce
+
+    async def _spy_bounce(provider):
+        order.append(f"bounce@{rt.in_flight}")
+        return await orig_bounce(provider)
+
+    async def _drain():
+        await _asyncio.sleep(0.5)
+        rt.in_flight = 1  # trigger's own flight remains
+        order.append("drained")
+
+    monkeypatch.setattr(registry, "bounce", _spy_bounce)
+
+    async def scenario():
+        task = _asyncio.create_task(_drain())
+        done = await registry.maybe_self_heal("*", "t1")
+        await task
+        return done
+
+    assert _asyncio.run(scenario()) == ["w1"]
+    assert order == ["drained", "bounce@1"]
+
+
+def test_self_heal_drain_expiry_bounces_anyway(tmp_path, monkeypatch):
+    """A wedged body must not pin the concurrency-1 lock: expiry bounces."""
+    import asyncio as _asyncio
+
+    from llms.proxy.providers import SELF_HEAL_DRAIN_S
+
+    assert SELF_HEAL_DRAIN_S <= 30, "drain bound must stay well under tunnel bring-up"
+    registry, _reconnects = _self_heal_world(
+        tmp_path,
+        monkeypatch,
+        {"w1": "ratelimited", "w2": "ready"},
+    )
+    registry.runtime("w1").in_flight = 5  # never drains
+    assert _asyncio.run(registry.maybe_self_heal("*", "t1")) == ["w1"]
+    assert _reconnects == ["w1"]
