@@ -229,6 +229,86 @@ def test_stale_cycling_cordon_ages_out_of_ring(tmp_path):
     assert seen == {"w1", "w2"}, seen
 
 
+def test_sweep_restores_concurrent_auto_cycle_cordon(tmp_path):
+    """A sweep overlapping an auto-cycle bounce must not drop its cordon.
+
+    Live 2026-10-11 (citr warp-1/2/3): ready-probation + cycling:true +
+    in_flight 0, zero requests, fresh cycle_cooldown_remaining. The wedge:
+    an auto-cycle bounce holds cycling=True across its per-exit bounce;
+    a concurrent self-heal sweep (whole-pool _restart) save/restores the
+    flag — was_cycling=True means the sweep's finally restores True, and
+    when the auto-cycle bounce lands first its clear drops a cordon the
+    sweep is still holding. The loser-to-finish leaves cycling=True with
+    no bounce behind it, and the ring starves the pool (resolvable only
+    by the 10-min stale age-out).
+
+    Repro: auto-cycle arms the cordon, then a sweep _restart overlaps and
+    finishes after the auto-cycle bounce lands. The pool must rejoin the
+    ring (cycling False) once both complete.
+    """
+    import asyncio as _asyncio
+    import time as _time
+
+    from llms.proxy.config import Settings
+    from llms.proxy.providers import Provider, ProviderRegistry
+
+    settings = Settings(data_dir=str(tmp_path))
+    registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
+    registry.save([Provider(id="w1", kind="warp", models=["gpt-*"], exits=1)])
+    provider = next(p for p in registry.load() if p.id == "w1")
+    rt = registry.runtime("w1")
+
+    release_sweep = _asyncio.Event()
+    sweep_entered = _asyncio.Event()
+    cycle_done = _asyncio.Event()
+
+    class _OverlapPool:
+        async def reconnect(self, bounce_guard=None):
+            # Sweep's whole-pool bounce: enters while the auto-cycle
+            # bounce is in flight, lands after it.
+            sweep_entered.set()
+            await release_sweep.wait()
+            return {"ok": True}
+
+        async def refresh_statuses(self):
+            return None
+
+        def snapshot(self):
+            return {"error": "", "exits": []}
+
+    async def _fake_ensure(_provider):
+        return _OverlapPool()
+
+    async def _fake_refresh(_provider, force=False):
+        return registry.runtime(_provider.id).health
+
+    registry.ensure_pool = _fake_ensure  # type: ignore[assignment]
+    registry.refresh_health = _fake_refresh  # type: ignore[assignment]
+
+    async def _main() -> bool:
+        # Auto-cycle arms the cordon (mirrors the pipeline set site).
+        now = _time.monotonic()
+        rt.cycling = True
+        rt.cycling_since = now
+        rt.last_auto_cycle = now
+        # Sweep _restart overlaps: saves was_cycling=True, holds the
+        # cordon across its own bounce window.
+        sweep_task = _asyncio.create_task(
+            registry._restart(provider, clear_backoff=False)
+        )
+        await sweep_entered.wait()
+        # Auto-cycle bounce lands first: clears the cordon.
+        rt.cycling = False
+        rt.cycling_since = 0.0
+        cycle_done.set()
+        # Sweep lands after: must not resurrect the dropped cordon.
+        release_sweep.set()
+        await sweep_task
+        return rt.cycling
+
+    assert _asyncio.run(_main()) is False
+
+
 def test_cancelled_restart_restores_cycling_cordon(tmp_path):
     """Cancelling _restart mid-bounce must not strand cycling=True.
 

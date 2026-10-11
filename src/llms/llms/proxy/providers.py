@@ -472,27 +472,34 @@ class ProviderRegistry:
         # Routing cordon: resolve() steers away from cycling providers,
         # so mark the bounce window — otherwise traffic dials stale
         # SOCKS ports at half-torn-down exits until the post-bounce
-        # refresh re-syncs (502s). Save/restore (not force-False): the
-        # auto-cycle path holds cycling=True across its own per-exit
-        # bounce and a concurrent sweep must not stomp it. The restore
-        # lives in finally: CancelledError (BaseException, e.g. a sweep
-        # task dropped mid-bounce) skips except-Exception, and a
-        # skipped restore strands the cordon — the ring then starves a
-        # healthy pool forever (live 2026-10-11). A return inside the
-        # try would be swallowed by finally, so there is none.
+        # refresh re-syncs (502s). Restore is conditional, not blind: a
+        # concurrent owner (auto-cycle's per-exit bounce) may have
+        # cleared or re-armed the flag under us, and its state wins. A
+        # blind restore of a saved True over a landed clear strands the
+        # cordon with no bounce behind it — the ring then starves a
+        # healthy pool (live 2026-10-11: warp-1/2/3 sat
+        # ready-probation + cycling:true + in_flight 0, zero requests).
+        # Conversely a blind clear over a fresh re-arm would drop a live
+        # bounce's cordon. So: clear only our own cordon (armed here,
+        # stamp untouched); otherwise leave the owner's state alone. The
+        # restore lives in finally: CancelledError (BaseException, e.g.
+        # a sweep task dropped mid-bounce) skips except-Exception, and
+        # a skipped restore strands the cordon. A return inside the try
+        # would be swallowed by finally, so there is none.
         was_cycling = rt.cycling
-        was_cycling_since = rt.cycling_since
         rt.cycling = True
         if not was_cycling:
             rt.cycling_since = time.monotonic()
+        own_stamp = rt.cycling_since
         try:
             pool = await self.ensure_pool(provider)
             result = await pool.reconnect(bounce_guard=self._bounce_guard(provider))
         except Exception as exc:
             result = {"ok": False, "error": str(exc)[:300]}
         finally:
-            rt.cycling = was_cycling
-            rt.cycling_since = was_cycling_since
+            if not was_cycling and rt.cycling_since == own_stamp:
+                rt.cycling = False
+                rt.cycling_since = 0.0
         if clear_backoff:
             self.runtime(provider.id).retry_until = 0.0
             self.runtime(provider.id).retry_reason = ""
