@@ -383,3 +383,83 @@ def test_cx_single_search_flag():
     )
     assert c.returncode == 0, c.stderr[-1000:]
     assert c.stdout.strip().endswith("SEARCH-FLAG-OK")
+
+
+def test_cx_single_mcp_tool():
+    """MCP stdio tool via `codex mcp add` (doc-sourced).
+
+    Register a fastmcp stdio server exposing marker_echo, then exec a
+    prompt relaying its result verbatim. Unlike the claude leg, codex
+    needs no permission pre-grant (live 2026-10-11: CX-MCP-MARKER-OK,
+    rc=0). The server is written into the leg workspace at runtime;
+    skip when uv/fastmcp cannot spawn it here. NOTE: `mcp add` writes
+    to CODEX_HOME's global config, and battery_dirs shares one home per
+    tag — the cx-mcp tag owns its home, so no cross-leg leak.
+    """
+    import shutil
+    import subprocess
+
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-mcp")
+    env = codex_env(home, base, "ak-battery-cx19", sk, SPARK)
+    server = ws / "mcp_server.py"
+    server.write_text(
+        "from fastmcp import FastMCP\n"
+        "mcp = FastMCP('battery-probe')\n"
+        "@mcp.tool\n"
+        "def marker_echo() -> str:\n"
+        '    """Reply with exactly CX-MCP-MARKER-OK."""\n'
+        '    return "CX-MCP-MARKER-OK"\n'
+        "if __name__ == '__main__':\n"
+        "    mcp.run()\n"
+    )
+    if shutil.which("uv") is None:
+        import pytest
+
+        pytest.skip("live battery: uv missing for MCP server spawn")
+    probe = subprocess.run(
+        ["uv", "run", "--with", "fastmcp", "python", "-c", "import fastmcp"],
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    if probe.returncode != 0:
+        import pytest
+
+        pytest.skip("live battery: fastmcp uninstallable here")
+    add = run_cli(
+        [
+            CODEX_BIN,
+            "mcp",
+            "add",
+            "battery-probe",
+            "--",
+            "uv",
+            "run",
+            "--with",
+            "fastmcp",
+            "python",
+            str(server),
+        ],
+        ws,
+        env,
+    )
+    assert add.returncode == 0, add.stderr[-1000:]
+    assert "battery-probe" in add.stdout
+    c = run_cli(
+        [
+            CODEX_BIN,
+            "exec",
+            "--skip-git-repo-check",
+            "-s",
+            "workspace-write",
+            (
+                "Use the marker_echo tool from the battery-probe MCP "
+                "server, then reply with its result verbatim."
+            ),
+        ],
+        ws,
+        env,
+    )
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert "CX-MCP-MARKER-OK" in c.stdout

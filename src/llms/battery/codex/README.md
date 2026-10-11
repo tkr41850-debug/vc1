@@ -22,6 +22,7 @@ Run: `just battery codex/`
 | `test_cx_single_ephemeral` | `--ephemeral` (doc-sourced) | ephemeral echo, then `resume --last` | first ends EPHEMERAL-OK; resume lacks marker or errors |
 | `test_cx_single_output_last_message` | `-o` file write (doc-sourced) | reply LASTMSG-OK with -o path | out file contains LASTMSG-OK |
 | `test_cx_single_search_flag` | `--search` (doc-sourced) | reply SEARCH-FLAG-OK with web-search on | stdout ends SEARCH-FLAG-OK |
+| `test_cx_single_mcp_tool` | MCP stdio tool via `codex mcp add` (doc-sourced) | marker_echo from battery-probe server, relay verbatim | CX-MCP-MARKER-OK in stdout (skips when uv/fastmcp missing; no pre-grant needed) |
 
 ## Multi-turn
 
