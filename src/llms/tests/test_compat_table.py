@@ -629,6 +629,54 @@ def test_execute_rewrites_onto_nested_exec_channel():
     assert [c["name"] for c in steer] == ["execute"]
 
 
+def test_write_translation_wraps_patch_as_channel_js():
+    # Live luna cell 2026-10-11: 19 genuine `write` turns translated
+    # onto the exec channel with the BARE patch as input — the harness
+    # runs channel input as JavaScript (`SyntaxError: Unexpected token
+    # '**'`, no file, cell timeout). The channel input must be the
+    # `await tools.apply_patch(...)` invocation (same wrap the
+    # mechanism-13 arm applies to model-emitted bare patches).
+    # Already-wrapped source rides through untouched.
+    import json as _json
+
+    from llms.proxy.client_tools import (
+        dispatchable_names,
+        nested_tool_defs,
+        owned_tool_names,
+    )
+    from llms.proxy.pipeline import _classify_calls
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+    from tests.test_client_tools import _luna_namespace
+
+    ns = (_luna_namespace(),)
+    owned = owned_tool_names(ns)
+    defs = {t.name.lower(): t for t in ns if t.name}
+    defs.update(nested_tool_defs(ns))
+    route = dispatchable_names(ns)
+    args = _json.dumps({"path": "w.txt", "content": "hello-matrix\n"})
+    (call,) = [{"call_id": "c1", "name": "write", "arguments": args}]
+    passed, steer = _classify_calls(
+        [call], owned, defs, route, ns, GENUINE_TOOL_NAMES, "luna", "t1"
+    )
+    assert steer == []
+    assert [c["name"] for c in passed] == ["exec"]
+    assert passed[0]["__exec_rewrite__"] == {
+        "name": "exec",
+        "input": "await tools.apply_patch('*** Begin Patch\\n*** Add File: w.txt\\n+hello-matrix\\n*** End Patch')",
+    }
+    edit_args = _json.dumps(
+        {"path": "f.txt", "oldString": "old-line", "newString": "new-line"}
+    )
+    (edit_call,) = [{"call_id": "c2", "name": "edit", "arguments": edit_args}]
+    passed, steer = _classify_calls(
+        [edit_call], owned, defs, route, ns, GENUINE_TOOL_NAMES, "luna", "t1"
+    )
+    assert steer == []
+    assert passed[0]["__exec_rewrite__"]["input"].startswith(
+        "await tools.apply_patch("
+    )
+
+
 def test_edit_to_apply_patch_update_proven_live():
     # Round-4 proof (2026-10-07, luna leg): the Update-File grammar
     # ran `Script completed` with `FileChange update` (unified diff
@@ -713,9 +761,13 @@ def test_write_edit_classifier_rides_exec_rewrite_marker():
     # _channel): genuine write/edit on luna passthrough renamed to
     # `exec` with the __exec_rewrite__ marker (the replay paths apply
     # it into the exec channel — a bare function_call named
-    # apply_patch fails lookup), and genuine write on codex-plain
-    # passthrough renamed to `exec_command` with __translated_args__
-    # (plain function runner — replay swaps frame arguments).
+    # apply_patch fails lookup). The channel input is the
+    # `await tools.apply_patch(...)` invocation, never bare patch
+    # text: the harness runs channel input as JavaScript (live luna
+    # 2026-10-11: bare-patch rewrites died `SyntaxError`, no file).
+    # Genuine write on codex-plain passthrough renamed to
+    # `exec_command` with __translated_args__ (plain function runner
+    # — replay swaps frame arguments).
     import json as _json
 
     from llms.proxy.client_tools import (
@@ -746,7 +798,7 @@ def test_write_edit_classifier_rides_exec_rewrite_marker():
     assert [c["name"] for c in passed] == ["exec"]
     assert passed[0]["__exec_rewrite__"] == {
         "name": "exec",
-        "input": "*** Begin Patch\n*** Add File: w.txt\n+hi\n*** End Patch",
+        "input": "await tools.apply_patch('*** Begin Patch\\n*** Add File: w.txt\\n+hi\\n*** End Patch')",
     }
     (call,) = [
         {
@@ -763,7 +815,7 @@ def test_write_edit_classifier_rides_exec_rewrite_marker():
     assert steer == []
     assert [c["name"] for c in passed] == ["exec"]
     assert passed[0]["__exec_rewrite__"]["input"] == (
-        "*** Begin Patch\n*** Update File: w.txt\n@@\n-hi\n+yo\n*** End Patch"
+        "await tools.apply_patch('*** Begin Patch\\n*** Update File: w.txt\\n@@\\n-hi\\n+yo\\n*** End Patch')"
     )
     runner = (_spark_runner(),)
     s_owned = owned_tool_names(runner)

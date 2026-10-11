@@ -502,8 +502,19 @@ def _classify_calls(
             # JS as arguments — no nested name to derive it from, and
             # feeding it back through exec_channel_source would ask
             # for a nested tool named `exec` that does not exist).
+            # The channel executes JavaScript, so a synthesized bare
+            # patch (write/edit rows) rides wrapped as the apply_patch
+            # invocation — bare marker text dies in the harness JS
+            # parser (live luna 2026-10-11: 19 translated writes,
+            # `SyntaxError: Unexpected token '**'`, no file, cell
+            # timeout). Already-wrapped source (execute row) passes
+            # through untouched (same wrap the mechanism-13 arm uses).
             if declared.lower() == "exec" and isinstance(new_args, str):
-                passed["__exec_rewrite__"] = {"name": "exec", "input": new_args}
+                wrapped = rewrap_bare_patch_exec_input(new_args)
+                passed["__exec_rewrite__"] = {
+                    "name": "exec",
+                    "input": wrapped if wrapped is not None else new_args,
+                }
                 passthrough.append(passed)
                 continue
             source = exec_channel_source(passed.get("name", ""), new_args, client_tools)
