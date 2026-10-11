@@ -116,8 +116,7 @@ def test_cl_file_write_read():
             "haiku",
             "--output-format",
             "text",
-            "--allowedTools",
-            "Write",
+            "--allowedTools=Write",
             f"--add-dir={ws}",
             (
                 'Use the Write tool to create file "marker1.txt" in the '
@@ -140,8 +139,7 @@ def test_cl_file_write_read():
             "haiku",
             "--output-format",
             "text",
-            "--allowedTools",
-            "Read",
+            "--allowedTools=Read",
             f"--add-dir={ws}",
             (
                 'Read file "marker1.txt" in the current working '
@@ -171,8 +169,7 @@ def test_cl_file_modify():
             "haiku",
             "--output-format",
             "text",
-            "--allowedTools",
-            "Write",
+            "--allowedTools=Write",
             f"--add-dir={ws}",
             (
                 'Use the Write tool to create file "lines.txt" in the '
@@ -194,8 +191,7 @@ def test_cl_file_modify():
             "haiku",
             "--output-format",
             "text",
-            "--allowedTools",
-            "Read,Edit",
+            "--allowedTools=Read,Edit",
             f"--add-dir={ws}",
             (
                 'Use the Read tool to read "lines.txt", then use the '
@@ -219,8 +215,7 @@ def test_cl_file_modify():
             "haiku",
             "--output-format",
             "text",
-            "--allowedTools",
-            "Read",
+            "--allowedTools=Read",
             f"--add-dir={ws}",
             (
                 'Read file "lines.txt" with the Read tool and reply '

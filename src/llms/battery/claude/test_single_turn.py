@@ -110,8 +110,7 @@ def test_cl_single_write():
             "-p",
             "--model",
             "haiku",
-            "--allowedTools",
-            "Write",
+            "--allowedTools=Write",
             f"--add-dir={ws}",
             (
                 f"Use the Write tool to create {target} with exactly these "
@@ -138,8 +137,7 @@ def test_cl_single_read():
             "-p",
             "--model",
             "haiku",
-            "--allowedTools",
-            "Read",
+            "--allowedTools=Read",
             f"--add-dir={ws}",
             (
                 f"Use the Read tool on {target} and reply with its exact "
@@ -165,8 +163,7 @@ def test_cl_single_edit():
             "-p",
             "--model",
             "haiku",
-            "--allowedTools",
-            "Edit",
+            "--allowedTools=Edit",
             f"--add-dir={ws}",
             (
                 "Use the Edit tool to replace CLAUDE-EDIT-V1 with "
@@ -192,8 +189,7 @@ def test_cl_single_multi_tool():
             "-p",
             "--model",
             "haiku",
-            "--allowedTools",
-            "Bash,Write",
+            "--allowedTools=Bash,Write",
             f"--add-dir={ws}",
             (
                 "Do both in this turn: (1) Use Write to create "
@@ -214,8 +210,7 @@ def test_cl_single_multi_tool():
             "-p",
             "--model",
             "haiku",
-            "--allowedTools",
-            "Bash,Write",
+            "--allowedTools=Bash,Write",
             f"--add-dir={ws}",
             "--output-format",
             "stream-json",
