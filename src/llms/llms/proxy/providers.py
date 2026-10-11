@@ -113,6 +113,13 @@ class ProviderRuntime:
         # Auto-cycle state: background bounce of a ratelimited warp exit.
         self.last_auto_cycle: float = 0.0
         self.cycling: bool = False
+        # Monotonic stamp of the last False -> True cordon transition
+        # (0 = never cordoned). A bounce never runs longer than minutes
+        # and none survives a restart, so a cordon older than the stall
+        # window is a strand (cancelled bounce skipped its clear — live
+        # 2026-10-11: four ready-probation pools sat cycling:true with
+        # zero requests), not a live bounce. resolve() ages these out.
+        self.cycling_since: float = 0.0
         self.cycle_hits: int = 0
         self.cycle_task: asyncio.Task | None = None
         # Ready-probation (§ready-probation): a provider entering ready
@@ -467,17 +474,25 @@ class ProviderRegistry:
         # SOCKS ports at half-torn-down exits until the post-bounce
         # refresh re-syncs (502s). Save/restore (not force-False): the
         # auto-cycle path holds cycling=True across its own per-exit
-        # bounce and a concurrent sweep must not stomp it. (Unconditional
-        # restores, not finally: a return in finally would swallow
-        # bounce exceptions.)
+        # bounce and a concurrent sweep must not stomp it. The restore
+        # lives in finally: CancelledError (BaseException, e.g. a sweep
+        # task dropped mid-bounce) skips except-Exception, and a
+        # skipped restore strands the cordon — the ring then starves a
+        # healthy pool forever (live 2026-10-11). A return inside the
+        # try would be swallowed by finally, so there is none.
         was_cycling = rt.cycling
+        was_cycling_since = rt.cycling_since
         rt.cycling = True
+        if not was_cycling:
+            rt.cycling_since = time.monotonic()
         try:
             pool = await self.ensure_pool(provider)
             result = await pool.reconnect(bounce_guard=self._bounce_guard(provider))
         except Exception as exc:
             result = {"ok": False, "error": str(exc)[:300]}
-        rt.cycling = was_cycling
+        finally:
+            rt.cycling = was_cycling
+            rt.cycling_since = was_cycling_since
         if clear_backoff:
             self.runtime(provider.id).retry_until = 0.0
             self.runtime(provider.id).retry_reason = ""

@@ -180,3 +180,92 @@ def test_zero_ready_refresh_clears_cached_socks_ports(tmp_path, monkeypatch):
     assert egress.num_slots() == 0
     assert egress.ready_ports() == []
     assert egress.pick_port(0) is None
+
+
+def test_stale_cycling_cordon_ages_out_of_ring(tmp_path):
+    """A cycling cordon older than the stall window must not steer routing.
+
+    Live 2026-10-11 (citr): four ready-probation pools showed
+    cycling:true + in_flight 0 with healthy exits — cordoned from the
+    resolve() ring, zero requests logged. No bounce survives a restart
+    and none runs longer than minutes, so a cordon older than the stall
+    window is a strand, not a live bounce: the ring must include the
+    pool again (and log loudly) instead of starving it forever.
+
+    The strand predates the cycling_since stamp field, so the test
+    sets a bare cycling=True (since 0.0): on a process older than the
+    stall window that must age out too.
+    """
+    from llms.proxy.config import Settings
+    from llms.proxy.egress import ProviderEgress
+    from llms.proxy.providers import (
+        Provider,
+        ProviderHealth,
+        ProviderRegistry,
+        WarpExit,
+    )
+
+    settings = Settings(data_dir=str(tmp_path))
+    registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
+    registry.save(
+        [
+            Provider(id="w1", kind="warp", models=["gpt-*"], exits=1),
+            Provider(id="w2", kind="warp", models=["gpt-*"], exits=1),
+        ]
+    )
+    for pid in ("w1", "w2"):
+        rt = registry.runtime(pid)
+        rt.health = ProviderHealth(
+            exits=[WarpExit(idx=0, ready=True, status="ok", socks=40001)],
+            fetched_at=1000.0,
+        )
+        rt.boot_epoch = 1.0
+    rt1 = registry.runtime("w1")
+    rt1.probation = True
+    rt1.cycling = True
+    assert rt1.cycling_since == 0.0
+    egress = ProviderEgress(None, registry=registry)
+    seen = {egress.resolve("gpt-5", bucket=b)[0] for b in range(60)}
+    assert seen == {"w1", "w2"}, seen
+
+
+def test_cancelled_restart_restores_cycling_cordon(tmp_path):
+    """Cancelling _restart mid-bounce must not strand cycling=True.
+
+    The restore after the reconnect try/except only runs on the
+    success/Exception paths: CancelledError (BaseException) skips it
+    and the ring cordons the pool forever — the citr 2026-10-11 strand
+    (ready-probation + cycling:true + in_flight 0, zero requests).
+    """
+    import asyncio as _asyncio
+
+    from llms.proxy.config import Settings
+    from llms.proxy.providers import Provider, ProviderRegistry
+
+    settings = Settings(data_dir=str(tmp_path))
+    registry = ProviderRegistry(data_dir=str(tmp_path), settings=settings)
+    registry.save([Provider(id="w1", kind="warp", models=["gpt-*"], exits=1)])
+    provider = next(p for p in registry.load() if p.id == "w1")
+    started = _asyncio.Event()
+
+    async def _hang(_provider):
+        started.set()
+        await _asyncio.Event().wait()
+
+    async def _fake_refresh(_provider, force=False):
+        return registry.runtime(_provider.id).health
+
+    registry.ensure_pool = _hang  # type: ignore[assignment]
+    registry.refresh_health = _fake_refresh  # type: ignore[assignment]
+
+    async def _main() -> bool:
+        task = _asyncio.create_task(registry._restart(provider, clear_backoff=False))
+        await started.wait()
+        task.cancel()
+        try:
+            await task
+        except _asyncio.CancelledError:
+            pass
+        return registry.runtime("w1").cycling
+
+    assert _asyncio.run(_main()) is False

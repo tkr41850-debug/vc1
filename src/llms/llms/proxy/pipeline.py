@@ -2250,8 +2250,14 @@ def _maybe_auto_cycle(
                     inst.idx,
                     exc,
                 )
-            rt.cycling = False
-            rt.cycle_hits = 0
+            finally:
+                # Exception-proof cordon clear: a cancelled bounce task
+                # (CancelledError is BaseException) must not strand
+                # cycling=True — the ring would starve a healthy pool
+                # forever (live 2026-10-11). No return in here: it would
+                # swallow the bounce outcome above.
+                rt.cycling = False
+                rt.cycle_hits = 0
             if rt.gen != bounce_gen:
                 # Superseded mid-bounce (disable/delete): the pool is
                 # gone on purpose. refresh_health would ensure_pool a

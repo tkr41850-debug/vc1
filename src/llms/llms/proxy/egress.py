@@ -1,8 +1,54 @@
 from __future__ import annotations
 
+import logging
+import time
 from typing import Protocol
 
 import httpx
+
+logger = logging.getLogger("zen_proxy")
+
+# Stale-cordon window: a bounce never runs longer than minutes and none
+# survives a restart, so a cycling cordon older than this is a strand
+# (cancelled bounce skipped its clear), not a live bounce. resolve()
+# ages these out back into the ring instead of starving a healthy pool
+# forever (live 2026-10-11: four ready-probation pools sat cycling:true
+# with zero requests while ready pools served everything).
+CYCLING_STALL_S = 600.0
+
+
+def _cordon_stale(rt, provider_id: str) -> bool:
+    """True when a cycling cordon is a strand, not a live bounce.
+
+    A bounce never runs longer than minutes and none survives a
+    restart, so a cordon older than the stall window means the bounce
+    path leaked its clear (cancelled task — live 2026-10-11). The
+    caller rejoins the pool to the ring; loud log, since a strand is
+    always a bug upstream of here. ``cycling_since <= 0`` (flag set by
+    an older build that never stamped) still ages out: the flag alone
+    only ever means "a bounce was in flight", and no bounce is older
+    than the window — an unstamped cordon past process start is a
+    strand by the same argument.
+    """
+    since = float(getattr(rt, "cycling_since", 0.0) or 0.0)
+    if since > 0.0:
+        age = time.monotonic() - since
+        if age <= CYCLING_STALL_S:
+            return False
+    else:
+        # Unstamped: fall back to process age — strands predate the
+        # stamp field (or the clock), live bounces do not.
+        if time.monotonic() <= CYCLING_STALL_S:
+            return False
+        age = time.monotonic()
+    logger.warning(
+        "warp provider %s cycling cordon stale (%.0fs), rejoining ring",
+        provider_id,
+        age,
+    )
+    rt.cycling = False
+    rt.cycling_since = 0.0
+    return True
 
 
 class EgressProvider(Protocol):
@@ -186,7 +232,7 @@ class ProviderEgress:
             if not p.enabled or p.kind != "warp" or not p.serves(model):
                 continue
             rt = registry.runtime(p.id)
-            if rt.cycling:
+            if rt.cycling and not _cordon_stale(rt, p.id):
                 continue
             if bool(getattr(rt, "probation", False)) and rt.in_flight >= 1:
                 # At-quota probe: capacity exists but is fully probed.
