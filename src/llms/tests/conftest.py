@@ -54,6 +54,30 @@ def make_settings(**overrides) -> Settings:
     return Settings(**base)
 
 
+@pytest.fixture(autouse=True)
+def _no_warp_daemons(request, monkeypatch):
+    """Hermetic guard: no test may spawn a real warp-svc daemon.
+
+    WarpPool.start() gates on warp_cli_available(), which is True on any
+    dev box with warp-cli installed — so an unmocked ensure_pool (admin
+    create/enable, reconnect, debug, lifespan boot) boots real daemons
+    with 45-300s watchers and orphans /run/llms-warp-* sockets. Force
+    the binary-missing path suite-wide: start() records binary_error and
+    returns, refresh_statuses() no-ops, and health reads unhealthy.
+
+    Probes-vs-tests split: live warp behavior lives in scripts/, not here.
+    test_warp_supervisor is exempt — it manages warp_cli_available itself
+    per test and fakes all daemon/cli interaction.
+    """
+    node = getattr(request, "node", None)
+    module = getattr(node, "module", None)
+    if module is not None and module.__name__.endswith("test_warp_supervisor"):
+        return
+    from llms.proxy import warp as warp_mod
+
+    monkeypatch.setattr(warp_mod, "warp_cli_available", lambda: False)
+
+
 @pytest.fixture()
 def upstream_seen():
     return {}
