@@ -212,6 +212,42 @@ def _edit_to_apply_patch(payload: dict, required: list) -> str | None:
     )
 
 
+def _wait_targets_from_history(history: list) -> list[str] | None:
+    """Agent ids from earlier spawn_agent outputs in this turn's history.
+
+    The model emits bare `wait_agent {}` because it has not yet seen the
+    id (the harness's completion notification races the steered turns),
+    but the spawn `function_call_output` already carries
+    `{"agent_id": ...}` — fill from there instead of steering. Scans the
+    history input items (function_call_output dicts) for a JSON object
+    with a string `agent_id` and returns all such ids in order. None
+    when no id is found (no guess — the generic steer applies). Pure
+    helper: the caller decides whether the current turn's call omits
+    targets and whether the id set is fresh.
+    """
+    import json as _json
+
+    ids: list[str] = []
+    for item in history or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "function_call_output":
+            continue
+        output = item.get("output")
+        if not isinstance(output, str) or not output.strip():
+            continue
+        try:
+            payload = _json.loads(output)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        agent_id = payload.get("agent_id")
+        if isinstance(agent_id, str) and agent_id.strip() and agent_id not in ids:
+            ids.append(agent_id)
+    return ids or None
+
+
 def _shell_to_claude_bash(payload: dict, required: list) -> str | None:
     """genuine `shell {command}` onto claude-native `Bash {command}`.
 

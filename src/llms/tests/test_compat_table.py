@@ -1132,6 +1132,28 @@ def test_synthesized_messages_tool_use_feeds_classifier():
     assert passed[0]["__translated_args__"] == '{"command": "echo shape-ok"}'
 
 
+def test_wait_agent_fills_targets_from_spawn_agent_history():
+    # Live codex-plain loop (2026-10-12, cx-spawn-agent leg): the harness
+    # executes spawn_agent and returns {"agent_id": ...}, the completion
+    # notification races the steered turns (it lands AFTER them), and the
+    # model re-emits bare wait_agent {} every turn — never filling the
+    # targets it cannot yet have seen. The proxy already holds the id in
+    # the spawn function_call_output, so fill it instead of steering.
+    from llms.proxy.compat import _wait_targets_from_history
+
+    history = [
+        {"type": "function_call", "call_id": "c1", "name": "spawn_agent",
+         "arguments": '{"message": "hi"}'},
+        {"type": "function_call_output", "call_id": "c1",
+         "output": '{"agent_id": "abc-123", "nickname": "Euler"}'},
+    ]
+    assert _wait_targets_from_history(history) == ["abc-123"]
+    assert _wait_targets_from_history([]) is None
+    assert _wait_targets_from_history(
+        [{"type": "function_call_output", "call_id": "c9", "output": "no json"}]
+    ) is None
+
+
 def test_schema_audit_dropped_keys_pinned():
     # Task 8 schema audit (vs zen_tools.py GENUINE_TOOLS, 2026-10-07):
     # every compat row drops or refuses specific genuine keys. This

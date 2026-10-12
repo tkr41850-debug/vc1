@@ -874,6 +874,62 @@ def _multi_agent_ns():
     return req.tools
 
 
+def test_wait_agent_empty_targets_fills_from_spawn_history():
+    # Live codex-plain loop (2026-10-12, cx-spawn-agent leg): the
+    # model emits `wait_agent {}` (it never saw the agent id — the
+    # completion notification races the steered turns) while this
+    # turn's history already carries the spawn output with the id.
+    # The classifier fills targets from that output and passes the
+    # call through instead of steering a correction the model cannot
+    # act on. Falls back to the steer path when no id is in history.
+    from llms.proxy.client_tools import (
+        dispatchable_names,
+        nested_tool_defs,
+        owned_tool_names,
+    )
+    from llms.proxy.pipeline import _classify_calls
+
+    tools = _multi_agent_ns()
+    owned = owned_tool_names(tools)
+    route = dispatchable_names(tools)
+    defs = dict(nested_tool_defs(tools))
+    history = [
+        {
+            "type": "function_call_output",
+            "call_id": "c1",
+            "output": '{"agent_id": "abc-123", "nickname": "Euler"}',
+        },
+    ]
+    passed, steered = _classify_calls(
+        [{"name": "wait_agent", "arguments": "{}", "call_id": "c2"}],
+        owned,
+        defs,
+        route,
+        tools,
+        (),
+        "codex-plain",
+        "t",
+        history=history,
+    )
+    assert steered == []
+    assert len(passed) == 1
+    assert passed[0]["name"] == "wait_agent"
+    assert passed[0]["arguments"] == '{"targets": ["abc-123"]}'
+    # No id in history: unchanged behavior (steers with correction).
+    passed, steered = _classify_calls(
+        [{"name": "wait_agent", "arguments": "{}", "call_id": "c2"}],
+        owned,
+        defs,
+        route,
+        tools,
+        (),
+        "codex-plain",
+        "t",
+    )
+    assert passed == []
+    assert [c["name"] for c in steered] == ["wait_agent"]
+
+
 def test_plain_namespace_container_neither_owned_nor_routed():
     # Live repro (2026-10-10): the model emits the container name
     # `multi_agent_v1`, the proxy passes it as owned+routed, and the

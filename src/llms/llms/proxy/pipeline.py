@@ -272,6 +272,7 @@ def _classify_calls(
     genuine_names: tuple = (),
     family: str = "unknown",
     trace_id: str = "",
+    history: list | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Split folded model calls into (passthrough, steer) by client ownership.
 
@@ -417,14 +418,46 @@ def _classify_calls(
                 continue
             tool = client_defs.get(lowered)
             args = call.get("arguments", "")
-            if (
-                isinstance(tool, ToolDef)
-                and missing_required_keys(args if isinstance(args, str) else "", tool)
-                == []
-            ):
+            missing = (
+                missing_required_keys(args if isinstance(args, str) else "", tool)
+                if isinstance(tool, ToolDef)
+                else None
+            )
+            if lowered == "wait_agent" and missing and history:
+                # `wait_agent {}` with the id already in this turn's
+                # history (live codex-plain 2026-10-12: the spawn
+                # output carries {"agent_id"} but the completion
+                # notification races the steered turns, so the model
+                # never fills targets itself). Fill from the spawn
+                # output and pass through — the model cannot act on
+                # a correction naming an id it has not seen.
+                import json as _json
+
+                from llms.proxy.compat import (
+                    _wait_targets_from_history as _wait_ids,
+                )
+
+                try:
+                    _payload = (
+                        _json.loads(args)
+                        if isinstance(args, str) and args.strip()
+                        else {}
+                    )
+                except Exception:
+                    _payload = None
+                if isinstance(_payload, dict) and not _payload.get("targets"):
+                    _ids = _wait_ids(history)
+                    if _ids:
+                        fixed = {
+                            **{**call, "name": convert_call_name(name, owned)},
+                            "arguments": _json.dumps({"targets": _ids}),
+                        }
+                        if ns and ns.lower() != "default":
+                            fixed["__route_namespace__"] = ns
+                        passthrough.append(fixed)
+                        continue
+            if isinstance(tool, ToolDef) and missing == []:
                 fixed = {**call, "name": convert_call_name(name, owned)}
-                if ns and ns.lower() != "default":
-                    fixed["__route_namespace__"] = ns
                 if route is not None:
                     rewritten = rewrite_steered_call(
                         fixed, args if isinstance(args, str) else "", route
@@ -552,6 +585,7 @@ def _genuine_calls_in(
     genuine_names: tuple = (),
     family: str = "unknown",
     trace_id: str = "",
+    history: list | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Split response function_calls into (passthrough, steer) candidates.
 
@@ -638,6 +672,7 @@ def _genuine_calls_in(
         genuine_names,
         family,
         trace_id,
+        history,
     )
 
 
@@ -727,6 +762,7 @@ async def _steer_genuine_calls(
             genuine_names=genuine_names,
             family=family,
             trace_id=trace_id,
+            history=list(outbound.get("input", []) or []),
         )
         owned = owned_tool_names(client_tools)
         defs = client_tool_defs(client_tools)
@@ -903,6 +939,7 @@ async def _steer_genuine_calls(
             genuine_names=genuine_names,
             family=family,
             trace_id=trace_id,
+            history=list(outbound.get("input", []) or []),
         )
         if not (tail_passed and not tail_steer) and tail_steer:
             tail_call = tail_steer[0]

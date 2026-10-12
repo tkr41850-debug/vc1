@@ -2745,3 +2745,68 @@ def test_streaming_bare_patch_rewrite_reaches_input_frames(tmp_path):
     # The done frame must not leak the raw patch: every input payload
     # downstream is the re-wrapped invocation.
     assert "*** Begin Patch\\n" not in r.text.replace("await tools.apply_patch", "")
+
+
+def test_wait_agent_empty_targets_fills_from_spawn_output_e2e(tmp_path):
+    """wait_agent {} fills targets from the spawn output already in the
+    request history (live codex-plain 2026-10-12, cx-spawn-agent leg):
+    the harness returns {"agent_id"} on the spawn call, the completion
+    notification races the steered turns, and the model re-emits bare
+    wait_agent {} — which the old classifier steered forever. Exactly
+    1 upstream call; the downstream turn carries the filled targets."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_wait1", "wait_agent", "{}"),
+        _text_sse("unreached"),
+    )
+    ns_tool = {
+        "type": "namespace",
+        "name": "multi_agent_v1",
+        "description": "Tools for spawning and managing sub-agents.",
+        "tools": [
+            {
+                "type": "function",
+                "name": "spawn_agent",
+                "description": "Spawn a subagent.",
+                "parameters": {"type": "object"},
+            },
+            {
+                "type": "function",
+                "name": "wait_agent",
+                "description": "Wait for agents.",
+                "parameters": {"type": "object", "required": ["targets"]},
+            },
+        ],
+    }
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn1",
+                        "name": "spawn_agent",
+                        "arguments": '{"message": "hi"}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn1",
+                        "output": '{"agent_id": "abc-123", "nickname": "Euler"}',
+                    },
+                ],
+                "tools": [ns_tool],
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    returned = [
+        i for i in r.json().get("output", []) if i.get("type") == "function_call"
+    ]
+    assert len(returned) == 1
+    assert returned[0]["name"] == "wait_agent"
+    assert returned[0]["arguments"] == '{"targets": ["abc-123"]}'

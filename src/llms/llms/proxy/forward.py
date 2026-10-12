@@ -537,6 +537,13 @@ async def fold_and_steer_streaming(
         _route = _route_names(client_tools)
     except Exception:
         pass
+    # This turn's history (outbound input items) for the wait_agent
+    # fill-in: the spawn output carrying {"agent_id"} rides here, so a
+    # bare `wait_agent {}` the model emits before seeing the id fills
+    # from it instead of steering. Snapshot once per fold call — the
+    # loop appends steer followups to outbound below, and those must
+    # never feed the fill-in (a redirect echo is not a spawn output).
+    _history = list(outbound.get("input", []) or [])
     for _ in range(max_iters):
         calls = fold_stream_calls(lines, "responses") if lowered is not None else []
         # Shared classifier: owned-valid calls pass (converted casing),
@@ -555,6 +562,7 @@ async def fold_and_steer_streaming(
                 genuine_names,
                 family,
                 trace_id,
+                _history,
             )
         else:
             passthrough, steer = (
@@ -1027,6 +1035,7 @@ async def fold_and_steer_streaming(
                 genuine_names,
                 family,
                 trace_id,
+                _history,
             )
         else:
             # Legacy lowered-membership rule (same as the loop body).
