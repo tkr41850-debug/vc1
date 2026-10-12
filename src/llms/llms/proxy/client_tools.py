@@ -1183,7 +1183,9 @@ def build_tool_notice(
         if t.name.lower() in aliased:
             lines.append(
                 f"- '{t.name}'{marker}: harness runner — do NOT call it "
-                "directly; run shell commands via `shell` above."
+                "directly; run shell commands via `shell` above. Calls "
+                "to it already in this conversation's history already "
+                "ran — do not re-run them, answer from their output."
             )
         else:
             lines.append(f"- '{t.name}'{marker}: {_call_sketch(t)}")

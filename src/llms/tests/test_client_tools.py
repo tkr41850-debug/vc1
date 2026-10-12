@@ -961,3 +961,24 @@ def test_plain_namespace_notice_lists_nested_not_container():
     assert "not itself a callable tool" in notice
     assert "'spawn_agent'" in notice
     assert "'wait_agent'" in notice
+
+
+def test_notice_runner_pointer_blesses_executed_history():
+    # Live codex-plain loop (2026-10-12): the model executes exec_command
+    # (translated shell, exit 0), re-reads the "do NOT call it directly"
+    # pointer, concludes its own executed call was the wrong runner, and
+    # retries "through the proper shell tool" once per turn to the CLI
+    # timeout (16 identical exit-0 executions in history). The pointer
+    # must bless already-executed history calls so the model does not
+    # re-run them — while still directing NEW commands at `shell`.
+    from llms.proxy.client_tools import build_tool_notice
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+
+    notice = build_tool_notice((_spark_runner(),), GENUINE_TOOL_NAMES, shell_alias=True)
+    runner_line = next(
+        l for l in notice.split("\n") if l.startswith("- 'exec_command'")
+    )
+    assert "do NOT call it directly" in runner_line
+    assert "history" in runner_line
+    lowered = runner_line.lower()
+    assert "do not re-run" in lowered or "already ran" in lowered
