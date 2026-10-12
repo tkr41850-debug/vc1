@@ -1391,6 +1391,63 @@ def test_history_genuine_write_replays_as_exec_channel_patch():
     )
 
 
+def test_history_executed_alias_pair_replays_emitted_name():
+    # Codex-plain alias attribution (live 2026-10-12): the model emits
+    # genuine `shell`, the harness executes the translated
+    # `exec_command` (exit 0) — but the echoed history carries the
+    # REWRITTEN name, which the model never emitted, so it cannot bind
+    # the success and re-emits "through the proper shell tool" every
+    # turn to the CLI timeout. An executed alias-translation pair must
+    # replay upstream under the EMITTED alias name/args, so the model
+    # sees its own call succeed and moves on. Fails today: the pair
+    # replays as exec_command/cmd (today's rewrite rule), and the loop
+    # never breaks. Narrow: fires only when the output reads as
+    # success (the failure path keeps today's rule — a bare genuine
+    # name with Success output would re-teach the dead name; see
+    # test_history_genuine_call_replays_translated).
+    from llms.proxy.translate import from_responses, to_zen_responses
+
+    req = from_responses(
+        {
+            "model": "m",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "exec_command",
+                    "arguments": '{"cmd": "printf REDIRECT-OK > redir.txt"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "c1",
+                    "output": (
+                        "Chunk ID: 047568\nWall time: 0.3727 seconds\n"
+                        "Process exited with code 0\nOriginal token count: 0\n"
+                        "Output:\n"
+                    ),
+                },
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "description": "r",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"cmd": {}},
+                        "required": ["cmd"],
+                    },
+                }
+            ],
+        }
+    )
+    out = to_zen_responses(req, tool_notice="", family="codex-plain")
+    calls = [i for i in out["input"] if i.get("type") == "function_call"]
+    assert len(calls) == 1
+    assert calls[0]["name"] == "shell"
+    assert calls[0]["arguments"] == '{"command": "printf REDIRECT-OK > redir.txt"}'
+
+
 def test_tool_notice_also_appends_to_developer_message():
     # Codex sends the harness-guidance system prompt top-level AND
     # per-turn skills/permissions context as a developer input item;

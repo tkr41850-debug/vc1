@@ -749,16 +749,6 @@ def _already_ran_ack(req, family: str = "unknown") -> dict | None:
 
     Pure helper (no I/O): callers emit the completed body.
     """
-    from llms.proxy.client_tools import _ALIASES
-    from llms.proxy.client_tools import (
-        client_tool_defs as _client_defs,
-    )
-    from llms.proxy.client_tools import (
-        owned_tool_names as _owned_names,
-    )
-    from llms.proxy.client_tools import (
-        translate_genuine_call as _translate,
-    )
     from llms.proxy.ir import ROLE_ASSISTANT, ROLE_TOOL, ToolCallBlock, ToolResultBlock
 
     msgs = list(getattr(req, "messages", ()) or ())
@@ -791,40 +781,87 @@ def _already_ran_ack(req, family: str = "unknown") -> dict | None:
         return None
     if not _looks_successful(str(out_b.output or "")):
         return None
-    owned = _owned_names(req.tools)
-    defs = _client_defs(req.tools)
-    # The history records the REWRITTEN name (translate.py echoes the
-    # classifier's translation, never the model's emission) — but the
-    # detector cannot tell a rewritten `exec_command` (model emitted
-    # `shell`, alias dance) from a native one (model emitted
-    # `exec_command` itself: polling, intentional re-run). Both shapes
-    # are byte-identical in history. The disambiguator is the model's
-    # CURRENT turn: only when the fresh model output re-emits the SAME
-    # command through the alias does the dance exist. That check lives
-    # in the caller (pipeline), which sees the fresh turn; this helper
-    # only reports "history ends with an executed alias translation"
-    # as a candidate. Callers must confirm the fresh turn repeats it
-    # before acknowledging — otherwise deliberate repeats ack wrongly.
-    echoed = str(call_b.name or "")
+    match = _executed_alias_emission(
+        req, str(call_b.name or ""), call_b.arguments, str(out_b.output or ""), family
+    )
+    if match is None:
+        return None
+    alias, declared, _genuine_args = match
+    # The history records the REWRITTEN name (to_zen_responses echoes
+    # the classifier's translation, never the model's emission) — but a
+    # rewritten `exec_command` (model emitted `shell`, alias dance) is
+    # byte-identical to a native one (model emitted `exec_command`
+    # itself: polling, intentional re-run). The disambiguator is the
+    # model's CURRENT turn: only when the fresh model output re-emits
+    # the SAME command through the alias does the dance exist. That
+    # check lives in the caller (pipeline), which sees the fresh turn;
+    # this helper only reports "history ends with an executed alias
+    # translation" as a candidate. Callers must confirm the fresh turn
+    # repeats it before acknowledging — otherwise deliberate repeats
+    # ack wrongly.
+    return {
+        "alias": alias,
+        "declared": declared,
+        "arguments": call_b.arguments,
+        "output": str(out_b.output or ""),
+    }
+
+
+def _executed_alias_emission(
+    req, echoed: str, arguments: str, output: str, family: str = "unknown"
+) -> tuple[str, str, str] | None:
+    """(alias, declared, genuine_args) when a history pair is an executed alias.
+
+    Shared matcher for the alias-attribution fix (live codex-plain loop,
+    2026-10-12): the model emits a genuine alias (`shell`), the harness
+    executes the translated client call (`exec_command`, exit 0), but
+    history echoes the rewritten name — which the model never emitted,
+    so it cannot bind the success and re-emits "through the proper
+    shell tool" every turn to the CLI timeout. Callers use the match to
+    replay the pair upstream under the EMITTED alias name/args instead.
+
+    Fires only when the output reads as success (a failure output keeps
+    today's forward-translate rule — a bare genuine name with Success
+    output would re-teach the dead name) and the payload round-trips
+    through the alias row identically. A native client-side emission
+    (polling, intentional re-run) is byte-identical in history and also
+    matches; the notice demotes the client name to "do NOT call
+    directly", so native emissions are rare, and binding the success to
+    the alias the notice steers toward is benign either way. Also
+    matches when history already records the emitted alias name itself
+    (pre-translation echoes): same payload, same success. Pure helper.
+    """
+    from llms.proxy.client_tools import _ALIASES
+    from llms.proxy.client_tools import (
+        client_tool_defs as _client_defs,
+    )
+    from llms.proxy.client_tools import (
+        owned_tool_names as _owned_names,
+    )
+    from llms.proxy.client_tools import (
+        translate_genuine_call as _translate,
+    )
+
     try:
         import json as _json
 
-        payload = _json.loads(call_b.arguments) if call_b.arguments else None
+        payload = _json.loads(arguments) if arguments else None
     except Exception:
         return None
     if not isinstance(payload, dict):
         return None
-    alias_names = {alias.lower() for _, alias, _ in _ALIASES}
-    for client_lower, alias, alias_key in _ALIASES:
+    if not _looks_successful(str(output or "")):
+        return None
+    owned = _owned_names(req.tools)
+    defs = _client_defs(req.tools)
+    for _client_lower, alias, alias_key in _ALIASES:
         # The echoed history carries the TRANSLATED payload (cmd), but
         # the alias translation reads the GENUINE payload (command):
         # reverse-translate the echoed arguments back to the genuine
         # shape before asking what the model emitted. Without this the
         # comparison below asks the translator to read client-shaped
-        # args as genuine ones and it returns None (no match, no ack).
-        genuine_args = _reverse_alias_args(
-            req, echoed, call_b.arguments, alias, alias_key
-        )
+        # args as genuine ones and it returns None (no match).
+        genuine_args = _reverse_alias_args(req, echoed, arguments, alias, alias_key)
         if genuine_args is None:
             continue
         translated = _translate(alias, genuine_args, owned, defs, family, req.tools)
@@ -841,25 +878,32 @@ def _already_ran_ack(req, family: str = "unknown") -> dict | None:
             continue
         # The echoed call IS an alias translation of the model's own
         # emitted alias with an identical payload — the harness
-        # executed exactly this action. Acknowledge it as complete so
-        # the model binds the success to its emission instead of
-        # retrying through the "proper" runner.
-        return {
-            "alias": alias,
-            "declared": declared,
-            "arguments": call_b.arguments,
-            "output": str(out_b.output or ""),
-        }
+        # executed exactly this action.
+        return alias, declared, genuine_args
     # Also match when the history records the EMITTED alias name
     # itself (pre-translation echoes): same payload, same success.
+    alias_names = {alias.lower() for _, alias, _ in _ALIASES}
     if echoed.lower() in alias_names:
-        return {
-            "alias": echoed,
-            "declared": echoed,
-            "arguments": call_b.arguments,
-            "output": str(out_b.output or ""),
-        }
+        return echoed, echoed, arguments
     return None
+
+
+def _paired_tool_output(req, msg, call_id: str) -> str:
+    """The output text paired with one history call, or "".
+
+    Call and output ride SEPARATE messages (from_responses: the call on
+    an ASSISTANT message, its output on the FOLLOWING TOOL message), so
+    the echo branch cannot read the pair from its own message — scan
+    the request for the TOOL message whose result answers this call.
+    Pure helper.
+    """
+    for other in list(getattr(req, "messages", ()) or ()):
+        if getattr(other, "role", "") != ROLE_TOOL:
+            continue
+        for blk in getattr(other, "blocks", ()) or ():
+            if isinstance(blk, ToolResultBlock) and blk.call_id == call_id:
+                return str(blk.output or "")
+    return ""
 
 
 def _reverse_alias_args(
@@ -1058,6 +1102,20 @@ def to_zen_responses(
                     # follows the same rule: it answers the rewritten
                     # call (a bare genuine name with Success output
                     # would re-teach the dead name as working).
+                    #
+                    # Executed-alias exception (live codex-plain loop,
+                    # 2026-10-12): when the paired output reads as
+                    # success AND the pair round-trips through an
+                    # alias row identically, the harness executed the
+                    # action fine — but the model never emitted the
+                    # rewritten name, so echoing it breaks attribution
+                    # (the model re-emits "through the proper shell
+                    # tool" every turn to the CLI timeout). Replay the
+                    # pair under the EMITTED alias name/args so the
+                    # model sees its own call succeed and moves on. A
+                    # failure output keeps the rule above (the call
+                    # never ran — the redirect must name the working
+                    # route, not the dead one).
                     from llms.proxy.client_tools import (
                         client_tool_defs as _client_defs,
                     )
@@ -1070,24 +1128,35 @@ def to_zen_responses(
 
                     _owned = _owned_names(req.tools)
                     _defs = _client_defs(req.tools)
-                    _hist = _translate(
+                    _emitted = _executed_alias_emission(
+                        req,
                         b.name,
                         b.arguments,
-                        _owned,
-                        _defs,
+                        _paired_tool_output(req, msg, b.call_id),
                         family,
-                        req.tools,
                     )
-                    if _hist is not None:
-                        _name, _args = _hist
+                    if _emitted is not None:
+                        _alias, _declared, _genuine_args = _emitted
+                        _name, _args = _alias, _genuine_args
                     else:
-                        _name, _args = b.name, b.wire_arguments()
-                        try:
-                            import json as _json
+                        _hist = _translate(
+                            b.name,
+                            b.arguments,
+                            _owned,
+                            _defs,
+                            family,
+                            req.tools,
+                        )
+                        if _hist is not None:
+                            _name, _args = _hist
+                        else:
+                            _name, _args = b.name, b.wire_arguments()
+                            try:
+                                import json as _json
 
-                            _json.loads(_args)
-                        except Exception:
-                            _args = "{}"
+                                _json.loads(_args)
+                            except Exception:
+                                _args = "{}"
                     body["input"].append(
                         {
                             "type": "function_call",
