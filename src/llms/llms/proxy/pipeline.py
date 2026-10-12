@@ -1634,17 +1634,24 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                     provider_id, via_warp = None, None
                     client = egress_provider.client_for(bucket, slot)
                 else:
-                    # Slot-spread egress: the request's slot pins to one
-                    # ready exit (slot % ready), so warp_idx is the slot's
-                    # position in the ready spread — not a pool pin.
+                    # Slot-spread egress: the request's slot walks the
+                    # fixed-capacity spread to the next live exit, so
+                    # warp_idx is the serving position in the spread —
+                    # stable per physical exit across exclusions (holes,
+                    # not removals). socks_port is the ground truth the
+                    # per-exit 429 record keys on; warp_idx is the
+                    # human-facing position.
+                    serving = warp_egress.pick_port(slot)
                     ports = warp_egress.ready_ports()
                     warp_idx = (
-                        ports.index(warp_egress.pick_port(slot)) if ports else None
+                        ports.index(serving)
+                        if serving is not None and serving in ports
+                        else None
                     )
                     via_warp = {
                         "provider_id": provider_id or "",
                         "warp_idx": warp_idx,
-                        "socks_port": warp_egress.pick_port(slot),
+                        "socks_port": serving,
                     }
         else:
             client = egress_provider.client_for(bucket, slot)
@@ -1724,12 +1731,17 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 provider_id, via_warp = None, None
                 client = egress_provider.client_for(bucket, slot)
             else:
+                serving = warp_egress.pick_port(slot)
                 ports = warp_egress.ready_ports()
-                warp_idx = ports.index(warp_egress.pick_port(slot)) if ports else None
+                warp_idx = (
+                    ports.index(serving)
+                    if serving is not None and serving in ports
+                    else None
+                )
                 via_warp = {
                     "provider_id": provider_id or "",
                     "warp_idx": warp_idx,
-                    "socks_port": warp_egress.pick_port(slot),
+                    "socks_port": serving,
                 }
         if registry is not None and provider_id:
             _arm_probation_on_expiry(registry, provider_id)
@@ -2032,7 +2044,16 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 except Exception:
                     reason = ""
             if provider_id:
-                registry.runtime(provider_id).note_ratelimited(retry_after, reason)
+                try:
+                    via = via_warp if isinstance(via_warp, dict) else {}
+                    exit_idx = _exit_idx_for_port(
+                        registry.runtime(provider_id), via.get("socks_port")
+                    )
+                except Exception:
+                    exit_idx = None
+                registry.runtime(provider_id).note_exit_ratelimited(
+                    exit_idx, retry_after, reason
+                )
                 _maybe_auto_cycle(request, provider_id, via_warp, trace_id)
                 # Entering ratelimited is a self-heal trigger: when half
                 # the running model pool is limited, restart the limited
@@ -2104,6 +2125,31 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             )
         )
     return response
+
+
+def _exit_idx_for_port(rt, port: int | None) -> int | None:
+    """Pool exit idx serving a SOCKS port, or None when unresolvable.
+
+    The per-exit 429 record must key on the pool idx (what the spread
+    filter compares against WarpExit.idx), NOT the spread position
+    (warp_idx): with a non-contiguous ready set the two differ, and
+    recording the position would steer around the wrong exit. Falls
+    back to None (aggregate-only record) when the port is unknown —
+    never raises.
+    """
+    try:
+        if port is None:
+            return None
+        exits = list(getattr(getattr(rt, "health", None), "exits", None) or [])
+        for w in exits:
+            try:
+                if int(getattr(w, "socks", 0) or 0) == int(port):
+                    return int(getattr(w, "idx"))
+            except Exception:
+                continue
+        return None
+    except Exception:
+        return None
 
 
 def _left_ready(before: str | None, after: str | None) -> bool:
@@ -2420,8 +2466,7 @@ def _maybe_auto_cycle(
                 # landed mid-bounce bumped the epoch and must survive.
                 # A still-bad exit keeps its backoff and the cooldown
                 # gates the next bounce.
-                rt.retry_until = 0.0
-                rt.retry_reason = ""
+                rt.clear_backoff()
                 # Bounce-ok is a becoming-ready path: arm probation so
                 # the next request probes at concurrency 1 (promotion
                 # happens on first success).

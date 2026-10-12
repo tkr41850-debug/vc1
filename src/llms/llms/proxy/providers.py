@@ -96,6 +96,12 @@ class ProviderRuntime:
         self.health = ProviderHealth()
         self.retry_until: float = 0.0
         self.retry_reason: str = ""
+        # Per-exit 429 deadlines: {exit idx -> monotonic until}. A 429
+        # observed on one exit records here; the provider-level backoff
+        # (retry_until, read by the ring filter/lifecycle/self-heal) arms
+        # only when every ready exit is limited, so a lone bad exit never
+        # cordons healthy siblings (1xN behaves as N x singles).
+        self.exit_retry_until: dict[int, float] = {}
         # Bumped on every note_ratelimited: lets the auto-cycle bounce-ok
         # clear verify the backoff it observed is still current before
         # clearing (a sibling 429 mid-bounce must survive).
@@ -143,6 +149,60 @@ class ProviderRuntime:
     def retry_in(self) -> float:
         return max(0.0, self.retry_until - time.monotonic())
 
+    def limited_exits(self) -> set[int]:
+        """Exit idxs with an active per-exit 429 backoff (never raises)."""
+        try:
+            now = time.monotonic()
+            return {
+                int(idx)
+                for idx, until in dict(getattr(self, "exit_retry_until", {}) or {}).items()
+                if float(until or 0.0) > now
+            }
+        except Exception:
+            return set()
+
+    def note_exit_ratelimited(
+        self,
+        idx: int | None,
+        retry_after: float | None,
+        reason: str = "",
+    ) -> None:
+        """Record a 429 observed on one exit (per-exit accounting).
+
+        The per-exit deadline always records. The provider-level backoff
+        (retry_until/retry_reason/epoch — the aggregate the ring filter,
+        lifecycle, self-heal, and retry-after hint read) also arms on
+        every 429: it is the "a limit was recently observed here" signal
+        those readers need (self-heal gating, pool-dry shed, failover
+        hint), and the ring filter already falls back to least-wait when
+        every candidate is limited, so arming never strands traffic.
+        Exit isolation lives one layer down: resolve() steers the ready
+        spread around limited exits, so healthy siblings keep serving at
+        full ring share while the 429'd exit sits out its cooldown —
+        mirroring N single-exit providers where only the 429'd member
+        leaves the fresh ring. `idx=None` (exit unknown) records only
+        the aggregate. Never raises.
+        """
+        try:
+            if idx is not None:
+                wait = 60.0
+                if retry_after is not None:
+                    wait = max(wait, float(retry_after))
+                table = getattr(self, "exit_retry_until", None)
+                if not isinstance(table, dict):
+                    table = {}
+                    self.exit_retry_until = table
+                try:
+                    table[int(idx)] = time.monotonic() + wait
+                except Exception:
+                    table[idx] = time.monotonic() + wait
+            self.note_ratelimited(retry_after, reason)
+        except Exception:
+            try:
+                self.note_ratelimited(retry_after, reason)
+            except Exception:
+                pass
+
     def note_ratelimited(self, retry_after: float | None, reason: str = "") -> None:
         wait = 60.0
         if retry_after is not None:
@@ -151,6 +211,24 @@ class ProviderRuntime:
         self.retry_epoch += 1
         if reason:
             self.retry_reason = reason[:200]
+
+    def clear_backoff(self) -> None:
+        """Clear provider + per-exit 429 backoffs (bounce-ok/reconnect path).
+
+        Both tables arm together (note_exit_ratelimited records the exit
+        deadline on every 429 and the provider aggregate when the last
+        healthy exit limits), so both clear together: leaving a stale
+        exit deadline behind would keep steering around a fresh exit
+        after a successful bounce. Never raises.
+        """
+        try:
+            self.retry_until = 0.0
+            self.retry_reason = ""
+            table = getattr(self, "exit_retry_until", None)
+            if isinstance(table, dict):
+                table.clear()
+        except Exception:
+            pass
 
     async def record(self, entry: RecentRequest) -> None:
         async with self._lock:
@@ -501,8 +579,7 @@ class ProviderRegistry:
                 rt.cycling = False
                 rt.cycling_since = 0.0
         if clear_backoff:
-            self.runtime(provider.id).retry_until = 0.0
-            self.runtime(provider.id).retry_reason = ""
+            self.runtime(provider.id).clear_backoff()
             self.runtime(provider.id).retry_epoch += 1
             # Reconnect is a becoming-ready path: arm probation so the
             # next request probes at concurrency 1 instead of riding
@@ -620,6 +697,23 @@ class ProviderRegistry:
             # pool-may-recover branch is the only warp path, and it
             # re-seeds ports on the next ready snapshot here.
             egress.set_socks_ports(ready_ports)
+            # Re-apply live per-exit 429 holes on the fresh spread: a
+            # refresh that only resets ports would silently un-exclude a
+            # still-limited exit mid-cooldown (positions are stable, so
+            # the holes re-apply cleanly).
+            try:
+                limited = rt.limited_exits()
+                if limited:
+                    by_idx = {
+                        int(w.idx): int(w.socks)
+                        for w in health.exits
+                        if w.ready and int(w.socks or 0)
+                    }
+                    egress.set_excluded_ports(
+                        {by_idx[i] for i in limited if i in by_idx}
+                    )
+            except Exception:
+                pass
         try:
             self.save_warp_status(provider.id, health)
         except OSError:
@@ -885,6 +979,12 @@ def derive_lifecycle(
     Precedence: draining > ratelimited > ready-probation > preparing >
     ready > unhealthy > off. Unexpected shapes fall back to preparing
     (enabled) / off (disabled). Returns (lifecycle, drain_detail).
+
+    The ratelimited arm is per-exit aware: a provider-level backoff with
+    healthy un-limited ready exits still serving reads ready (a lone bad
+    exit must not yellow the whole row — 1xN behaves as N x singles).
+    The aggregate still reads ratelimited when no per-exit record exists
+    (legacy callers, unknown exit) or every servable exit is limited.
     """
     try:
         current = time.monotonic() if now is None else now
@@ -914,7 +1014,29 @@ def derive_lifecycle(
                 "forced": bool(forced),
             }
         if enabled and retry > 0:
-            return "ratelimited", None
+            # Per-exit isolation: the aggregate backoff alone does not
+            # poison the row while healthy un-limited exits serve. Skip
+            # the arm only on positive proof of spare capacity (known
+            # limited set + a ready exit outside it); every other shape
+            # (no record, unknown health, all limited) keeps the arm.
+            try:
+                limited = rt.limited_exits()
+            except Exception:
+                limited = set()
+            if limited:
+                try:
+                    if any(
+                        int(getattr(w, "idx", -1)) not in limited
+                        for w in exits
+                        if bool(getattr(w, "ready", False))
+                    ):
+                        pass
+                    else:
+                        return "ratelimited", None
+                except Exception:
+                    return "ratelimited", None
+            else:
+                return "ratelimited", None
         probation = bool(getattr(rt, "probation", False))
         if enabled and probation and (kind == "noproxy" or ready > 0):
             return "ready-probation", None

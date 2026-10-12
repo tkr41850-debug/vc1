@@ -361,8 +361,7 @@ async def delete_provider(
     # would 502 fresh requests until a refresh corrects them).
     rt = registry.runtime(provider_id)
     rt.gen += 1
-    rt.retry_until = 0.0
-    rt.retry_reason = ""
+    rt.clear_backoff()
     rt.in_flight = 0
     rt.drain_until = 0.0
     rt.boot_epoch = 0.0

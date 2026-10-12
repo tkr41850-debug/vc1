@@ -123,16 +123,63 @@ class WarpSocksEgress:
 
     def set_socks_ports(self, ports: list[int]) -> None:
         ports = list(ports)
-        if ports != list(self._socks_ports):
+        if ports != [p for p in self._socks_ports if p is not None]:
             self._socks_ports = tuple(ports)
+
+    def set_excluded_ports(self, excluded: set[int] | list[int]) -> None:
+        """Mark spread positions as holes without renumbering survivors.
+
+        `excluded` carries SOCKS ports (stable per exit); matching slots
+        become None holes that pick_port walks past. Survivors keep their
+        positions, so warp_idx per physical exit is stable across
+        exclusions and only the excluded share remaps. Empty exclusion
+        restores any holed slots back to live ports positionally.
+        """
+        try:
+            bad = {int(p) for p in (excluded or [])}
+        except Exception:
+            bad = set()
+        live = [p for p in self._socks_ports if p is not None]
+        if not bad:
+            if any(p is None for p in self._socks_ports) and live:
+                # Restore: holes were positional — refill from the live
+                # set in order (length already equals capacity).
+                full = list(live)
+                while len(full) < len(self._socks_ports):
+                    full.extend(live)
+                self._socks_ports = tuple(full[: len(self._socks_ports)])
+            return
+        if not live:
+            return
+        self._socks_ports = tuple(p if p not in bad else None for p in live)
 
     def pick_port(self, slot: int) -> int | None:
         if not self._socks_ports:
             return None
-        return self._socks_ports[slot % len(self._socks_ports)]
+        # Stable modulo: the spread is a fixed-capacity ring sized for the
+        # provider's full exit count; excluded (limited/down) exits are
+        # holes, not removals — the slot walks to the next live exit. A
+        # shrinking plain list would remap ~every slot on each exclusion
+        # (measured 682/1024 on 3->2); the ring walk moves only the
+        # excluded exit's own share (~1/3), matching N singles where a
+        # member's 429 moves only that member's buckets. Positions (and
+        # hence warp_idx per physical exit) stay stable across exclusions.
+        n = len(self._socks_ports)
+        start = slot % n
+        for step in range(n):
+            port = self._socks_ports[(start + step) % n]
+            if port is not None:
+                return port
+        return None
 
     def ready_ports(self) -> list[int]:
-        """Ready SOCKS ports in spread order (slot % ready)."""
+        """Spread ports in position order; holes surface as None.
+
+        Positions are stable: a physical exit keeps its index across
+        exclusions, so warp_idx per exit never shifts. pick_port walks
+        holes to the next live exit; callers needing only live ports
+        filter None themselves. Length always equals spread capacity.
+        """
         return list(self._socks_ports)
 
     def client_for(self, bucket: int, slot: int) -> httpx.AsyncClient:
@@ -251,7 +298,28 @@ class ProviderEgress:
                 continue
             ring.append(p)
         if ring:
-            fresh = [p for p in ring if registry.runtime(p.id).retry_in() <= 0]
+            # Fresh ring prefers providers with NO active backoff — except a
+            # provider with a KNOWN-limited exit still serving healthy
+            # siblings stays fresh: a lone bad exit must not cede ring
+            # share to a sibling (1xN behaves as N x singles). A backoff
+            # with no per-exit record (legacy note_ratelimited callers,
+            # unknown exit, or every servable exit limited) still yields,
+            # preserving the single-exit failover contract. Only a
+            # provider with zero servable exits yields its share.
+            def _fresh(p) -> bool:
+                rt = registry.runtime(p.id)
+                if rt.retry_in() <= 0:
+                    return True
+                try:
+                    limited = rt.limited_exits()
+                    if not limited:
+                        return False
+                    ready = [w for w in rt.health.exits if w.ready]
+                    return any(int(w.idx) not in limited for w in ready)
+                except Exception:
+                    return False
+
+            fresh = [p for p in ring if _fresh(p)]
             pool = fresh or sorted(
                 ring, key=lambda p: registry.runtime(p.id).retry_in()
             )
@@ -266,6 +334,38 @@ class ProviderEgress:
             registry._egresses = self._warp
             rt = registry.runtime(p.id)
             ready = [w for w in rt.health.exits if w.ready]
+            # Per-exit 429 isolation: limited exits become holes in the
+            # fixed-capacity spread (positions stable, survivors keep
+            # their warp_idx) instead of cordoning the whole provider
+            # (1xN behaves as N x singles).
+            try:
+                limited = rt.limited_exits()
+            except Exception:
+                limited = set()
+            limited_ports: set[int] = set()
+            if limited:
+                try:
+                    limited_ports = {
+                        int(w.socks)
+                        for w in ready
+                        if int(w.idx) in limited and int(w.socks or 0)
+                    }
+                except Exception:
+                    limited_ports = set()
+            spread = [w for w in ready if int(w.idx) not in limited] or ready
+            # All-limited fallback: every servable exit holed would make
+            # pick_port return None and force a fail-open exception
+            # round-trip on every request for the whole cooldown — while N
+            # singles least-wait-fallback serve via the soonest member.
+            # Keep parity: leave the least-wait (lowest-port) servable exit
+            # live and hole the rest, so the spread serves instead of
+            # failing open.
+            if limited and not [w for w in ready if int(w.idx) not in limited]:
+                try:
+                    keep = min(int(w.socks) for w in ready if int(w.socks or 0))
+                    limited_ports.discard(keep)
+                except Exception:
+                    pass
             if (
                 rt.health.fetched_at > 0
                 and not ready
@@ -273,9 +373,13 @@ class ProviderEgress:
             ):
                 pass
             else:
-                if ready:
-                    egress.set_num_slots(len(ready))
+                if spread:
+                    egress.set_num_slots(len(spread))
+                    # Full-capacity ring with limited ports as holes:
+                    # survivors keep positions (stable warp_idx), only the
+                    # excluded share walks to the next live exit.
                     egress.set_socks_ports(sorted(w.socks for w in ready))
+                    egress.set_excluded_ports(limited_ports)
                 elif rt.health.fetched_at <= 0:
                     saved = registry.ready_exits(p.id)
                     if saved is not None:
