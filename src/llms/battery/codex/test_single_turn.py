@@ -42,13 +42,13 @@ def test_cx_single_file_write():
 
 
 def test_cx_single_shell_redirect_write():
-    # NOTE (live 2026-10-12): the model loops re-emitting `shell` under
-    # one call_id ("retrying through the proper shell tool" x16) after
-    # the write already landed — the turn never completes and the CLI
-    # burns its full timeout. Gateway evidence is clean (first-turn
-    # fold translates shell->exec_command with zero steers, exit 0,
-    # byte-exact file), so the failure is model-side retry dynamics,
-    # not routing. xfail pin until the steer path breaks that loop.
+    # Fixed 2026-10-12 (alias attribution): the loop was the model
+    # re-emitting `shell` because the executed success echoed back
+    # under the rewritten `exec_command` name it never emitted.
+    # to_zen_responses now replays executed alias pairs under the
+    # emitted name, and the leg passes (battery 17 passed incl. this
+    # leg; standalone RELAY CODEX REDIRECT PASS). TimeoutExpired still
+    # xfails — a hung CLI is harness/model dynamics, not an assertion.
     base, sk = require_live()
     home, ws = battery_dirs("cx-shell-redir")
     env = codex_env(home, base, "ak-battery-cx02", sk, SPARK)
