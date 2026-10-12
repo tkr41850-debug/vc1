@@ -979,6 +979,12 @@ def derive_lifecycle(
     Precedence: draining > ratelimited > ready-probation > preparing >
     ready > unhealthy > off. Unexpected shapes fall back to preparing
     (enabled) / off (disabled). Returns (lifecycle, drain_detail).
+
+    The ratelimited arm is per-exit aware: a provider-level backoff with
+    healthy un-limited ready exits still serving reads ready (a lone bad
+    exit must not yellow the whole row — 1xN behaves as N x singles).
+    The aggregate still reads ratelimited when no per-exit record exists
+    (legacy callers, unknown exit) or every servable exit is limited.
     """
     try:
         current = time.monotonic() if now is None else now
@@ -1008,7 +1014,29 @@ def derive_lifecycle(
                 "forced": bool(forced),
             }
         if enabled and retry > 0:
-            return "ratelimited", None
+            # Per-exit isolation: the aggregate backoff alone does not
+            # poison the row while healthy un-limited exits serve. Skip
+            # the arm only on positive proof of spare capacity (known
+            # limited set + a ready exit outside it); every other shape
+            # (no record, unknown health, all limited) keeps the arm.
+            try:
+                limited = rt.limited_exits()
+            except Exception:
+                limited = set()
+            if limited:
+                try:
+                    if any(
+                        int(getattr(w, "idx", -1)) not in limited
+                        for w in exits
+                        if bool(getattr(w, "ready", False))
+                    ):
+                        pass
+                    else:
+                        return "ratelimited", None
+                except Exception:
+                    return "ratelimited", None
+            else:
+                return "ratelimited", None
         probation = bool(getattr(rt, "probation", False))
         if enabled and probation and (kind == "noproxy" or ready > 0):
             return "ready-probation", None

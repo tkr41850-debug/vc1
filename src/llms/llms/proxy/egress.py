@@ -353,6 +353,19 @@ class ProviderEgress:
                 except Exception:
                     limited_ports = set()
             spread = [w for w in ready if int(w.idx) not in limited] or ready
+            # All-limited fallback: every servable exit holed would make
+            # pick_port return None and force a fail-open exception
+            # round-trip on every request for the whole cooldown — while N
+            # singles least-wait-fallback serve via the soonest member.
+            # Keep parity: leave the least-wait (lowest-port) servable exit
+            # live and hole the rest, so the spread serves instead of
+            # failing open.
+            if limited and not [w for w in ready if int(w.idx) not in limited]:
+                try:
+                    keep = min(int(w.socks) for w in ready if int(w.socks or 0))
+                    limited_ports.discard(keep)
+                except Exception:
+                    pass
             if (
                 rt.health.fetched_at > 0
                 and not ready
