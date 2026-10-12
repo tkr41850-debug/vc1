@@ -796,7 +796,7 @@ def translate_genuine_call(
     """Genuine name + usable args -> (client tool name, client arguments).
 
     The model emits genuine-overlay names it was offered upstream
-    (shell/write/edit/grep/...) with valid arguments — steering those
+    (shell/write/edit/grep/webfetch/...) with valid arguments — steering those
     burns a turn teaching names the client declared under its OWN
     names (spark: `exec_command` with `cmd`) for the same capability.
     When the client declared an equivalent tool and the arguments
@@ -816,7 +816,7 @@ def translate_genuine_call(
     from llms.proxy.ir import ToolDef
 
     lowered = call_name.lower() if isinstance(call_name, str) else ""
-    if lowered not in ("read", "shell", "write", "edit", "execute", "grep"):
+    if lowered not in ("read", "shell", "write", "edit", "execute", "grep", "webfetch"):
         return None
     # Same-name ownership wins: when the client declared the genuine
     # name itself (casing-insensitive), the owned path validates it —

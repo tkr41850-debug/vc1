@@ -1492,7 +1492,7 @@ def test_translate_genuine_call_reaches_all_table_names():
 
     names = {str(row[0]).lower() for row in TO_CLIENT}
     assert names <= {
-        "read", "shell", "write", "edit", "execute", "grep",
+        "read", "shell", "write", "edit", "execute", "grep", "webfetch",
     }, names
     runner = (_spark_runner(),)
     owned = owned_tool_names(runner)
@@ -1517,6 +1517,7 @@ def test_translate_genuine_call_reaches_all_table_names():
         "execute": (ns_owned, ns_defs, ns,
                     {"code": "await tools.apply_patch('x')"}),
         "grep": (owned, defs, runner, {"pattern": "N", "path": "ws"}),
+        "webfetch": (owned, defs, runner, {"url": "https://example.com"}),
     }
     families = {"execute": "luna"}
     for name in sorted(names):

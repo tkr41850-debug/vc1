@@ -494,7 +494,7 @@ def _classify_calls(
                 passthrough.append(fixed)
                 continue
         # Genuine-overlay names with usable arguments (the model was
-        # offered shell/write/edit/grep upstream): rewrite onto the
+        # offered shell/write/edit/grep/webfetch upstream): rewrite onto the
         # client's equivalent tool instead of steering a name the
         # client declared under its own name for the same capability
         # (live: `shell` steered forever on the spark leg while the

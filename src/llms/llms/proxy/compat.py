@@ -432,6 +432,28 @@ def _grep_to_shell_rg(payload: dict, required: list) -> str | None:
     return _json.dumps({"cmd": cmd})
 
 
+def _webfetch_to_shell_curl(payload: dict, required: list) -> str | None:
+    """genuine `webfetch {url, format, timeout}` onto `curl`, or None.
+
+    Family-gated (codex-plain only): emits
+    `{"cmd": "curl -sL <url>"}` (the runner's shell fetches the
+    bytes; format/timeout are presentation concerns the harness
+    CLI handles itself — the bytes are what the leg asserts).
+    Non-string/blank url: None (no guess — the generic steer
+    applies). Live 2026-10-12: no codex-plain row, so the
+    webfetch leg steered generic and the model emitted bare
+    `shell {}` until the turn died with no fetch.
+    """
+    url = payload.get("url")
+    if not isinstance(url, str) or not url.strip():
+        return None
+    if "cmd" not in set(required or []):
+        return None
+    import json as _json
+
+    return _json.dumps({"cmd": f"curl -sL {url.strip()}"})
+
+
 def _edit_to_shell_py(payload: dict, required: list) -> str | None:
     """genuine `edit {path, oldString, newString}` onto python3, or None.
 
@@ -495,6 +517,7 @@ TO_CLIENT: tuple = (
     ("read", CODEX_PLAIN, "exec_command", _read_to_shell_cat),
     ("grep", CODEX_PLAIN, "exec_command", _grep_to_shell_rg),
     ("edit", CODEX_PLAIN, "exec_command", _edit_to_shell_py),
+    ("webfetch", CODEX_PLAIN, "exec_command", _webfetch_to_shell_curl),
     ("shell", CLAUDE, "bash", _shell_to_claude_bash),
     ("read", CLAUDE, "read", _read_to_claude_read),
     ("write", CLAUDE, "write", _write_to_claude_write),
