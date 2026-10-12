@@ -208,7 +208,9 @@ def test_cl_single_multi_tool():
             "--allowedTools=Bash,Write",
             f"--add-dir={ws}",
             (
-                "Do both in this turn: (1) Use Write to create "
+                "Do both in this turn, without any preamble or "
+                "narration — emit the Write and Bash calls immediately: "
+                "(1) Use Write to create "
                 f"{target} with exactly CLAUDE-MULTI-OK, "
                 "(2) Use Bash to run echo CLAUDE-MULTI-BASH. "
                 "Reply with both results verbatim."
@@ -232,7 +234,9 @@ def test_cl_single_multi_tool():
             "stream-json",
             "--verbose",
             (
-                "Do both in this turn: (1) Use Write to create "
+                "Do both in this turn, without any preamble or "
+                "narration — emit the Write and Bash calls immediately: "
+                "(1) Use Write to create "
                 f"{target} with exactly CLAUDE-MULTI-OK, "
                 "(2) Use Bash to run echo CLAUDE-MULTI-BASH. "
                 "Reply with both results verbatim."
