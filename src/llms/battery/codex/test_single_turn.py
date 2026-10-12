@@ -535,11 +535,11 @@ def test_cx_single_mcp_tool():
 
 
 def test_cx_single_read_tool():
-    """Genuine `read` steer path (read-via-shell-cat) on codex-plain.
+    """Genuine `read` translation (read->cat row) on codex-plain.
 
     The marker never appears in the prompt — only a real read of
     seed_read.txt can reveal it — so stdout containing it proves the
-    file was actually read (shell cat via the read steer, or the
+    file was actually read (shell cat via the read translation, or the
     runner directly), not echoed. Distilled from live Claude traffic
     where the Read step of explore-then-edit chains is load-bearing.
     """
@@ -567,7 +567,7 @@ def test_cx_single_read_tool():
 
 
 def test_cx_single_edit_tool():
-    """Genuine `edit` on codex-plain (no TO_CLIENT row: generic steer).
+    """Genuine `edit` on codex-plain (edit->python3 translation row).
 
     File bytes are unfakable via stdout — only a real edit (shell
     sed/printf or equivalent) turns BEFORE into AFTER. Distilled from
@@ -600,7 +600,7 @@ def test_cx_single_edit_tool():
 
 
 def test_cx_single_grep_tool():
-    """Content search on codex-plain (generic steer -> shell grep/rg).
+    """Content search on codex-plain (grep->rg translation row).
 
     The prompt names the needle stem but not which file holds it, so
     only a real workspace search finds cx-grep-b.txt and the full

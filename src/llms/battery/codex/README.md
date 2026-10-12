@@ -23,9 +23,9 @@ Run: `just battery codex/`
 | `test_cx_single_output_last_message` | `-o` file write (doc-sourced) | reply LASTMSG-OK with -o path | out file contains LASTMSG-OK |
 | `test_cx_single_search_flag` | `--search` (doc-sourced) | reply SEARCH-FLAG-OK with web-search on | stdout ends SEARCH-FLAG-OK |
 | `test_cx_single_mcp_tool` | MCP stdio tool via `codex mcp add` (doc-sourced) | marker_echo from battery-probe server, relay verbatim | CX-MCP-MARKER-OK in stdout (skips when uv/fastmcp missing; no pre-grant needed) |
-| `test_cx_single_read_tool` | genuine `read` steer (read-via-shell-cat) | read seed_read.txt, reply exact contents (marker never in prompt) | marker in stdout — proves a real read, not an echo |
-| `test_cx_single_edit_tool` | genuine `edit` (generic steer, no TO_CLIENT row) | replace EDIT-BEFORE with EDIT-AFTER, reply DONE-EDIT-1 | file bytes `b"EDIT-AFTER-8Q2M\n"`, stdout ends DONE-EDIT-1 |
-| `test_cx_single_grep_tool` | content search (generic steer → shell grep/rg) | search *.txt for GREP-NEEDLE, reply FOUND-GREP-1 + full line verbatim | marker + GREP-NEEDLE-3X9P in stdout |
+| `test_cx_single_read_tool` | genuine `read` translation (`read→cat` row) | read seed_read.txt, reply exact contents (marker never in prompt) | marker in stdout — proves a real read, not an echo |
+| `test_cx_single_edit_tool` | genuine `edit` translation (`edit→python3` row) | replace EDIT-BEFORE with EDIT-AFTER, reply DONE-EDIT-1 | file bytes `b"EDIT-AFTER-8Q2M\n"`, stdout ends DONE-EDIT-1 |
+| `test_cx_single_grep_tool` | content search translation (`grep→rg` row) | search *.txt for GREP-NEEDLE, reply FOUND-GREP-1 + full line verbatim | marker + GREP-NEEDLE-3X9P in stdout |
 | `test_cx_single_glob_tool` | file finding (generic steer → shell find/ls) | find cx-glob-target.json under workspace, reply FOUND-GLOB-1 + path | marker + sub-nest-7 in stdout |
 | `test_cx_single_question_direct` | `question` has no codex-plain route (notice bans it) | reply QUESTION-PATH-OK, no tools | stdout ends QUESTION-PATH-OK (pins no stall on banned tool) |
 | `test_cx_single_webfetch_tool` | content fetch (generic steer → shell curl) | fetch example.com, reply FETCH-OK-1 + heading | marker + "Example Domain" in stdout |
