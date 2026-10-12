@@ -462,6 +462,14 @@ def _classify_calls(
                         continue
             if isinstance(tool, ToolDef) and missing == []:
                 fixed = {**call, "name": convert_call_name(name, owned)}
+                # Dotted nested emission (`multi_agent_v1.spawn_agent`):
+                # the harness dispatches by the item's own namespace
+                # field — a bare replay fails lookup (live codex-plain
+                # 2026-10-12: `unsupported call: spawn_agent` ×74
+                # turns). Same marker the wait_agent fill-in arm sets;
+                # the replay paths already consume it.
+                if ns and ns.lower() != "default":
+                    fixed["__route_namespace__"] = ns
                 if route is not None:
                     rewritten = rewrite_steered_call(
                         fixed, args if isinstance(args, str) else "", route

@@ -1011,6 +1011,42 @@ def test_plain_namespace_container_call_steers():
     assert steered == []
 
 
+def test_dotted_nested_call_keeps_route_namespace():
+    # Live codex-plain (2026-10-12, cx-spawn-agent verdict leg): the
+    # model emits the DOTTED form `multi_agent_v1.spawn_agent` and
+    # the harness fails a bare replay with `unsupported call`. The
+    # classifier must ride __route_namespace__ so the replay
+    # re-attaches the namespace (same marker the wait_agent fill-in
+    # arm sets; the replay paths already consume it). `default.*`
+    # never marks (the harness fills its own default).
+    from llms.proxy.pipeline import _classify_calls
+
+    tools = _multi_agent_ns()
+    from llms.proxy.client_tools import (
+        dispatchable_names,
+        nested_tool_defs,
+        owned_tool_names,
+    )
+
+    owned = owned_tool_names(tools)
+    route = dispatchable_names(tools)
+    defs = dict(nested_tool_defs(tools))
+    passed, steered = _classify_calls(
+        [{"name": "multi_agent_v1.spawn_agent", "arguments": "{}"}],
+        owned,
+        defs,
+        route,
+        tools,
+        (),
+        "codex-plain",
+        "t",
+    )
+    assert steered == []
+    assert [c["name"] for c in passed] == ["spawn_agent"]
+    assert passed[0].get("__route_namespace__") == "multi_agent_v1"
+
+
+
 def test_plain_namespace_notice_lists_nested_not_container():
     # The notice must teach the nested names, never the container.
     from llms.proxy.client_tools import build_tool_notice, display_tool_names
