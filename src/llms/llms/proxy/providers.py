@@ -697,6 +697,23 @@ class ProviderRegistry:
             # pool-may-recover branch is the only warp path, and it
             # re-seeds ports on the next ready snapshot here.
             egress.set_socks_ports(ready_ports)
+            # Re-apply live per-exit 429 holes on the fresh spread: a
+            # refresh that only resets ports would silently un-exclude a
+            # still-limited exit mid-cooldown (positions are stable, so
+            # the holes re-apply cleanly).
+            try:
+                limited = rt.limited_exits()
+                if limited:
+                    by_idx = {
+                        int(w.idx): int(w.socks)
+                        for w in health.exits
+                        if w.ready and int(w.socks or 0)
+                    }
+                    egress.set_excluded_ports(
+                        {by_idx[i] for i in limited if i in by_idx}
+                    )
+            except Exception:
+                pass
         try:
             self.save_warp_status(provider.id, health)
         except OSError:

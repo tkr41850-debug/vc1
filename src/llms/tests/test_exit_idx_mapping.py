@@ -58,4 +58,7 @@ def test_exit_record_keys_on_pool_idx_not_spread_position(tmp_path):
     rt.note_exit_ratelimited(pool_idx, 120.0, "exit 1: limited")
     assert rt.limited_exits() == {1}
     _, _, w2 = egress.resolve("gpt-5", bucket=0)
-    assert w2.ready_ports() == [44003], w2.ready_ports()
+    live = [p for p in w2.ready_ports() if p is not None]
+    assert live == [44003], w2.ready_ports()
+    # Positions stable: pool idx 2 keeps spread position 1.
+    assert w2.ready_ports().index(44003) == 1

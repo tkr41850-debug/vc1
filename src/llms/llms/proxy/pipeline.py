@@ -1597,17 +1597,24 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                     provider_id, via_warp = None, None
                     client = egress_provider.client_for(bucket, slot)
                 else:
-                    # Slot-spread egress: the request's slot pins to one
-                    # ready exit (slot % ready), so warp_idx is the slot's
-                    # position in the ready spread — not a pool pin.
+                    # Slot-spread egress: the request's slot walks the
+                    # fixed-capacity spread to the next live exit, so
+                    # warp_idx is the serving position in the spread —
+                    # stable per physical exit across exclusions (holes,
+                    # not removals). socks_port is the ground truth the
+                    # per-exit 429 record keys on; warp_idx is the
+                    # human-facing position.
+                    serving = warp_egress.pick_port(slot)
                     ports = warp_egress.ready_ports()
                     warp_idx = (
-                        ports.index(warp_egress.pick_port(slot)) if ports else None
+                        ports.index(serving)
+                        if serving is not None and serving in ports
+                        else None
                     )
                     via_warp = {
                         "provider_id": provider_id or "",
                         "warp_idx": warp_idx,
-                        "socks_port": warp_egress.pick_port(slot),
+                        "socks_port": serving,
                     }
         else:
             client = egress_provider.client_for(bucket, slot)
@@ -1687,12 +1694,17 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 provider_id, via_warp = None, None
                 client = egress_provider.client_for(bucket, slot)
             else:
+                serving = warp_egress.pick_port(slot)
                 ports = warp_egress.ready_ports()
-                warp_idx = ports.index(warp_egress.pick_port(slot)) if ports else None
+                warp_idx = (
+                    ports.index(serving)
+                    if serving is not None and serving in ports
+                    else None
+                )
                 via_warp = {
                     "provider_id": provider_id or "",
                     "warp_idx": warp_idx,
-                    "socks_port": warp_egress.pick_port(slot),
+                    "socks_port": serving,
                 }
         if registry is not None and provider_id:
             _arm_probation_on_expiry(registry, provider_id)

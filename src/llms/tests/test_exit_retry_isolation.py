@@ -80,4 +80,5 @@ def test_one_exit_429_does_not_yield_ring_share_to_sibling(tmp_path):
     assert after == before, f"ring share ceded after one exit 429: {after}"
     # ... while the limited exit itself is steered around.
     _, _, w = egress.resolve("gpt-5", bucket=0)
-    assert sorted(w.ready_ports()) == [40001, 40003], w.ready_ports()
+    live = sorted(p for p in w.ready_ports() if p is not None)
+    assert live == [40001, 40003], w.ready_ports()
