@@ -94,7 +94,23 @@ def test_cl_single_bash():
         env,
     )
     assert sj.returncode == 0, sj.stderr[-1000:]
-    assert '"name":"Bash"' in sj.stdout.replace(" ", "")
+    # The CLI stream-json init event always lists the FULL tool set
+    # (server-side gating, not client-side filtering — live 2026-10-12:
+    # --allowedTools=Bash still offered all 23). Pin the enforcement
+    # that matters: a Bash tool_use actually ran with the exact input.
+    events = [
+        json.loads(line) for line in sj.stdout.splitlines() if line.strip()
+    ]
+    uses = [
+        e for e in events
+        if e.get("type") == "assistant"
+        and any(
+            (b.get("type") == "tool_use" and b.get("name") == "Bash")
+            for b in (e.get("message", {}).get("content") or [])
+            if isinstance(b, dict)
+        )
+    ]
+    assert uses, "no Bash tool_use in stream-json envelope"
     assert "echo CLAUDE-BASH-OK" in sj.stdout
     assert "CLAUDE-BASH-OK" in sj.stdout
 
