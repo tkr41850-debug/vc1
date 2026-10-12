@@ -491,11 +491,16 @@ export default function ProvidersTab({
     setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
 
   const saveLabel = (p: ProviderEntry, label: string) =>
-    api
-      .updateProvider(p.id, { label })
-      .then((snap) => {
-        applyOne(snap as unknown as ProviderEntry);
-      });
+    api.updateProvider(p.id, { label }).then(() => {
+      // Label-only PUTs return a minimal ack ({id, enabled}), NOT a full
+      // snapshot (that only comes back on the enabled path via
+      // _ack_intent_change) — so patch the label onto the previous entry
+      // instead of replacing it. The handler publishes a full SSE frame
+      // anyway, which stays authoritative for everything else.
+      onProviders((prev) =>
+        prev.map((q) => (q.id === p.id ? { ...q, label } : q)),
+      );
+    });
 
   const toggle = (p: ProviderEntry) => {
     markPending(p.id, true);
