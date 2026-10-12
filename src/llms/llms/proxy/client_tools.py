@@ -796,7 +796,7 @@ def translate_genuine_call(
     """Genuine name + usable args -> (client tool name, client arguments).
 
     The model emits genuine-overlay names it was offered upstream
-    (shell/write/edit/...) with valid arguments — steering those
+    (shell/write/edit/grep/...) with valid arguments — steering those
     burns a turn teaching names the client declared under its OWN
     names (spark: `exec_command` with `cmd`) for the same capability.
     When the client declared an equivalent tool and the arguments
@@ -805,7 +805,8 @@ def translate_genuine_call(
     {"cmd": ...}. Returns None when there is no equivalent (caller
     falls back to the steer path). `read` never translates (see
     _translate_genuine_args): a shared `path` key is not a file
-    reader. Splits code-mode `ns__name` first (same ownership key
+    reader — except through the compat table's family-gated rows
+    (codex-plain read->cat), which win explicitly above. Splits code-mode `ns__name` first (same ownership key
     as the classifier). `family` selects family-specific compat rows
     (unknown families get `*` all-family rows only — never a
     wrong-family rewrite); the explicit table wins, the legacy
@@ -815,7 +816,7 @@ def translate_genuine_call(
     from llms.proxy.ir import ToolDef
 
     lowered = call_name.lower() if isinstance(call_name, str) else ""
-    if lowered not in ("read", "shell", "write", "edit", "execute"):
+    if lowered not in ("read", "shell", "write", "edit", "execute", "grep"):
         return None
     # Same-name ownership wins: when the client declared the genuine
     # name itself (casing-insensitive), the owned path validates it —

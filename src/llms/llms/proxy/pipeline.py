@@ -482,13 +482,13 @@ def _classify_calls(
                 passthrough.append(fixed)
                 continue
         # Genuine-overlay names with usable arguments (the model was
-        # offered shell/write/edit upstream): rewrite onto the
+        # offered shell/write/edit/grep upstream): rewrite onto the
         # client's equivalent tool instead of steering a name the
         # client declared under its own name for the same capability
         # (live: `shell` steered forever on the spark leg while the
-        # client declares `exec_command` for the same thing). `read`
-        # never rewrites (a shared `path` key is not a file reader) —
-        # it steers, and the redirect teaches shell/command.
+        # client declares `exec_command` for the same thing). Names
+        # with no compat-table row steer, and the redirect teaches
+        # shell/command.
         args_text = call.get("arguments", "")
         args_text = args_text if isinstance(args_text, str) else ""
         translated = translate_genuine_call(

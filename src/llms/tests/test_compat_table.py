@@ -1477,3 +1477,52 @@ def test_dispatch_read_grep_edit_rows_codex_plain_only():
         )
         is None
     )
+
+
+def test_translate_genuine_call_reaches_all_table_names():
+    # Live-path guard: translate_genuine_call allowlists the genuine
+    # names it forwards to the compat table. Every row-0 name in
+    # TO_CLIENT must pass the gate, or the row is dead code live
+    # (caught 2026-10-12: the grep row tested green via
+    # translate_to_client directly but returned None through the
+    # classifier — "grep" was missing from the allowlist).
+    from llms.proxy.client_tools import owned_tool_names, translate_genuine_call
+    from llms.proxy.compat import TO_CLIENT
+    from tests.test_client_tools import _spark_runner
+
+    names = {str(row[0]).lower() for row in TO_CLIENT}
+    assert names <= {
+        "read", "shell", "write", "edit", "execute", "grep",
+    }, names
+    runner = (_spark_runner(),)
+    owned = owned_tool_names(runner)
+    defs = {t.name.lower(): t for t in runner if t.name}
+    import json as _json
+
+    # The execute row is channel-gated (needs the luna namespace's
+    # documented exec orchestrator — plain function legs steer
+    # generic), so it is exempt from the spark-runner assertion;
+    # every other row-0 name must translate on this leg.
+    from tests.test_client_tools import _luna_namespace
+
+    ns = (_luna_namespace(),)
+    ns_owned = owned_tool_names(ns)
+    ns_defs = {t.name.lower(): t for t in ns if t.name}
+    payloads = {
+        "read": (owned, defs, runner, {"path": "x"}),
+        "shell": (owned, defs, runner, {"command": "echo hi"}),
+        "write": (owned, defs, runner, {"path": "x", "content": "y"}),
+        "edit": (owned, defs, runner,
+                 {"path": "x", "oldString": "a", "newString": "b"}),
+        "execute": (ns_owned, ns_defs, ns,
+                    {"code": "await tools.apply_patch('x')"}),
+        "grep": (owned, defs, runner, {"pattern": "N", "path": "ws"}),
+    }
+    families = {"execute": "luna"}
+    for name in sorted(names):
+        o, d, tools, payload = payloads[name]
+        got = translate_genuine_call(
+            name, _json.dumps(payload), o, d,
+            families.get(name, "codex-plain"), tools,
+        )
+        assert got is not None, name
