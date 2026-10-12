@@ -2306,14 +2306,14 @@ def test_steer_redirect_nested_leg_keeps_exec_channel():
     assert "custom_tool_call" in text and "`exec`" in text
 
 
-def test_genuine_read_steers_with_cat_redirect_not_view_image(tmp_path):
-    """Spark-leg regression (live probe): undeclared `read` must NOT
-    rename onto `view_image` (an image-path viewer — the harness
-    fails it client-side). It steers, and the follow-up upstream turn
-    carries the directed shell/command redirect (1 steer re-request,
-    then the clean turn replays — the client runner has no wire
-    schema, so the redirect names upstream `shell`; live spark A/B
-    2026-10-06)."""
+def test_genuine_read_translates_onto_shell_runner_not_view_image(tmp_path):
+    """Spark-leg regression (live probe + battery 2026-10-12): an
+    undeclared genuine `read` on a codex-plain leg translates onto
+    the `exec_command` shell runner as `cat` — never a view_image
+    rename, never a steer round-trip (exactly 1 upstream call). The
+    old steer-with-redirect behavior died with the codex-plain
+    `read` table row: translation happens in the classifier before
+    the owned-but-invalid path is ever reached."""
     from tests.conftest import TEST_HEADERS
 
     tc_ctx, calls = _steer_app_client(
@@ -2354,25 +2354,18 @@ def test_genuine_read_steers_with_cat_redirect_not_view_image(tmp_path):
             headers=TEST_HEADERS,
         )
     assert r.status_code == 200
-    # Steer re-request happened (dead turn + redirect replayed
-    # upstream), and the redirect named the cat invocation — never a
-    # view_image rename.
-    assert len(calls) == 2
-    followup = calls[1]
-    outputs = [
-        i for i in followup.get("input", []) if i.get("type") == "function_call_output"
-    ]
-    assert len(outputs) == 1
-    assert "shell" in outputs[0]["output"]
-    assert '"command"' in outputs[0]["output"]
-    assert "cat /tmp/f.txt" in outputs[0]["output"]
-    assert "view_image" not in outputs[0]["output"]
-    assert "Retry the call as 'shell'" in outputs[0]["output"]
+    # Translation, not steer: the single upstream turn is answered
+    # with the renamed client call (`exec_command` + `cat` args) —
+    # never a view_image rename, never a second steer re-request.
+    assert len(calls) == 1
     returned = [
         i for i in r.json().get("output", []) if i.get("type") == "function_call"
     ]
     assert len(returned) == 1
     assert returned[0]["name"] == "exec_command"
+    assert returned[0]["call_id"] == "call_read1"
+    assert "cat /tmp/f.txt" in (returned[0].get("arguments") or "")
+    assert "view_image" not in (returned[0].get("arguments") or "")
 
 
 def test_streaming_delta_shell_translates_without_steer(tmp_path):

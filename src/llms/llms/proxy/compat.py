@@ -368,6 +368,120 @@ def _write_to_shell_redirect(payload: dict, required: list) -> str | None:
     return _json.dumps({"cmd": f"printf '%s' {quoted} > {path}"})
 
 
+def _read_to_shell_cat(payload: dict, required: list) -> str | None:
+    """genuine `read {path}` onto a cmd-runner `cat`, or None.
+
+    Family-gated (codex-plain only — the row carries the family):
+    emits `{"cmd": "cat <path>"}` (same contract every other
+    translation returns: a JSON object with the client runner's
+    `cmd` key). The path rides verbatim — no quoting layer beyond
+    the JSON encoding (battery workspaces carry no spaces; a path
+    needing shell quoting is a steer case, not a guess). Pure
+    helper. Live 2026-10-12: the model emits genuine `read` for
+    the edit-bigram leg and the table had no codex-plain row, so
+    the read steered generic while the bytes sat one `cat` away.
+    Non-string/blank path: None.
+    """
+    path = payload.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    if "cmd" not in set(required or []):
+        return None
+    import json as _json
+
+    return _json.dumps({"cmd": f"cat {path}"})
+
+
+def _grep_to_shell_rg(payload: dict, required: list) -> str | None:
+    """genuine `grep {pattern, path, include}` onto `rg`, or None.
+
+    Family-gated (codex-plain only): emits
+    `{"cmd": "rg -n [--glob '<include>'] '<pattern>' <path>"}`.
+    `rg` over `grep -rn`: `-n` line numbers match the genuine
+    contract (paths + line numbers + previews), `--glob` carries
+    `include` 1:1, and `rg` is the runner the harness shells
+    provide. Missing `include` searches the path as given (the
+    genuine `path` defaults to cwd; a missing path searches `.`).
+    No `include` glob games beyond single quotes (battery needles
+    carry no quotes; anything exotic is a steer case, not a
+    guess). Live 2026-10-12: no codex-plain row, so the grep leg
+    steered generic and degenerated to bare `shell {}`. Blank
+    pattern / non-string fields: None.
+    """
+    pattern = payload.get("pattern")
+    if not isinstance(pattern, str) or not pattern:
+        return None
+    path = payload.get("path")
+    if path is None:
+        path = "."
+    if not isinstance(path, str) or not path.strip():
+        return None
+    include = payload.get("include")
+    if include is not None and (
+        not isinstance(include, str) or not include.strip()
+    ):
+        return None
+    if "cmd" not in set(required or []):
+        return None
+    import json as _json
+
+    if include:
+        cmd = f"rg -n --glob '{include}' '{pattern}' {path}"
+    else:
+        cmd = f"rg -n '{pattern}' {path}"
+    return _json.dumps({"cmd": cmd})
+
+
+def _edit_to_shell_py(payload: dict, required: list) -> str | None:
+    """genuine `edit {path, oldString, newString}` onto python3, or None.
+
+    Family-gated (codex-plain only): emits a `python3 -c
+    exec(base64...)` wrapper carrying the line-swap script as
+    base64 (NO quoting layer can collide: paths/content carry
+    arbitrary `'`, `"`, `$`, newlines — every inline-quoting
+    shape breaks on some input, and `open(p,'w')` alone defeats
+    single-quote wrapping. base64 has zero shell-significant
+    bytes). The decoded script asserts the old string occurs
+    exactly once and swaps it (same uniqueness contract as the
+    genuine tool: multiple matches FAIL unless replaceAll — and
+    replaceAll is refused here, None, same discipline as the
+    apply_patch + claude Edit rows, since a global replace
+    synthesized from a single old/new pair would mis-fire on
+    repeated lines). `sed` cannot do this safely (multiline +
+    `/`/`&` escaping); python3 is always beside the runner.
+    Live 2026-10-12: no codex-plain row, so the edit leg steered
+    generic and the file bytes never changed. Missing/non-string
+    fields, empty old, or old == new: None.
+    """
+    path = payload.get("path")
+    old = payload.get("oldString")
+    new = payload.get("newString")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    if not isinstance(old, str) or not isinstance(new, str):
+        return None
+    if not old or old == new:
+        return None
+    if payload.get("replaceAll"):
+        return None
+    if "cmd" not in set(required or []):
+        return None
+    import base64 as _b64
+    import json as _json
+
+    script = (
+        "import sys;"
+        f"p={_json.dumps(path)};"
+        f"o={_json.dumps(old)};"
+        f"n={_json.dumps(new)};"
+        "s=open(p).read();"
+        "assert s.count(o)==1;"
+        "open(p,'w').write(s.replace(o,n))"
+    )
+    blob = _b64.b64encode(script.encode()).decode()
+    return _json.dumps({"cmd": f"python3 -c \"exec(__import__('base64').b64decode('{blob}'))\""})
+
+
 # Dispatch table: (genuine name, family ["*" = any], client lowered name,
 # argument translator). Family-specific rows require positive detection
 # (Task 1); unknown families get ``*`` rows only — never a wrong-family
@@ -378,6 +492,9 @@ TO_CLIENT: tuple = (
     ("write", LUNA, "exec", _write_to_apply_patch),
     ("edit", LUNA, "exec", _edit_to_apply_patch),
     ("write", CODEX_PLAIN, "exec_command", _write_to_shell_redirect),
+    ("read", CODEX_PLAIN, "exec_command", _read_to_shell_cat),
+    ("grep", CODEX_PLAIN, "exec_command", _grep_to_shell_rg),
+    ("edit", CODEX_PLAIN, "exec_command", _edit_to_shell_py),
     ("shell", CLAUDE, "bash", _shell_to_claude_bash),
     ("read", CLAUDE, "read", _read_to_claude_read),
     ("write", CLAUDE, "write", _write_to_claude_write),

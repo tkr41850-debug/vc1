@@ -685,7 +685,10 @@ def test_notice_ban_exempts_table_rows():
     banned = head.split("the default tools")[1].split("are NOT")[0]
     for name in ("read", "shell", "write", "edit"):
         assert name not in banned, name
-    for name in ("glob", "grep", "skill", "subagent", "webfetch", "websearch"):
+    # `grep` joined the translated set via the codex-plain shell row
+    # (live 2026-10-12) — exempt alongside the four.
+    assert "grep" not in banned
+    for name in ("glob", "skill", "subagent", "webfetch", "websearch"):
         assert name in banned, name
 
 
@@ -719,11 +722,14 @@ def test_notice_shell_directive_off_by_default_and_gated():
     head = notice.split("\n")[0]
     banned = head.split("the default tools")[1].split("are NOT")[0]
     # `shell` still banned (no table row targets this client's tools);
-    # read/write/edit exempted by their family-agnostic rows is a
-    # table-level exemption — the ban text consults the table, not the
-    # client. Only the untranslated names are asserted here.
-    for name in ("glob", "grep", "skill", "subagent"):
+    # read/write/edit exempted by their rows is a table-level
+    # exemption — the ban text consults the table, not the client.
+    # `grep` joined the translated set (codex-plain row, live
+    # 2026-10-12: generic steer degenerated to bare `shell {}`).
+    # Only the untranslated names are asserted here.
+    for name in ("glob", "skill", "subagent"):
         assert name in banned, name
+    assert "grep" not in banned
 
 
 def test_redirect_shell_runner_points_at_alias():

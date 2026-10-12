@@ -1293,3 +1293,187 @@ def test_schema_audit_dropped_keys_pinned():
         )
         is None
     )
+
+
+def test_read_grep_edit_translate_onto_shell_runner_codex_plain():
+    # RED for the live 11:38-11:39 failures: the model emits genuine
+    # `read {path}` / `grep {pattern, path, include}` / `edit
+    # {path, oldString, newString}` on the codex-plain leg, and the
+    # table has no codex-plain row for any of them — each steers with
+    # the generic correction (edit leg left file bytes unchanged;
+    # grep leg degenerated to bare `shell {}`). Shell one-liners are
+    # 1:1 exact: `cat`, `rg`/`grep -rn`, `python3` line-swap. Proven
+    # byte-exact through the harness shell path below.
+    from tests.test_client_tools import _spark_runner
+
+    from llms.proxy.compat import (
+        _edit_to_shell_py,
+        _grep_to_shell_rg,
+        _read_to_shell_cat,
+    )
+
+    tra = _read_to_shell_cat({"path": "seed_edit.txt"}, ["cmd"])
+    assert tra is not None
+    assert __import__("json").loads(tra) == {"cmd": "cat seed_edit.txt"}
+    assert _read_to_shell_cat({"path": "  "}, ["cmd"]) is None
+    assert _read_to_shell_cat({"path": "x"}, []) is None
+
+    tra = _grep_to_shell_rg(
+        {"pattern": "GREP-NEEDLE", "path": "ws", "include": "*.txt"}, ["cmd"]
+    )
+    assert tra is not None
+    assert __import__("json").loads(tra) == {
+        "cmd": "rg -n --glob '*.txt' 'GREP-NEEDLE' ws"
+    }
+    assert _grep_to_shell_rg({"pattern": ""}, ["cmd"]) is None
+
+    tra = _edit_to_shell_py(
+        {
+            "path": "seed_edit.txt",
+            "oldString": "EDIT-BEFORE-8Q2M",
+            "newString": "EDIT-AFTER-8Q2M",
+        },
+        ["cmd"],
+    )
+    assert tra is not None
+    import base64 as _b64
+
+    cmd = __import__("json").loads(tra)["cmd"]
+    assert cmd.startswith("python3 -c ")
+    # base64-wrapped: no quoting layer can collide (paths/content
+    # carry arbitrary quotes). Decode and check the payload.
+    blob = cmd.split("b64decode('", 1)[1].rstrip("')")
+    assert len(blob) == len(cmd.split("b64decode('", 1)[1].rstrip("')"))
+    script = _b64.b64decode(blob).decode()
+    assert "EDIT-BEFORE-8Q2M" in script and "EDIT-AFTER-8Q2M" in script
+    assert "seed_edit.txt" in script
+    # replaceAll refused: single old/new pair would mis-fire (same
+    # discipline as the apply_patch + claude Edit rows).
+    assert (
+        _edit_to_shell_py(
+            {
+                "path": "x",
+                "oldString": "a",
+                "newString": "b",
+                "replaceAll": True,
+            },
+            ["cmd"],
+        )
+        is None
+    )
+
+
+def test_read_grep_edit_execute_byte_exact(tmp_path):
+    # The syntheses must EXECUTE, not just classify (same bar as the
+    # write-redirect byte-exact test): run each through /bin/bash -lc
+    # against a fixture tree.
+    import subprocess
+
+    from llms.proxy.compat import (
+        _edit_to_shell_py,
+        _grep_to_shell_rg,
+        _read_to_shell_cat,
+    )
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "a.txt").write_text("nothing here\n")
+    (ws / "b.txt").write_text("line one\nGREP-NEEDLE-3X9P here\nline three\n")
+    (ws / "seed.txt").write_text("EDIT-BEFORE-8Q2M\n")
+
+    out = subprocess.run(
+        ["/bin/bash", "-lc", __import__("json").loads(
+            _read_to_shell_cat({"path": str(ws / "b.txt")}, ["cmd"])
+        )["cmd"]],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0
+    assert out.stdout == "line one\nGREP-NEEDLE-3X9P here\nline three\n"
+
+    out = subprocess.run(
+        ["/bin/bash", "-lc", __import__("json").loads(
+            _grep_to_shell_rg(
+                {"pattern": "GREP-NEEDLE", "path": str(ws), "include": "*.txt"},
+                ["cmd"],
+            )
+        )["cmd"]],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0
+    assert "GREP-NEEDLE-3X9P" in out.stdout and "b.txt" in out.stdout
+
+    subprocess.run(
+        ["/bin/bash", "-lc", __import__("json").loads(
+            _edit_to_shell_py(
+                {"path": str(ws / "seed.txt"),
+                 "oldString": "EDIT-BEFORE-8Q2M",
+                 "newString": "EDIT-AFTER-8Q2M"},
+                ["cmd"],
+            )
+        )["cmd"]],
+        check=True,
+    )
+    assert (ws / "seed.txt").read_text() == "EDIT-AFTER-8Q2M\n"
+
+
+def test_dispatch_read_grep_edit_rows_codex_plain_only():
+    # Table rows are family-gated (codex-plain only): luna keeps the
+    # apply_patch channel rows, unknown fails open.
+    from tests.test_client_tools import _luna_namespace, _spark_runner
+
+    from llms.proxy.client_tools import nested_tool_defs, owned_tool_names
+    from llms.proxy.compat import translate_to_client
+
+    runner = (_spark_runner(),)
+    owned = owned_tool_names(runner)
+    defs = {t.name.lower(): t for t in runner if t.name}
+    defs.update(nested_tool_defs(runner))
+    name, args = translate_to_client(
+        "read", '{"path": "seed_edit.txt"}', "codex-plain", owned, defs, runner
+    )
+    assert name == "exec_command"
+    assert __import__("json").loads(args) == {"cmd": "cat seed_edit.txt"}
+    name, args = translate_to_client(
+        "grep",
+        '{"pattern": "GREP-NEEDLE", "path": "ws", "include": "*.txt"}',
+        "codex-plain", owned, defs, runner,
+    )
+    assert name == "exec_command"
+    assert __import__("json").loads(args) == {
+        "cmd": "rg -n --glob '*.txt' 'GREP-NEEDLE' ws"
+    }
+    # Grep without include searches the path as given.
+    name, args = translate_to_client(
+        "grep", '{"pattern": "N", "path": "ws"}', "codex-plain",
+        owned, defs, runner,
+    )
+    assert name == "exec_command"
+    assert __import__("json").loads(args) == {"cmd": "rg -n 'N' ws"}
+    name, args = translate_to_client(
+        "edit",
+        '{"path": "s", "oldString": "A", "newString": "B"}',
+        "codex-plain", owned, defs, runner,
+    )
+    assert name == "exec_command"
+    import base64 as _b64d
+
+    _blob = __import__("json").loads(args)["cmd"].split("b64decode('", 1)[1]
+    _script = _b64d.b64decode(_blob.rstrip("')")).decode()
+    assert "A" in _script
+
+    ns = (_luna_namespace(),)
+    l_owned = owned_tool_names(ns)
+    l_defs = {t.name.lower(): t for t in ns if t.name}
+    l_defs.update(nested_tool_defs(ns))
+    assert (
+        translate_to_client(
+            "read", '{"path": "x"}', "luna", l_owned, l_defs, ns
+        )
+        is None
+    )
+    assert (
+        translate_to_client(
+            "read", '{"path": "x"}', "unknown", owned, defs, runner
+        )
+        is None
+    )
