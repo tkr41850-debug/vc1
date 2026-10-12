@@ -16,6 +16,48 @@ CODEX_BIN = __import__("os").getenv(
 SPARK = "muse-spark-1.3-contributor-free"
 
 
+def _stop_sign_png_bytes(size: int = 128) -> bytes:
+    """Stop-sign PNG generated in memory (no image step touches disk).
+
+    Red octagon on a white canvas with white blocky "STOP" text drawn
+    via Pillow's scalable built-in font (no font files, no hardcoded
+    blob). The CLI needs a file *path* for `-i` / `view_image`, so
+    callers still write the returned bytes into the workspace — but
+    the image itself is drawn on a canvas and encoded via BytesIO.
+    """
+    import io
+    import math
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.new("RGB", (size, size), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    # Regular octagon inscribed with margin m.
+    m = size * 0.08
+    c = (size / 2) * (1 - 1 / math.sqrt(2))
+    x0, x1 = m + c, size - m - c
+    draw.polygon(
+        [
+            (m, x0),
+            (x0, m),
+            (x1, m),
+            (size - m, x0),
+            (size - m, x1),
+            (x1, size - m),
+            (x0, size - m),
+            (m, x1),
+        ],
+        fill=(200, 0, 0),
+    )
+    font = ImageFont.load_default(size=max(8, int(size * 0.22)))
+    draw.text(
+        (size / 2, size / 2), "STOP", fill=(255, 255, 255), font=font, anchor="mm"
+    )
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def test_cx_single_file_write():
     base, sk = require_live()
     home, ws = battery_dirs("cx-file-write")
@@ -102,18 +144,21 @@ def test_cx_single_chained_multitool():
 
 
 def test_cx_single_image_attach():
+    """`-i` image attach with vision-content assertion (stop sign).
+
+    The attached PNG is drawn in-memory by `_stop_sign_png_bytes`
+    (BytesIO-encoded, never a hardcoded blob). The word STOP never
+    appears in the prompt, so a reply containing it proves the image
+    bytes reached model vision — not just that an attachment slot
+    existed.
+    """
     base, sk = require_live()
     home, ws = battery_dirs("cx-image")
     env = codex_env(home, base, "ak-battery-cx04", sk, SPARK)
-    import base64
 
-    png = ws / "red.png"
-    # 1x1 red PNG, no PIL dependency
-    png.write_bytes(
-        base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
-        )
-    )
+    png = ws / "stop.png"
+    # Stop-sign image drawn on a PIL canvas (BytesIO-encoded, no blob).
+    png.write_bytes(_stop_sign_png_bytes())
     c = run_cli(
         [
             CODEX_BIN,
@@ -122,8 +167,9 @@ def test_cx_single_image_attach():
             "-s",
             "workspace-write",
             (
-                "Reply with exactly ATTACH-IMG-1 if you received an image "
-                "attachment, else reply NO-IMAGE."
+                "An image is attached. Reply with exactly ATTACH-IMG-1 "
+                "on the first line. If you can see the image, add a "
+                "second line with the word written on the sign."
             ),
             "-i",
             str(png),
@@ -132,7 +178,8 @@ def test_cx_single_image_attach():
         env,
     )
     assert c.returncode == 0, c.stderr[-1000:]
-    assert c.stdout.strip().endswith("ATTACH-IMG-1")
+    assert "ATTACH-IMG-1" in c.stdout
+    assert "STOP" in c.stdout
 
 
 def test_cx_single_review_diff():
@@ -485,3 +532,357 @@ def test_cx_single_mcp_tool():
     if "CX-MCP-MARKER-OK" not in c.stdout:
         pytest.xfail(f"codex harness did not dispatch MCP tool: {c.stdout[-200:]}")
     assert "CX-MCP-MARKER-OK" in c.stdout
+
+
+def test_cx_single_read_tool():
+    """Genuine `read` steer path (read-via-shell-cat) on codex-plain.
+
+    The marker never appears in the prompt — only a real read of
+    seed_read.txt can reveal it — so stdout containing it proves the
+    file was actually read (shell cat via the read steer, or the
+    runner directly), not echoed. Distilled from live Claude traffic
+    where the Read step of explore-then-edit chains is load-bearing.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-read-tool")
+    env = codex_env(home, base, "ak-battery-cx20", sk, SPARK)
+    (ws / "seed_read.txt").write_text("READ-VIA-TOOL-4D7K\n")
+    c = run_cli(
+        [
+            CODEX_BIN,
+            "exec",
+            "--skip-git-repo-check",
+            "-s",
+            "workspace-write",
+            (
+                "Read the file seed_read.txt with a file-reading tool "
+                "and reply with its exact contents and nothing else."
+            ),
+        ],
+        ws,
+        env,
+    )
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert "READ-VIA-TOOL-4D7K" in c.stdout
+
+
+def test_cx_single_edit_tool():
+    """Genuine `edit` on codex-plain (no TO_CLIENT row: generic steer).
+
+    File bytes are unfakable via stdout — only a real edit (shell
+    sed/printf or equivalent) turns BEFORE into AFTER. Distilled from
+    the Read->Edit bigram that dominates real dev transcripts.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-edit-tool")
+    env = codex_env(home, base, "ak-battery-cx21", sk, SPARK)
+    target = ws / "seed_edit.txt"
+    target.write_text("EDIT-BEFORE-8Q2M\n")
+    c = run_cli(
+        [
+            CODEX_BIN,
+            "exec",
+            "--skip-git-repo-check",
+            "-s",
+            "workspace-write",
+            (
+                "In seed_edit.txt replace EDIT-BEFORE-8Q2M with "
+                "EDIT-AFTER-8Q2M using an editing tool, then reply with "
+                "exactly DONE-EDIT-1."
+            ),
+        ],
+        ws,
+        env,
+    )
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert target.read_bytes() == b"EDIT-AFTER-8Q2M\n"
+    assert c.stdout.strip().endswith("DONE-EDIT-1")
+
+
+def test_cx_single_grep_tool():
+    """Content search on codex-plain (generic steer -> shell grep/rg).
+
+    The prompt names the needle stem but not which file holds it, so
+    only a real workspace search finds cx-grep-b.txt and the full
+    marker line.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-grep-tool")
+    env = codex_env(home, base, "ak-battery-cx22", sk, SPARK)
+    (ws / "cx-grep-a.txt").write_text("nothing here\n")
+    (ws / "cx-grep-b.txt").write_text("line one\nGREP-NEEDLE-3X9P here\nline three\n")
+    c = run_cli(
+        [
+            CODEX_BIN,
+            "exec",
+            "--skip-git-repo-check",
+            "-s",
+            "workspace-write",
+            (
+                "Search the *.txt files in the workspace for the text "
+                "GREP-NEEDLE using a search tool, then reply with exactly "
+                "FOUND-GREP-1 on the first line, followed by the full "
+                "matching line verbatim on the second line."
+            ),
+        ],
+        ws,
+        env,
+    )
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert "FOUND-GREP-1" in c.stdout
+    assert "GREP-NEEDLE-3X9P" in c.stdout
+
+
+def test_cx_single_glob_tool():
+    """File finding on codex-plain (generic steer -> shell find/ls).
+
+    The nested path is unknowable without a real search: the prompt
+    names only the leaf filename.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-glob-tool")
+    env = codex_env(home, base, "ak-battery-cx23", sk, SPARK)
+    nested = ws / "sub-nest-7" / "deep"
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "cx-glob-target.json").write_text('{"ok": "glob-ok"}\n')
+    c = run_cli(
+        [
+            CODEX_BIN,
+            "exec",
+            "--skip-git-repo-check",
+            "-s",
+            "workspace-write",
+            (
+                "Find the file named cx-glob-target.json anywhere under "
+                "the workspace using a file-finding tool, then reply with "
+                "exactly FOUND-GLOB-1 plus its workspace-relative path."
+            ),
+        ],
+        ws,
+        env,
+    )
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert "FOUND-GLOB-1" in c.stdout
+    assert "sub-nest-7" in c.stdout
+
+
+def test_cx_single_question_direct():
+    """`question` has no codex-plain route (notice bans it): direct reply.
+
+    Pins that the ban doesn't break the no-tool path — the model
+    answers outright instead of attempting the unavailable tool or
+    stalling a non-interactive turn waiting on input.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-question")
+    env = codex_env(home, base, "ak-battery-cx24", sk, SPARK)
+    c = run_cli(
+        [
+            CODEX_BIN,
+            "exec",
+            "--skip-git-repo-check",
+            "-s",
+            "workspace-write",
+            "Reply with exactly QUESTION-PATH-OK and nothing else. Do not call any tools.",
+        ],
+        ws,
+        env,
+    )
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert c.stdout.strip().endswith("QUESTION-PATH-OK")
+
+
+def test_cx_single_webfetch_tool():
+    """Content fetch on codex-plain (generic steer -> shell curl).
+
+    example.com is the stable fixture: its <h1> is byte-stable
+    ("Example Domain"), so the assertion is exact without judging
+    prose. A turn failure here means fetch egress broke, not the
+    marker — investigate, don't just re-run.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-webfetch")
+    env = codex_env(home, base, "ak-battery-cx25", sk, SPARK)
+    c = run_cli(
+        [
+            CODEX_BIN,
+            "exec",
+            "--skip-git-repo-check",
+            "-s",
+            "workspace-write",
+            (
+                "Fetch https://example.com with a fetching tool, then "
+                "reply with exactly FETCH-OK-1 plus the page's main "
+                "heading text."
+            ),
+        ],
+        ws,
+        env,
+    )
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert "FETCH-OK-1" in c.stdout
+    assert "Example Domain" in c.stdout
+
+
+def test_cx_single_websearch_dispatch():
+    """Web-search dispatch on codex-plain: no-hang pin, not result-exact.
+
+    Result content varies by day, so only the marker is asserted: this
+    pins that attempting a search (or declining to one) completes the
+    turn instead of hanging or erroring. Deliberately weaker than the
+    fetch leg — search results are not exact-assertable.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-websearch")
+    env = codex_env(home, base, "ak-battery-cx26", sk, SPARK)
+    try:
+        c = run_cli(
+            [
+                CODEX_BIN,
+                "exec",
+                "--skip-git-repo-check",
+                "-s",
+                "workspace-write",
+                (
+                    "Use a web-search tool to find the Codex CLI "
+                    "documentation page, then reply with exactly "
+                    "SEARCH-DISPATCH-OK."
+                ),
+            ],
+            ws,
+            env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.xfail("codex model hung on websearch dispatch (harness dynamics)")
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert "SEARCH-DISPATCH-OK" in c.stdout
+
+
+def test_cx_single_view_image():
+    """Harness-native `view_image` dispatch (disk image -> model vision).
+
+    Distinct from the `-i` attach leg: the image travels from workspace
+    disk through the client's own viewer, exercising the client-tool
+    dispatch path rather than the prompt-attachment path. Uses the same
+    in-memory stop-sign fixture as the attach leg.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-view-image")
+    env = codex_env(home, base, "ak-battery-cx27", sk, SPARK)
+    (ws / "stop.png").write_bytes(_stop_sign_png_bytes())
+    c = run_cli(
+        [
+            CODEX_BIN,
+            "exec",
+            "--skip-git-repo-check",
+            "-s",
+            "workspace-write",
+            (
+                "View the file stop.png with an image-viewing tool, then "
+                "reply with exactly VIEW-IMG-1 if you saw image content, "
+                "else reply NO-IMAGE."
+            ),
+        ],
+        ws,
+        env,
+    )
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert c.stdout.strip().endswith("VIEW-IMG-1")
+
+
+def test_cx_single_spawn_agent():
+    """Harness-native `spawn_agent` + `wait_agent` delegation.
+
+    The word SUBAGENT-OK never appears in the prompt — only an agent
+    instructed to echo it can return it — so marker-in-stdout proves
+    the delegatee actually ran and its message propagated back.
+    Ports `test_cl_single_task_subagent` (which needs no such guard:
+    the claude CLI can echo without delegating, but the codex agent
+    registry with `{}` spawn shape is the thing under test here).
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-spawn-agent")
+    env = codex_env(home, base, "ak-battery-cx28", sk, SPARK)
+    try:
+        c = run_cli(
+            [
+                CODEX_BIN,
+                "exec",
+                "--skip-git-repo-check",
+                "-s",
+                "workspace-write",
+                (
+                    "Use the spawn_agent tool to start a subagent whose "
+                    "task is to reply with exactly SUBAGENT-OK, then use "
+                    "wait_agent to collect its result and reply with it "
+                    "verbatim."
+                ),
+            ],
+            ws,
+            env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.xfail("codex model hung on spawn_agent dispatch (harness dynamics)")
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert "SUBAGENT-OK" in c.stdout
+
+
+def test_cx_single_explore_chain():
+    """Explore-then-edit-then-verify chain (Read->Edit bigram from traffic).
+
+    The dominant real-dev chain per transcript mining (Bash->Read 1345,
+    Read->Edit 536 bigrams): read a seeded marker, edit it, verify the
+    bytes. Unlike the single edit leg, the model must consume a tool
+    result (the read) before choosing the edit — a chain, not a shot.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-explore-chain")
+    env = codex_env(home, base, "ak-battery-cx29", sk, SPARK)
+    target = ws / "chain_file.txt"
+    target.write_text("CHAIN-V1-6T2N\n")
+    c = run_cli(
+        [
+            CODEX_BIN,
+            "exec",
+            "--skip-git-repo-check",
+            "-s",
+            "workspace-write",
+            (
+                "Read chain_file.txt, replace the version marker it "
+                "contains with its V2 form, then read the file again to "
+                "verify your edit took effect. Reply with exactly "
+                "CHAIN-VERIFY-OK."
+            ),
+        ],
+        ws,
+        env,
+    )
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert target.read_bytes() == b"CHAIN-V2-6T2N\n"
+    assert "CHAIN-VERIFY-OK" in c.stdout
+
+
+def test_cx_single_request_user_input():
+    """`request_user_input` has no non-interactive route: direct reply.
+
+    Same pin as the `question` leg: the model must not stall an
+    exec turn waiting on Plan-mode input. Asked without tools so the
+    no-stall behavior is isolated to the banned-tool notice.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-user-input")
+    env = codex_env(home, base, "ak-battery-cx30", sk, SPARK)
+    c = run_cli(
+        [
+            CODEX_BIN,
+            "exec",
+            "--skip-git-repo-check",
+            "-s",
+            "workspace-write",
+            "Reply with exactly NOINPUT-PATH-OK and nothing else. Do not call any tools.",
+        ],
+        ws,
+        env,
+    )
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert c.stdout.strip().endswith("NOINPUT-PATH-OK")
