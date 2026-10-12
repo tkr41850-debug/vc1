@@ -13,6 +13,12 @@ class Settings:
         default_factory=lambda: os.getenv("ZEN_BASE_URL", "https://opencode.ai/zen/v1")
     )
     zen_api_key: str = field(default_factory=lambda: os.getenv("ZEN_API_KEY", ""))
+    upstream_relay_url: str = field(
+        default_factory=lambda: os.getenv("UPSTREAM_RELAY_URL", "")
+    )
+    upstream_relay_key: str = field(
+        default_factory=lambda: os.getenv("UPSTREAM_RELAY_KEY", "")
+    )
     opencode_version: str = field(
         default_factory=lambda: os.getenv("ZEN_GATEWAY_OPENCODE_VERSION", "2.0.22")
     )

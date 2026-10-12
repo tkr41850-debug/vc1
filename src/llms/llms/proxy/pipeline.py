@@ -25,6 +25,7 @@ from llms.proxy.ir import RequestIR
 from llms.proxy.logging import log_ingress, log_upstream, new_trace_id, setup_logging
 from llms.proxy.providers import RecentRequest
 from llms.proxy.rate_limit import classify
+from llms.proxy.relay import relay_enabled, relay_headers_for, relay_url_for
 from llms.proxy.router import ENDPOINT_PATH, pick, resolve_alias
 from llms.proxy.stream_translate import (
     SseFramer,
@@ -1477,6 +1478,17 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     )
     headers = build_zen_headers(settings, session_id=session_id)
     url = settings.zen_base_url.rstrip("/") + ENDPOINT_PATH[egress]
+    if relay_enabled(settings):
+        # Upstream-relay mode: the anonymous-shaped request goes to the
+        # relay gateway (an llms gateway with its own load balancing)
+        # instead of zen. Opencode identity headers ride along so the
+        # relay passes through without re-shaping; only the
+        # Authorization swaps to the relay key (its middleware
+        # resolves sk- and re-derives the zen shape itself). Raises
+        # on half-configuration (fail closed, never silent direct).
+        headers = relay_headers_for(settings, session_id)
+        url = relay_url_for(settings, egress)
+        logger.info("[%s] upstream relay via %s", trace_id, url)
     log_upstream(trace_id, url, headers, outbound)
     try:
         logger.info(
