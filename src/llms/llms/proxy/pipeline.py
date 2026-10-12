@@ -1327,6 +1327,69 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         if egress == "responses"
         else TO[egress](req)
     )
+    # Already-ran acknowledgment (codex-plain alias-dance loop, live
+    # 2026-10-12): the request's own history ends with an executed
+    # alias translation (shell->exec_command, exit 0) — the model
+    # re-emits the same command because history-echo recorded only
+    # the rewritten name and it cannot bind the success to its own
+    # emission. Upstream already answered; forwarding buys another
+    # identical exit-0 turn. Answer HERE as a completed turn binding
+    # the success to the emitted alias, so the CLI advances instead
+    # of looping to its timeout. Genuine/opencode and keyed-operator
+    # legs keep exact fidelity (no ack — same rule as the notice).
+    # Non-responses legs never carry this history shape.
+    #
+    # History alone cannot disambiguate: a rewritten `exec_command`
+    # (model emitted `shell`) is byte-identical to a native one
+    # (model emitted `exec_command` itself — polling, intentional
+    # re-run). The ack fires ONLY when the request ALSO carries a
+    # fresh user turn after the pair (the harness appended the next
+    # instruction — the loop's shape: executed pair, then more
+    # conversation — rather than a bare re-drive of the same pair).
+    if ingress == "responses" and egress == "responses" and not genuine:
+        from llms.proxy.translate import _already_ran_ack as _ran_ack
+
+        _ack = None
+        _msgs = list(getattr(req, "messages", ()) or ())
+        _last_is_user = bool(_msgs) and getattr(_msgs[-1], "role", "") == "user"
+        if _last_is_user:
+            _ack = _ran_ack(
+                req, _family_for(request, ingress, req, requested)
+            )
+        if _ack is not None:
+            logger.info(
+                "[%s] already-ran ack: binding %s success to emitted %s",
+                trace_id,
+                _ack["declared"],
+                _ack["alias"],
+            )
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "id": f"resp_{trace_id}",
+                    "object": "response",
+                    "status": "completed",
+                    "model": requested,
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": (
+                                        f"Your `{_ack['alias']}` call already "
+                                        "ran successfully (output: "
+                                        f"{_ack['output'][:200]}). Do not "
+                                        "re-run it — answer from that output."
+                                    ),
+                                    "annotations": [],
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
     affinity = getattr(request.state, "affinity", None)
     secret_key = getattr(request.state, "secret_key", None)
     # Upstream session: per-conversation simulation on the responses leg

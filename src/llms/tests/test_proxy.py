@@ -1827,6 +1827,221 @@ def test_genuine_shell_translates_onto_client_exec_command(tmp_path):
     assert returned[0]["arguments"] == '{"cmd": "echo hi"}'
 
 
+def test_executed_call_acknowledges_completion_without_reemit(tmp_path):
+    """Executed-then-acknowledged calls must not re-emit (codex-plain
+    redirect loop, live 2026-10-12): the model emits `shell`
+    (translated to client `exec_command`, exit 0), then re-emits the
+    same command every turn with "retrying through the proper shell
+    tool" narration to the CLI timeout (~40 identical exit-0 turns).
+    The gateway already executed the command and the history carries
+    its exit-0 output — the followup turn must acknowledge completion
+    instead of re-emitting the call. Fails today: the second turn
+    replays the translated call verbatim (1 upstream call per turn,
+    no terminal)."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, _ = _steer_app_client(
+        tmp_path,
+        _tool_call_sse(
+            "call_redir1", "shell", '{"command": "printf REDIRECT-OK > redir.txt"}'
+        ),
+        _tool_call_sse(
+            "call_redir2", "shell", '{"command": "printf REDIRECT-OK > redir.txt"}'
+        ),
+    )
+    tools = [
+        {
+            "type": "function",
+            "name": "exec_command",
+            "description": "run",
+            "parameters": {
+                "type": "object",
+                "properties": {"cmd": {"type": "string"}},
+                "required": ["cmd"],
+            },
+        },
+    ]
+    with tc_ctx as tc:
+        first = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": "Run shell command printf REDIRECT-OK > redir.txt via the shell tool",
+                "tools": tools,
+            },
+            headers=TEST_HEADERS,
+        )
+    assert first.status_code == 200
+    returned = [
+        i for i in first.json().get("output", []) if i.get("type") == "function_call"
+    ]
+    assert len(returned) == 1
+    assert returned[0]["name"] == "exec_command"
+    # Second turn: the harness executed the first call (exit 0) and the
+    # history carries its output — the gateway must NOT re-emit the
+    # same command as a fresh call.
+    with tc_ctx as tc:
+        second = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_redir1",
+                        "name": "exec_command",
+                        "arguments": '{"cmd": "printf REDIRECT-OK > redir.txt"}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_redir1",
+                        "output": "Process exited with code 0",
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "then reply DONE-REDIR-1"}
+                        ],
+                    },
+                ],
+                "tools": tools,
+            },
+            headers=TEST_HEADERS,
+        )
+    assert second.status_code == 200
+    reemitted = [
+        i
+        for i in second.json().get("output", [])
+        if i.get("type") == "function_call"
+        and "REDIRECT-OK" in (i.get("arguments") or "")
+    ]
+    assert reemitted == []
+
+
+def test_nonconsecutive_identical_repeat_still_replays(tmp_path):
+    """Boundary: an identical command re-run after INTERVENING tool
+    activity is a legitimate retry (edit, then re-cat), not the loop —
+    it must replay untouched. Only the history's most recent pair
+    counts for the already-ran terminal."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_new1", "shell", '{"command": "printf A > a.txt"}'),
+        _text_sse("unreached"),
+    )
+    tools = [
+        {
+            "type": "function",
+            "name": "exec_command",
+            "description": "run",
+            "parameters": {
+                "type": "object",
+                "properties": {"cmd": {"type": "string"}},
+                "required": ["cmd"],
+            },
+        },
+    ]
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_oldA",
+                        "name": "exec_command",
+                        "arguments": '{"cmd": "printf A > a.txt"}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_oldA",
+                        "output": "Process exited with code 0",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_oldB",
+                        "name": "exec_command",
+                        "arguments": '{"cmd": "printf B > b.txt"}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_oldB",
+                        "output": "Process exited with code 0",
+                    },
+                ],
+                "tools": tools,
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    returned = [
+        i for i in r.json().get("output", []) if i.get("type") == "function_call"
+    ]
+    assert len(returned) == 1
+    assert returned[0]["name"] == "exec_command"
+    assert returned[0]["arguments"] == '{"cmd": "printf A > a.txt"}'
+
+
+def test_direct_repeat_without_alias_marker_still_replays(tmp_path):
+    """Boundary: a consecutive identical re-emit under the client's OWN
+    name (no genuine-alias translation marker) is deliberate model
+    behavior (polling, intentional re-run) — the already-ran terminal
+    only answers alias-dance repeats, never these."""
+    from tests.conftest import TEST_HEADERS
+
+    tc_ctx, calls = _steer_app_client(
+        tmp_path,
+        _tool_call_sse("call_dir2", "exec_command", '{"cmd": "printf A > a.txt"}'),
+        _text_sse("unreached"),
+    )
+    tools = [
+        {
+            "type": "function",
+            "name": "exec_command",
+            "description": "run",
+            "parameters": {
+                "type": "object",
+                "properties": {"cmd": {"type": "string"}},
+                "required": ["cmd"],
+            },
+        },
+    ]
+    with tc_ctx as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={
+                "model": "muse-spark-1.3-contributor-free",
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_dir1",
+                        "name": "exec_command",
+                        "arguments": '{"cmd": "printf A > a.txt"}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_dir1",
+                        "output": "Process exited with code 0",
+                    },
+                ],
+                "tools": tools,
+            },
+            headers=TEST_HEADERS,
+        )
+    assert r.status_code == 200
+    assert len(calls) == 1
+    returned = [
+        i for i in r.json().get("output", []) if i.get("type") == "function_call"
+    ]
+    assert len(returned) == 1
+    assert returned[0]["name"] == "exec_command"
+    assert returned[0]["arguments"] == '{"cmd": "printf A > a.txt"}'
+
+
 def test_streaming_nested_exec_command_replays_as_exec_custom_call(tmp_path):
     """Streaming mirror: the same nested-call replay applies frame by
     frame — the added item frame re-types to custom_tool_call named
@@ -2257,13 +2472,13 @@ def test_streaming_corrupt_delta_recovers_via_done(tmp_path):
         '"name":"exec_command","call_id":"call_dup1","arguments":""}}\n\n'
         'data: {"type":"response.function_call_arguments.delta",'
         '"output_index":2,"item_id":"fc_dup1",'
-        '"delta":' + _json.dumps(args[:half]) + '}\n\n'
+        '"delta":' + _json.dumps(args[:half]) + "}\n\n"
         'data: {"type":"response.function_call_arguments.delta",'
         '"output_index":2,"item_id":"fc_dup1",'
-        '"delta":' + _json.dumps(args[:half]) + '}\n\n'
+        '"delta":' + _json.dumps(args[:half]) + "}\n\n"
         'data: {"type":"response.function_call_arguments.delta",'
         '"output_index":2,"item_id":"fc_dup1",'
-        '"delta":' + _json.dumps(args[half:]) + '}\n\n'
+        '"delta":' + _json.dumps(args[half:]) + "}\n\n"
         'data: {"type":"response.function_call_arguments.done",'
         '"output_index":2,"item_id":"fc_dup1",'
         '"arguments":' + _json.dumps(args) + ',"name":"exec_command"}\n\n'

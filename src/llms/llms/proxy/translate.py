@@ -718,6 +718,239 @@ def _responses_tool_from_ir(t: ToolDef) -> dict:
     return tool
 
 
+def _already_ran_ack(req, family: str = "unknown") -> dict | None:
+    """Executed-command acknowledgment, or None when history shows none.
+
+    The codex-plain alias dance (live 2026-10-12): turn N emits genuine
+    `shell`, the classifier translates it onto the client's runner, the
+    harness executes it (exit 0) — but history-echo records only the
+    REWRITTEN name, so turn N+1 shows the model a success under a name
+    the notice says never to call. The model cannot bind that success
+    to its own `shell` action, concludes it used the wrong runner, and
+    re-emits the same command "through the proper shell tool" every
+    turn to the CLI timeout (~40 identical exit-0 executions).
+
+    Detect it from the request's OWN history (no upstream turn spent):
+    the most recent history pair is a call whose echoed name differs
+    from the model's emitted name ONLY by genuine-alias translation
+    (shell->exec_command, same payload) immediately followed by its
+    success output. When found, the re-request is pointless — upstream
+    already answered — so answer it HERE as a completed turn instead of
+    forwarding. Narrow by construction, not by name list:
+
+    - the pair must be the history's MOST RECENT (trailing call/output
+      in the last assistant message; anything after it — user text,
+      reasoning, a newer pair — means the conversation moved on);
+    - the echoed name must differ from an alias-dance translation of
+      the model's own emitted name (a direct repeat under the client's
+      own name — polling, intentional re-run — is deliberate model
+      behavior and always forwards);
+    - the output must read as success (exit 0 / ok), never an error.
+
+    Pure helper (no I/O): callers emit the completed body.
+    """
+    from llms.proxy.client_tools import _ALIASES
+    from llms.proxy.client_tools import (
+        client_tool_defs as _client_defs,
+    )
+    from llms.proxy.client_tools import (
+        owned_tool_names as _owned_names,
+    )
+    from llms.proxy.client_tools import (
+        translate_genuine_call as _translate,
+    )
+    from llms.proxy.ir import ROLE_ASSISTANT, ROLE_TOOL, ToolCallBlock, ToolResultBlock
+
+    msgs = list(getattr(req, "messages", ()) or ())
+    # History shape (from_responses): the call rides an ASSISTANT
+    # message, its output the FOLLOWING TOOL message — never one
+    # message. Scan trailing messages for that adjacent pair,
+    # ignoring a trailing user message (the harness appends the next
+    # instruction after the output). Anything else after the pair —
+    # reasoning, a newer pair, assistant text — means the
+    # conversation moved on and there is nothing to ack.
+    tail = list(msgs)
+    if tail and getattr(tail[-1], "role", "") == "user":
+        tail = tail[:-1]
+    if len(tail) < 2:
+        return None
+    call_msg, out_msg = tail[-2], tail[-1]
+    if getattr(call_msg, "role", "") != ROLE_ASSISTANT:
+        return None
+    if getattr(out_msg, "role", "") != ROLE_TOOL:
+        return None
+    call_blocks = [b for b in (getattr(call_msg, "blocks", ()) or ())]
+    out_blocks = [b for b in (getattr(out_msg, "blocks", ()) or ())]
+    if len(call_blocks) != 1 or len(out_blocks) < 1:
+        return None
+    call_b = call_blocks[0]
+    out_b = out_blocks[0]
+    if not isinstance(call_b, ToolCallBlock) or not isinstance(out_b, ToolResultBlock):
+        return None
+    if call_b.call_id != out_b.call_id:
+        return None
+    if not _looks_successful(str(out_b.output or "")):
+        return None
+    owned = _owned_names(req.tools)
+    defs = _client_defs(req.tools)
+    # The history records the REWRITTEN name (translate.py echoes the
+    # classifier's translation, never the model's emission) — but the
+    # detector cannot tell a rewritten `exec_command` (model emitted
+    # `shell`, alias dance) from a native one (model emitted
+    # `exec_command` itself: polling, intentional re-run). Both shapes
+    # are byte-identical in history. The disambiguator is the model's
+    # CURRENT turn: only when the fresh model output re-emits the SAME
+    # command through the alias does the dance exist. That check lives
+    # in the caller (pipeline), which sees the fresh turn; this helper
+    # only reports "history ends with an executed alias translation"
+    # as a candidate. Callers must confirm the fresh turn repeats it
+    # before acknowledging — otherwise deliberate repeats ack wrongly.
+    echoed = str(call_b.name or "")
+    try:
+        import json as _json
+
+        payload = _json.loads(call_b.arguments) if call_b.arguments else None
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    alias_names = {alias.lower() for _, alias, _ in _ALIASES}
+    for client_lower, alias, alias_key in _ALIASES:
+        # The echoed history carries the TRANSLATED payload (cmd), but
+        # the alias translation reads the GENUINE payload (command):
+        # reverse-translate the echoed arguments back to the genuine
+        # shape before asking what the model emitted. Without this the
+        # comparison below asks the translator to read client-shaped
+        # args as genuine ones and it returns None (no match, no ack).
+        genuine_args = _reverse_alias_args(
+            req, echoed, call_b.arguments, alias, alias_key
+        )
+        if genuine_args is None:
+            continue
+        translated = _translate(alias, genuine_args, owned, defs, family, req.tools)
+        if translated is None:
+            continue
+        declared, new_args = translated
+        if declared.lower() != echoed.lower():
+            continue
+        try:
+            new_payload = _json.loads(new_args)
+        except Exception:  # noqa: S112 — non-JSON translation: no match, next row
+            continue
+        if not isinstance(new_payload, dict) or new_payload != payload:
+            continue
+        # The echoed call IS an alias translation of the model's own
+        # emitted alias with an identical payload — the harness
+        # executed exactly this action. Acknowledge it as complete so
+        # the model binds the success to its emission instead of
+        # retrying through the "proper" runner.
+        return {
+            "alias": alias,
+            "declared": declared,
+            "arguments": call_b.arguments,
+            "output": str(out_b.output or ""),
+        }
+    # Also match when the history records the EMITTED alias name
+    # itself (pre-translation echoes): same payload, same success.
+    if echoed.lower() in alias_names:
+        return {
+            "alias": echoed,
+            "declared": echoed,
+            "arguments": call_b.arguments,
+            "output": str(out_b.output or ""),
+        }
+    return None
+
+
+def _reverse_alias_args(
+    req, echoed: str, arguments: str, alias: str, alias_key: str
+) -> str | None:
+    """Client-shaped args back to the genuine alias shape, or None.
+
+    History-echo records the classifier's TRANSLATED payload
+    (`exec_command {"cmd": ...}`), but the alias translation
+    (`translate_genuine_call`) reads the GENUINE payload (`shell
+    {"command": ...}`). Reverse-map one key to the other so the
+    already-ran detector can ask "what did the model emit?" of
+    translated history. Returns None when the payload is not a
+    single-key dict the alias row explains (never guess).
+    """
+    try:
+        import json as _json
+
+        payload = _json.loads(arguments) if arguments else None
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    # The client runner's key for this alias row: the row's third
+    # element names the GENUINE alias key (command); the client's own
+    # key comes from its declared schema (cmd). The echoed payload
+    # must be exactly {client_key: str} — never guess across shapes.
+    from llms.proxy.client_tools import client_tool_defs as _defs_for
+
+    defs = _defs_for(getattr(req, "tools", ()) or ())
+    tool = defs.get(echoed.lower())
+    required = (tool.parameters or {}).get("required") or [] if tool is not None else []
+    if len(required) != 1 or set(payload) != {required[0]}:
+        return None
+    value = payload[required[0]]
+    if not isinstance(value, str):
+        return None
+    try:
+        import json as _json2
+
+        return _json2.dumps({alias_key: value})
+    except Exception:
+        return None
+
+
+def _looks_successful(output: str) -> bool:
+    """True when a tool-result output reads as success, never an error."""
+    lowered = output.lower()
+    if not lowered.strip():
+        return False
+    for marker in (
+        "exit code 1",
+        "exit code 2",
+        "exit code 3",
+        "exit code 4",
+        "exit code 5",
+        "exit code 6",
+        "exit code 7",
+        "exit code 8",
+        "exit code 9",
+        "exit code 127",
+        "traceback",
+        "error:",
+        "error ",
+        "failed",
+        "failure",
+        "exception",
+        "denied",
+        "refused",
+        "timeout",
+        "timed out",
+        "not found",
+        "no such",
+        "unsupported",
+        "invalid",
+    ):
+        if marker in lowered:
+            return False
+    for marker in (
+        "exit code 0",
+        "exited with code 0",
+        "exit status 0",
+        "exit 0",
+        "success",
+        "ok",
+    ):
+        if marker in lowered:
+            return True
+    return False
+
+
 def to_zen_responses(
     req: RequestIR, *, tool_notice: str = "", family: str = "unknown"
 ) -> dict:
