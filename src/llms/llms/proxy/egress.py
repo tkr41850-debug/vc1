@@ -264,12 +264,11 @@ class ProviderEgress:
                 if rt.retry_in() <= 0:
                     return True
                 try:
-                    if not rt.limited_exits():
+                    limited = rt.limited_exits()
+                    if not limited:
                         return False
                     ready = [w for w in rt.health.exits if w.ready]
-                    return any(
-                        int(w.idx) not in rt.limited_exits() for w in ready
-                    )
+                    return any(int(w.idx) not in limited for w in ready)
                 except Exception:
                     return False
 
