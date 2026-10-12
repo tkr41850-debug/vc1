@@ -183,6 +183,16 @@ def test_cx_single_image_attach():
 
 
 def test_cx_single_review_diff():
+    """apply_patch grammar + bare-patch rewrap (modelfile-pinned).
+
+    The workdir IS the repo (run_cli cwd=ws): bare `patch_target.txt`
+    resolves with no guessing. `apply_patch` is named as the shell's
+    own syntax (it is not a function tool on this leg — the harness
+    intercepts the marker grammar from shell input), and the printf
+    fallback is explicitly deprioritized: without it the model
+    wanders the filesystem auditing the harness instead of writing
+    (live 2026-10-12: 33 exec_command recon turns, timeout 600s).
+    """
     base, sk = require_live()
     home, ws = battery_dirs("cx-patch")
     env = codex_env(home, base, "ak-battery-cx05", sk, SPARK)
@@ -197,10 +207,13 @@ def test_cx_single_review_diff():
             "-s",
             "workspace-write",
             (
-                "Create patch_target.txt with one line BASE-LINE via "
-                "apply_patch using this exact grammar:\n"
+                "Your workdir is a fresh repo directory. Run this "
+                "apply_patch block as shell input (the shell "
+                "intercepts it — apply_patch is not a function tool "
+                "here, do not search for one):\n"
                 "*** Begin Patch\n*** Add File: patch_target.txt\n"
                 "+BASE-LINE\n*** End Patch\n"
+                "Prefer apply_patch over printf fallbacks. "
                 "Then reply with exactly DONE-PATCH-1."
             ),
         ],

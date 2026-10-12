@@ -1382,7 +1382,8 @@ async def translate_streaming(
     + partial genuine args with no way to retract them. So a
     genuine-named call's chunks BUFFER until the turn's done frame:
     then the rename applies once with the FULL accumulated payload
-    (translate_genuine_call: shell->Bash, write->Write, ...) and a
+    (translate_genuine_call: shell/read/write/edit/grep onto the
+    client's runners, ...) and a
     single renamed ToolArgsDelta feeds the emitter — one `Write`
     block carrying the translated args. Live claude 2026-10-08:
     upstream `shell` replayed verbatim downstream 15x while the
