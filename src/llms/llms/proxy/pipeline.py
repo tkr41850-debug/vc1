@@ -431,6 +431,10 @@ def _classify_calls(
                 # never fills targets itself). Fill from the spawn
                 # output and pass through — the model cannot act on
                 # a correction naming an id it has not seen.
+                # Sibling registry calls intentionally steer:
+                # send_input needs message content history cannot
+                # supply, and close_agent is destructive — never
+                # auto-fill either.
                 import json as _json
 
                 from llms.proxy.compat import (
