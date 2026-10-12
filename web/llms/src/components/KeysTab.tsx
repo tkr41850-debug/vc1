@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api, type ApiKeyEntry } from "../api";
 import { useCrudTab } from "../useCrudTab";
+import EditableLabel from "./EditableLabel";
 
 function fmt(n: number): string {
   return n.toLocaleString("en-US");
@@ -133,7 +134,15 @@ export default function KeysTab({
               <td className="py-2 pr-4 font-mono">
                 <SecretCell value={k.key} />
               </td>
-              <td className="py-2 pr-4">{k.label || "—"}</td>
+              <td className="py-2 pr-4">
+                <EditableLabel
+                  value={k.label}
+                  placeholder="—"
+                  title={k.label ? "Click to edit label" : "Click to add a label"}
+                  onSave={(label) => api.updateKey(k.key, { label }).then(() => reload())}
+                  onAuthError={onAuthError}
+                />
+              </td>
               <td className="py-2 pr-4">
                 <button
                   className={`rounded px-2 py-0.5 text-xs ${

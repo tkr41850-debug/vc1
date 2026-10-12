@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api, type ModelEntry } from "../api";
 import { useCrudTab } from "../useCrudTab";
+import EditableLabel from "./EditableLabel";
 
 export default function ModelsTab({
   models,
@@ -75,7 +76,15 @@ export default function ModelsTab({
           {models.map((m) => (
             <tr key={m.id} className="border-b hover:bg-gray-50">
               <td className="py-2 pr-4 font-mono">{m.id}</td>
-              <td className="py-2 pr-4">{m.label || "—"}</td>
+              <td className="py-2 pr-4">
+                <EditableLabel
+                  value={m.label}
+                  placeholder="—"
+                  title={m.label ? "Click to edit label" : "Click to add a label"}
+                  onSave={(label) => api.updateModel(m.id, { label }).then(() => reload())}
+                  onAuthError={onAuthError}
+                />
+              </td>
               <td className="py-2 pr-4">
                 <button
                   className={`rounded px-2 py-0.5 text-xs ${

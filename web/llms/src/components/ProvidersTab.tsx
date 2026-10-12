@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   api,
@@ -7,6 +7,7 @@ import {
   type RecentEntry,
 } from "../api";
 import { useCrudTab } from "../useCrudTab";
+import EditableLabel from "./EditableLabel";
 
 function fmtRetry(sec: number): string {
   if (sec <= 0) return "—";
@@ -430,6 +431,7 @@ export default function ProvidersTab({
   const [form, setForm] = useState({ id: "", label: "", models: "", exits: "1" });
   const [debugId, setDebugId] = useState<string | null>(null);
   const [pending, setPending] = useState<Record<string, boolean>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const { error, setError, run } = useCrudTab(onAuthError);
 
   const applyOne = (snap: ProviderEntry) =>
@@ -484,6 +486,16 @@ export default function ProvidersTab({
 
   const transitioning = (p: ProviderEntry) =>
     p.lifecycle === "preparing" || pending[p.id] === true;
+
+  const toggleExpanded = (id: string) =>
+    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+
+  const saveLabel = (p: ProviderEntry, label: string) =>
+    api
+      .updateProvider(p.id, { label })
+      .then((snap) => {
+        applyOne(snap as unknown as ProviderEntry);
+      });
 
   const toggle = (p: ProviderEntry) => {
     markPending(p.id, true);
@@ -591,14 +603,37 @@ export default function ProvidersTab({
           </tr>
         </thead>
         <tbody>
-          {providers.map((p) => (
-            <tr key={p.id} className="border-b hover:bg-gray-50">
+          {providers.map((p) => {
+            const multiExit = p.kind === "warp" && p.exits > 1;
+            const isOpen = expanded[p.id] === true;
+            return (
+            <Fragment key={p.id}>
+            <tr className="border-b hover:bg-gray-50">
               <td className="py-2 pr-2">
-                <HealthDot p={p} />
+                <span className="inline-flex items-center gap-1">
+                  {multiExit ? (
+                    <button
+                      className="rounded px-1 text-xs text-gray-500 hover:bg-gray-100"
+                      onClick={() => toggleExpanded(p.id)}
+                      title={isOpen ? "Collapse exits" : "Expand exits"}
+                    >
+                      {isOpen ? "▾" : "▸"}
+                    </button>
+                  ) : null}
+                  <HealthDot p={p} />
+                </span>
               </td>
               <td className="py-2 pr-4">
                 <span className="font-mono">{p.id}</span>
-                {p.label && <span className="ml-2 text-gray-500">{p.label}</span>}
+                <span className="ml-2 text-gray-500">
+                  <EditableLabel
+                    value={p.label}
+                    placeholder="—"
+                    title={p.label ? "Click to edit label" : "Click to add a label"}
+                    onSave={(label) => saveLabel(p, label)}
+                    onAuthError={onAuthError}
+                  />
+                </span>
               </td>
               <td className="py-2 pr-4">
                 <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-xs">
@@ -655,7 +690,28 @@ export default function ProvidersTab({
                 )}
               </td>
             </tr>
-          ))}
+            {multiExit && isOpen && p.health.exits.map((w) => (
+              <tr key={`${p.id}-exit-${w.idx}`} className="border-b bg-gray-50 font-mono text-xs text-gray-600">
+                <td className="py-1 pr-2"></td>
+                <td className="py-1 pr-4" colSpan={2}>
+                  ↳ exit {w.idx} {w.ready ? "ready" : "not ready"}
+                </td>
+                <td className="py-1 pr-4">{w.status || "—"}</td>
+                <td className="py-1 pr-4">socks {w.socks || "—"} · reg {w.registered ? "yes" : "no"}</td>
+                <td className="py-1 pr-4" colSpan={4}>{w.error || w.reason || "—"}</td>
+              </tr>
+            ))}
+            {multiExit && isOpen && p.health.exits.length === 0 && (
+              <tr className="border-b bg-gray-50 text-xs text-gray-500">
+                <td className="py-1 pr-2"></td>
+                <td className="py-1 pr-4" colSpan={8}>
+                  No health data yet.
+                </td>
+              </tr>
+            )}
+            </Fragment>
+            );
+          })}
         </tbody>
       </table>
       {debugProvider && (
