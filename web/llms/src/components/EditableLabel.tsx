@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ApiError } from "../api";
 
 /** Click-to-edit label shared by the Keys/Models/Providers tabs.
@@ -29,6 +29,11 @@ export default function EditableLabel({
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  // Ref guard closes the double-submit window: two synchronous submits
+  // (double-Enter, double-click ✓) both see stale `saving === false`
+  // before React re-renders. The write is idempotent (same draft), so the
+  // state flag alone would be harmless — this just avoids a duplicate PUT.
+  const savingRef = useRef(false);
 
   const start = () => {
     setDraft(value);
@@ -44,7 +49,8 @@ export default function EditableLabel({
   };
 
   const confirm = async () => {
-    if (saving) return;
+    if (savingRef.current) return;
+    savingRef.current = true;
     setSaving(true);
     setError("");
     try {
@@ -58,6 +64,7 @@ export default function EditableLabel({
       }
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
