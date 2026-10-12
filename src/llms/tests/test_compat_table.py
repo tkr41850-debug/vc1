@@ -1371,6 +1371,7 @@ def test_read_grep_edit_execute_byte_exact(tmp_path):
 
     from llms.proxy.compat import (
         _edit_to_shell_py,
+        _glob_to_shell_find,
         _grep_to_shell_rg,
         _read_to_shell_cat,
     )
@@ -1415,8 +1416,29 @@ def test_read_grep_edit_execute_byte_exact(tmp_path):
     )
     assert (ws / "seed.txt").read_text() == "EDIT-AFTER-8Q2M\n"
 
+    nested = ws / "sub-nest-7" / "deep"
+    nested.mkdir(parents=True)
+    (nested / "cx-glob-target.json").write_text('{"ok": "glob-ok"}\n')
+    tra = _glob_to_shell_find(
+        {"pattern": "**/cx-glob-target.json", "path": str(ws)}, ["cmd"]
+    )
+    assert tra is not None
+    out = subprocess.run(
+        ["/bin/bash", "-lc", __import__("json").loads(tra)["cmd"]],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0
+    assert out.stdout.strip().endswith("sub-nest-7/deep/cx-glob-target.json")
+    # Degenerate patterns: no guess (generic steer applies).
+    assert _glob_to_shell_find({"pattern": "**", "path": str(ws)}, ["cmd"]) is None
+    assert _glob_to_shell_find({"pattern": "", "path": str(ws)}, ["cmd"]) is None
+    assert _glob_to_shell_find({"path": str(ws)}, ["cmd"]) is None
+    assert (
+        _glob_to_shell_find({"pattern": "**/x", "path": str(ws)}, []) is None
+    )
 
-def test_dispatch_read_grep_edit_rows_codex_plain_only():
+
+def test_dispatch_read_grep_edit_glob_rows_codex_plain_only():
     # Table rows are family-gated (codex-plain only): luna keeps the
     # apply_patch channel rows, unknown fails open.
     from tests.test_client_tools import _luna_namespace, _spark_runner
@@ -1460,6 +1482,14 @@ def test_dispatch_read_grep_edit_rows_codex_plain_only():
     _blob = __import__("json").loads(args)["cmd"].split("b64decode('", 1)[1]
     _script = _b64d.b64decode(_blob.rstrip("')")).decode()
     assert "A" in _script
+    name, args = translate_to_client(
+        "glob", '{"pattern": "**/cx-glob-target.json", "path": "ws"}',
+        "codex-plain", owned, defs, runner,
+    )
+    assert name == "exec_command"
+    assert __import__("json").loads(args) == {
+        "cmd": "find ws -name 'cx-glob-target.json'"
+    }
 
     ns = (_luna_namespace(),)
     l_owned = owned_tool_names(ns)
@@ -1479,8 +1509,7 @@ def test_dispatch_read_grep_edit_rows_codex_plain_only():
     )
 
 
-def test_translate_genuine_call_reaches_all_table_names():
-    # Live-path guard: translate_genuine_call allowlists the genuine
+def test_translate_genuine_call_reaches_all_table_names():    # Live-path guard: translate_genuine_call allowlists the genuine
     # names it forwards to the compat table. Every row-0 name in
     # TO_CLIENT must pass the gate, or the row is dead code live
     # (caught 2026-10-12: the grep row tested green via
@@ -1493,6 +1522,7 @@ def test_translate_genuine_call_reaches_all_table_names():
     names = {str(row[0]).lower() for row in TO_CLIENT}
     assert names <= {
         "read", "shell", "write", "edit", "execute", "grep", "webfetch",
+        "glob",
     }, names
     runner = (_spark_runner(),)
     owned = owned_tool_names(runner)
@@ -1518,6 +1548,8 @@ def test_translate_genuine_call_reaches_all_table_names():
                     {"code": "await tools.apply_patch('x')"}),
         "grep": (owned, defs, runner, {"pattern": "N", "path": "ws"}),
         "webfetch": (owned, defs, runner, {"url": "https://example.com"}),
+        "glob": (owned, defs, runner,
+                 {"pattern": "**/cx-glob-target.json", "path": "ws"}),
     }
     families = {"execute": "luna"}
     for name in sorted(names):

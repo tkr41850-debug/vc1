@@ -77,6 +77,41 @@ def _shell_to_cmd(payload: dict, required: list) -> str | None:
     return None
 
 
+def _glob_to_shell_find(payload: dict, required: list) -> str | None:
+    """genuine `glob {pattern, path}` onto `find -name`, or None.
+
+    Family-gated (codex-plain only): emits
+    `{"cmd": "find <path> -name '<basename>'"}`. The genuine
+    `pattern` is a `**/`-style glob; `find -name` matches the
+    basename against the trailing segment (the battery leg's
+    `**/cx-glob-target.json` becomes `-name 'cx-glob-target.json'`
+    — exact for leaf lookups). `hidden`/`limit` drop (presentation
+    concerns; the bytes are what the leg asserts). A pattern with
+    no usable basename, or non-string fields: None (no guess — the
+    generic steer applies). Live 2026-10-12: no codex-plain row,
+    so the glob leg steered generic and degenerated to bare
+    `shell {}` until the turn died (0 tokens).
+    """
+    pattern = payload.get("pattern")
+    if not isinstance(pattern, str) or not pattern.strip():
+        return None
+    path = payload.get("path")
+    if path is None:
+        path = "."
+    if not isinstance(path, str) or not path.strip():
+        return None
+    if "cmd" not in set(required or []):
+        return None
+    import json as _json
+
+    base = pattern.strip().split("/")[-1]
+    if not base or base in ("*", "**", ".", ".."):
+        return None
+    if not isinstance(base, str):
+        return None
+    return _json.dumps({"cmd": f"find {path.strip()} -name '{base}'"})
+
+
 def _execute_to_exec_channel(payload: dict, required: list) -> str | None:
     """execute {"code"} onto the nested exec channel, or None.
 
@@ -518,6 +553,7 @@ TO_CLIENT: tuple = (
     ("grep", CODEX_PLAIN, "exec_command", _grep_to_shell_rg),
     ("edit", CODEX_PLAIN, "exec_command", _edit_to_shell_py),
     ("webfetch", CODEX_PLAIN, "exec_command", _webfetch_to_shell_curl),
+    ("glob", CODEX_PLAIN, "exec_command", _glob_to_shell_find),
     ("shell", CLAUDE, "bash", _shell_to_claude_bash),
     ("read", CLAUDE, "read", _read_to_claude_read),
     ("write", CLAUDE, "write", _write_to_claude_write),

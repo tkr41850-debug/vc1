@@ -686,9 +686,12 @@ def test_notice_ban_exempts_table_rows():
     for name in ("read", "shell", "write", "edit"):
         assert name not in banned, name
     # `grep` joined the translated set via the codex-plain shell row
-    # (live 2026-10-12) — exempt alongside the four.
+    # (live 2026-10-12) — exempt alongside the four. `glob` joins it
+    # the same way (live 2026-10-12 glob leg: steered generic,
+    # degenerated to bare `shell {}`).
     assert "grep" not in banned
-    for name in ("glob", "skill", "subagent", "webfetch", "websearch"):
+    assert "glob" not in banned
+    for name in ("skill", "subagent", "webfetch", "websearch"):
         assert name in banned, name
 
 
@@ -726,10 +729,12 @@ def test_notice_shell_directive_off_by_default_and_gated():
     # exemption — the ban text consults the table, not the client.
     # `grep` joined the translated set (codex-plain row, live
     # 2026-10-12: generic steer degenerated to bare `shell {}`).
+    # `glob` joins it the same way (live glob leg, same degeneration).
     # Only the untranslated names are asserted here.
-    for name in ("glob", "skill", "subagent"):
+    for name in ("skill", "subagent"):
         assert name in banned, name
     assert "grep" not in banned
+    assert "glob" not in banned
 
 
 def test_redirect_shell_runner_points_at_alias():
