@@ -1996,9 +1996,10 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                     reason = ""
             if provider_id:
                 try:
-                    exit_idx = None
-                    if isinstance(via_warp, dict):
-                        exit_idx = via_warp.get("warp_idx")
+                    via = via_warp if isinstance(via_warp, dict) else {}
+                    exit_idx = _exit_idx_for_port(
+                        registry.runtime(provider_id), via.get("socks_port")
+                    )
                 except Exception:
                     exit_idx = None
                 registry.runtime(provider_id).note_exit_ratelimited(
@@ -2075,6 +2076,31 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             )
         )
     return response
+
+
+def _exit_idx_for_port(rt, port: int | None) -> int | None:
+    """Pool exit idx serving a SOCKS port, or None when unresolvable.
+
+    The per-exit 429 record must key on the pool idx (what the spread
+    filter compares against WarpExit.idx), NOT the spread position
+    (warp_idx): with a non-contiguous ready set the two differ, and
+    recording the position would steer around the wrong exit. Falls
+    back to None (aggregate-only record) when the port is unknown —
+    never raises.
+    """
+    try:
+        if port is None:
+            return None
+        exits = list(getattr(getattr(rt, "health", None), "exits", None) or [])
+        for w in exits:
+            try:
+                if int(getattr(w, "socks", 0) or 0) == int(port):
+                    return int(getattr(w, "idx"))
+            except Exception:
+                continue
+        return None
+    except Exception:
+        return None
 
 
 def _left_ready(before: str | None, after: str | None) -> bool:
