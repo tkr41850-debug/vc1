@@ -1995,7 +1995,15 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
                 except Exception:
                     reason = ""
             if provider_id:
-                registry.runtime(provider_id).note_ratelimited(retry_after, reason)
+                try:
+                    exit_idx = None
+                    if isinstance(via_warp, dict):
+                        exit_idx = via_warp.get("warp_idx")
+                except Exception:
+                    exit_idx = None
+                registry.runtime(provider_id).note_exit_ratelimited(
+                    exit_idx, retry_after, reason
+                )
                 _maybe_auto_cycle(request, provider_id, via_warp, trace_id)
                 # Entering ratelimited is a self-heal trigger: when half
                 # the running model pool is limited, restart the limited
@@ -2383,8 +2391,7 @@ def _maybe_auto_cycle(
                 # landed mid-bounce bumped the epoch and must survive.
                 # A still-bad exit keeps its backoff and the cooldown
                 # gates the next bounce.
-                rt.retry_until = 0.0
-                rt.retry_reason = ""
+                rt.clear_backoff()
                 # Bounce-ok is a becoming-ready path: arm probation so
                 # the next request probes at concurrency 1 (promotion
                 # happens on first success).

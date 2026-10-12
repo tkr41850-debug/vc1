@@ -71,6 +71,13 @@ def test_one_exit_429_does_not_yield_ring_share_to_sibling(tmp_path):
 
     # One exit's 429, recorded against the exit that served it. The
     # provider still has 2 healthy exits: ring share must be unchanged.
-    reg.runtime("m").note_ratelimited(120.0, "exit 1: Too many requests today")
+    reg.runtime("m").note_exit_ratelimited(1, 120.0, "exit 1: Too many requests")
+    # The aggregate still records the limit (self-heal/shed/hint readers),
+    # but the provider keeps its ring share via healthy-exit steering.
+    assert reg.runtime("m").retry_in() > 0
+    assert reg.runtime("m").limited_exits() == {1}
     after = {egress.resolve("gpt-5", bucket=b)[0] for b in range(60)}
     assert after == before, f"ring share ceded after one exit 429: {after}"
+    # ... while the limited exit itself is steered around.
+    _, _, w = egress.resolve("gpt-5", bucket=0)
+    assert sorted(w.ready_ports()) == [40001, 40003], w.ready_ports()

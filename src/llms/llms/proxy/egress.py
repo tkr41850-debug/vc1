@@ -251,7 +251,29 @@ class ProviderEgress:
                 continue
             ring.append(p)
         if ring:
-            fresh = [p for p in ring if registry.runtime(p.id).retry_in() <= 0]
+            # Fresh ring prefers providers with NO active backoff — except a
+            # provider with a KNOWN-limited exit still serving healthy
+            # siblings stays fresh: a lone bad exit must not cede ring
+            # share to a sibling (1xN behaves as N x singles). A backoff
+            # with no per-exit record (legacy note_ratelimited callers,
+            # unknown exit, or every servable exit limited) still yields,
+            # preserving the single-exit failover contract. Only a
+            # provider with zero servable exits yields its share.
+            def _fresh(p) -> bool:
+                rt = registry.runtime(p.id)
+                if rt.retry_in() <= 0:
+                    return True
+                try:
+                    if not rt.limited_exits():
+                        return False
+                    ready = [w for w in rt.health.exits if w.ready]
+                    return any(
+                        int(w.idx) not in rt.limited_exits() for w in ready
+                    )
+                except Exception:
+                    return False
+
+            fresh = [p for p in ring if _fresh(p)]
             pool = fresh or sorted(
                 ring, key=lambda p: registry.runtime(p.id).retry_in()
             )
@@ -266,6 +288,13 @@ class ProviderEgress:
             registry._egresses = self._warp
             rt = registry.runtime(p.id)
             ready = [w for w in rt.health.exits if w.ready]
+            # Per-exit 429 isolation: exemptions steer around limited exits
+            # instead of cordoning the whole provider (1xN as N x singles).
+            try:
+                limited = rt.limited_exits()
+            except Exception:
+                limited = set()
+            spread = [w for w in ready if int(w.idx) not in limited] or ready
             if (
                 rt.health.fetched_at > 0
                 and not ready
@@ -273,9 +302,9 @@ class ProviderEgress:
             ):
                 pass
             else:
-                if ready:
-                    egress.set_num_slots(len(ready))
-                    egress.set_socks_ports(sorted(w.socks for w in ready))
+                if spread:
+                    egress.set_num_slots(len(spread))
+                    egress.set_socks_ports(sorted(w.socks for w in spread))
                 elif rt.health.fetched_at <= 0:
                     saved = registry.ready_exits(p.id)
                     if saved is not None:
