@@ -84,8 +84,16 @@ def claude_env(base: str, affinity: str, sk: str) -> dict:
 
 
 def is_retryable_429(result: subprocess.CompletedProcess) -> bool:
-    """True when the run died on a gateway-side 429 storm, not a real failure."""
+    """True when the run died on a gateway-side 429 storm, not a real failure.
+
+    The anonymous-shape error ("free tier can only be used from within
+    OpenCode") is NOT retryable: it is a deterministic request-shape
+    rejection, not a rate limit — retrying it burns 5 attempts for the
+    same verdict.
+    """
     blob = (result.stdout or "") + (result.stderr or "")
+    if "can only be used from within OpenCode" in blob:
+        return False
     return "429" in blob and "Too Many Requests" in blob
 
 
