@@ -297,22 +297,32 @@ def test_cl_single_allowed_tools():
     _, ws = battery_dirs("cl-gate")
     env = claude_env(base, "ak-battery-cl08", sk)
     prompt = "Use the Bash tool to run echo CLAUDE-GATE-OK and reply with the output."
-    allow = run_cli(
-        [
-            CLAUDE_BIN,
-            "-p",
-            "--model",
-            "haiku",
-            "--allowedTools=Bash",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            prompt,
-        ],
-        ws,
-        env,
-    )
-    assert allow.returncode == 0, allow.stderr[-1000:]
+    # Live 2026-10-13: haiku occasionally answers from text without
+    # calling any tool (hook_started + result, no tool_use) — a model
+    # turn flake, not a proxy steer (the proxy only steers declared
+    # native tools when required keys are missing). One retry rides
+    # the same assertion; a second skip still fails loudly.
+    allow = None
+    for _ in range(2):
+        allow = run_cli(
+            [
+                CLAUDE_BIN,
+                "-p",
+                "--model",
+                "haiku",
+                "--allowedTools=Bash",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                prompt,
+            ],
+            ws,
+            env,
+        )
+        assert allow.returncode == 0, allow.stderr[-1000:]
+        if '"name":"Bash"' in allow.stdout.replace(" ", ""):
+            break
+    assert allow is not None
     assert '"name":"Bash"' in allow.stdout.replace(" ", "")
     assert "CLAUDE-GATE-OK" in allow.stdout
     deny = run_cli(
