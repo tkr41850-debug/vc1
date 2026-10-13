@@ -1,22 +1,53 @@
 from __future__ import annotations
 
+import datetime as _datetime
 import hashlib
+import time as _time
 
 from llms.proxy.config import Settings
 
 _BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 
-def stable_session_id(api_key: str) -> str:
-    # Genuine opencode mints ses_ + 12 lowercase-hex time part + 14 base62
-    # chars (see packages/schema/src/identifier.ts: descending() IDs, one
-    # per session). Ours stays stable per proxy key (usage attribution
-    # groups by key anyway) but matches the wire shape exactly.
+def descending_session_id(now_ms: int | None = None, rand: bytes | None = None) -> str:
+    """Genuine-shape ses_ id with a real timestamp head.
+
+    Faithful port of identifier.ts ``create(true)``: the 12-hex head is
+    ``~((timestamp_ms * 0x1000) + 1)`` (descending IDs sort newest
+    first), followed by 14 random base62 chars. The head MUST decode
+    to a plausible timestamp — Zen's gate rejects ids whose time part
+    is garbage (probed Oct 2026: random-head ids 403 even with a
+    perfect wire shape; 30-day-old time-ordered ids 200). Freshness
+    beyond plausibility is not enforced, so stability buckets (day)
+    are safe; randomness never is.
+    """
+    import os as _os
+
+    ts = int(now_ms if now_ms is not None else _time.time() * 1000)
+    value = (~(ts * 0x1000 + 1)) & ((1 << 48) - 1)
+    head = "".join(f"{(value >> (40 - 8 * i)) & 0xFF:02x}" for i in range(6))
+    raw = rand if rand is not None and len(rand) >= 14 else _os.urandom(14)
+    return "ses_" + head + "".join(_BASE62[b % 62] for b in raw[:14])
+
+
+def stable_session_id(api_key: str, now_s: float | None = None) -> str:
+    # Stable per proxy key per UTC day (usage attribution groups by key
+    # anyway): the random tail is key-derived, but the head is a real
+    # descending timestamp for the day so the gate's plausibility check
+    # passes. A fully-stable id would carry a hash-garbage head and
+    # 403 (see descending_session_id); a fully-fresh id would cold the
+    # upstream cache on every untracked request.
+    now = now_s if now_s is not None else _time.time()
+    day = _datetime.datetime.fromtimestamp(now, tz=_datetime.UTC).date()
+    day_start_ms = int(
+        _datetime.datetime(
+            day.year, day.month, day.day, tzinfo=_datetime.UTC
+        ).timestamp()
+        * 1000
+    )
     seed = api_key if api_key else "anonymous-free-tier"
-    digest = hashlib.sha256(seed.encode()).digest()
-    time_part = digest[:6].hex()
-    rand_part = "".join(_BASE62[b % 62] for b in digest[6:20])
-    return f"ses_{time_part}{rand_part}"
+    digest = hashlib.sha256(f"{seed}\x00{day.isoformat()}".encode()).digest()
+    return descending_session_id(now_ms=day_start_ms, rand=digest[6:20])
 
 
 def build_zen_headers(
@@ -41,10 +72,9 @@ def build_zen_headers(
         "x-opencode-session-id": session_id,
         "x-session-affinity": session_id,
         "x-session-id": session_id,
-        # NOTE: no x-opencode-request — genuine now sends it (the user
-        # id), but the gate accepts omission (probed Oct 2026: old shape
-        # 200s, presence with a ses_ value 200s too). Omitted rather
-        # than fabricate a user id whose shape Zen might one day check.
+        # NOTE: no x-opencode-request — upstream dropped it
+        # (model-request.ts no longer sends it) and its presence 403s
+        # per the original bisect, so the gateway leaves it out.
         "Content-Type": "application/json",
     }
     headers["Authorization"] = f"Bearer {api_key}" if api_key else "Bearer public"

@@ -1,23 +1,25 @@
 """Checked-in Zen fingerprint + GitHub-source refresh.
 
 Genuine opencode wire identity (captured + source-traced, Oct 2026 —
-request.ts reshaped the opencode header block: ``x-opencode-request``
-is now sent as the user id, ``x-opencode-session-id`` always mirrors
-the session, and subagent turns add ``x-opencode-parent-session-id`` /
-``x-parent-session-id``):
+post-restructure: ``packages/opencode/`` is gone, the header block
+lives in ``packages/core/src/session/model-request.ts`` and the title
+prompt in ``packages/core/src/plugin/agent.ts``):
 
 - ``Authorization: Bearer public`` (anonymous) — omitting it 403s.
 - ``User-Agent: opencode/<channel>/<version>/<client>`` — only released
   versions pass; stale (1.18.4) and unreleased (9.9.99) 403.
 - ``x-opencode-session`` / ``x-opencode-session-id`` /
   ``x-session-affinity`` / ``x-session-id`` all carry a ``ses_`` +
-  12-hex + 14-base62 id (identifier.ts descending IDs).
+  12-hex + 14-base62 id (identifier.ts descending IDs) whose time part
+  must decode to a plausible timestamp — random-head ids 403 even
+  with a perfect wire shape (live-bisected Oct 2026). Genuine mints
+  them fresh per session; the gateway mirrors that (time-ordered
+  mint per conversation, day-bucketed stable fallback).
 - responses body ``prompt_cache_key`` must equal the session id.
-- ``x-opencode-request`` (user id) is accepted but not required:
-  omission still passes the gate (probed Oct 2026), so the gateway
-  leaves it out rather than fabricate a user id. Parent-session ids
-  only exist on subagent turns; single-session traffic omits them,
-  matching genuine.
+- ``x-opencode-request`` is gone upstream (the model-request.ts block
+  no longer sends it), so its presence is forbidden again and the
+  gateway leaves it out. Parent-session ids only exist on subagent
+  turns; single-session traffic omits them, matching genuine.
 
 ``EXPECTED`` is the checked-in snapshot. ``scripts/refresh_zen_fingerprint.py``
 re-fetches the upstream sources below and updates the snapshot (and the
@@ -56,26 +58,25 @@ EXPECTED = {
         # union stays drift-free, not because the gateway sends them.
         "x-opencode-parent-session-id",
         "x-opencode-project",
-        # Accepted but not gate-required (probed Oct 2026): the gateway
-        # omits it rather than fabricate a user id.
-        "x-opencode-request",
         "x-opencode-session",
         "x-opencode-session-id",
         "x-parent-session-id",
         "x-session-affinity",
         "x-session-id",
     ),
-    "forbidden_headers": (),
+    # Gone upstream (model-request.ts no longer sends it): presence
+    # 403s per the original bisect, so the gateway leaves it out.
+    "forbidden_headers": ("x-opencode-request",),
     "session_pattern": r"ses_[0-9a-f]{12}[0-9A-Za-z]{14}",
     "prompt_cache_key": "mirror-session",
     "title_prefix": TITLE_PREFIX,
 }
 
 SOURCES = {
-    "request": "https://raw.githubusercontent.com/sst/opencode/dev/packages/opencode/src/session/llm/request.ts",
+    "request": "https://raw.githubusercontent.com/sst/opencode/dev/packages/core/src/session/model-request.ts",
     "session_id": "https://raw.githubusercontent.com/sst/opencode/dev/packages/schema/src/session-id.ts",
     "identifier": "https://raw.githubusercontent.com/sst/opencode/dev/packages/schema/src/identifier.ts",
-    "title_prompt": "https://raw.githubusercontent.com/sst/opencode/dev/packages/opencode/src/agent/prompt/title.txt",
+    "title_prompt": "https://raw.githubusercontent.com/sst/opencode/dev/packages/core/src/plugin/agent.ts",
     "tags": "https://api.github.com/repos/sst/opencode/tags?per_page=100",
 }
 
@@ -104,6 +105,23 @@ def _parse_identifier_params(text: str) -> tuple[int, str]:
     return length, alphabet
 
 
+def _parse_title_prompt(text: str) -> str:
+    """PROMPT_TITLE body from agent.ts (moved from title.txt).
+
+    The const template carries no backticks or ${} interpolation
+    (verified against upstream), so the first closing backtick ends
+    it. Raises when the shape changes — a silent empty would
+    disable version probing downstream.
+    """
+    m = re.search(r"const PROMPT_TITLE\s*=\s*`", text)
+    if m is None:
+        raise ValueError("agent.ts PROMPT_TITLE not found")
+    end = text.find("`", m.end())
+    if end < 0:
+        raise ValueError("agent.ts PROMPT_TITLE unterminated")
+    return text[m.end() : end]
+
+
 def parse_expected(sources: dict[str, str]) -> dict:
     """Derive the expected fingerprint from upstream source text."""
     length, alphabet = _parse_identifier_params(sources["identifier"])
@@ -111,25 +129,27 @@ def parse_expected(sources: dict[str, str]) -> dict:
         raise ValueError("session-id.ts no longer mints ses_ ids")
     if "descending()" not in sources["session_id"]:
         raise ValueError("session-id.ts no longer uses descending IDs")
-    # Header block for the opencode provider branch in request.ts.
-    # Authorization comes from provider auth (always Bearer), User-Agent and
-    # the x- headers are literals in the branch — normalize and union.
-    branch = sources["request"]
-    marker = 'startsWith("opencode")'
-    at = branch.find(marker)
+    # Header block in model-request.ts: the http.headers literal for the
+    # model request. Authorization comes from provider auth (always
+    # Bearer); User-Agent and the x- headers are literals in the block —
+    # normalize and union. Anchored on x-opencode-session-id (unique in
+    # the file); the window covers the whole literal either side.
+    body = sources["request"]
+    anchor = '"x-opencode-session-id"'
+    at = body.find(anchor)
     if at < 0:
-        raise ValueError("request.ts opencode branch not found")
-    window = branch[at : at + 1500]
-    # Case-insensitive: upstream spells the else-branch header
-    # "X-Session-Id" (same wire header as x-session-id — HTTP names
-    # are case-insensitive, and our gateway sends it lowercase).
+        raise ValueError("model-request.ts header block not found")
+    window = body[max(0, at - 500) : at + 1500]
+    # Case-insensitive: upstream spells one header "X-Session-Id"
+    # (same wire header as x-session-id — HTTP names are
+    # case-insensitive, and our gateway sends it lowercase).
     headers = {
         h.lower()
         for h in re.findall(r'"(x-[a-z0-9-]+|User-Agent)"', window, re.IGNORECASE)
     }
     headers.add("authorization")
     if "x-opencode-session" not in headers:
-        raise ValueError("request.ts opencode branch lost x-opencode-session")
+        raise ValueError("model-request.ts header block lost x-opencode-session")
     try:
         tags = json.loads(sources["tags"])
     except ValueError as exc:
@@ -159,11 +179,11 @@ def parse_expected(sources: dict[str, str]) -> dict:
         "ua_channel": EXPECTED["ua_channel"],
         "required_headers": tuple(sorted(headers)),
         "forbidden_headers": (
-            ("x-opencode-request",) if '"x-opencode-request"' not in window else ()
+            () if '"x-opencode-request"' in window else ("x-opencode-request",)
         ),
         "session_pattern": rf"ses_[0-9a-f]{{12}}[{alpha_class}]{{{rand_len}}}",
         "prompt_cache_key": "mirror-session",
-        "title_prefix": sources["title_prompt"][:1500],
+        "title_prefix": _parse_title_prompt(sources["title_prompt"])[:1500],
     }
 
 
@@ -212,12 +232,10 @@ def list_v2_versions(tags_text: str) -> list[str]:
 
 
 def mint_probe_session() -> str:
-    """Well-formed ses_ id for acceptance probes (shape only, random)."""
-    import os as _os
+    """Well-formed ses_ id for acceptance probes (time-ordered, random)."""
+    from llms.proxy.zen_headers import descending_session_id
 
-    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-    raw = _os.urandom(20)
-    return "ses_" + raw[:6].hex() + "".join(alphabet[b % 62] for b in raw[6:])
+    return descending_session_id()
 
 
 def probe_version_accepted(
@@ -328,7 +346,11 @@ def run_refresh(
     if not candidates:
         report["note"] = f"pinned ua {pinned} is newest known"
         return report
-    title_prompt = sources.get("title_prompt", "")
+    title_source = sources.get("title_prompt", "")
+    try:
+        title_prompt = _parse_title_prompt(title_source)
+    except ValueError:
+        title_prompt = ""
     if not title_prompt.strip():
         report["note"] = "title prompt source empty; cannot probe versions"
         return report

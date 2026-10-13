@@ -1,8 +1,20 @@
 from __future__ import annotations
 
 from llms.proxy.config import Settings
-from llms.proxy.zen_headers import build_zen_headers, stable_session_id
+from llms.proxy.zen_headers import (
+    build_zen_headers,
+    descending_session_id,
+    stable_session_id,
+)
 from tests.conftest import make_settings
+
+
+def _head_time_mod(session_id: str) -> int:
+    # Inverse of descending_session_id (counter=1): the 6 head bytes
+    # carry the timestamp mod 2**36 ms (~2.2y window) — the full stamp
+    # does not fit 48 bits with the 0x1000 multiplier.
+    value = int(session_id.removeprefix("ses_")[:12], 16)
+    return (((~value) & ((1 << 48) - 1)) - 1) // 0x1000
 
 
 def test_stable_session_id_anonymous():
@@ -12,6 +24,30 @@ def test_stable_session_id_anonymous():
 
 def test_stable_session_id_differs_per_key():
     assert stable_session_id("key-a") != stable_session_id("key-b")
+
+
+def test_descending_session_id_head_is_current_time():
+    import time
+
+    assert descending_session_id(now_ms=1791877187547, rand=bytes(range(14))) == (
+        "ses_ecbcbf824ffe0123456789ABCD"
+    )
+    before = int(time.time() * 1000)
+    sid = descending_session_id()
+    after = int(time.time() * 1000)
+    mod = 2**36
+    for stamp in (before, after):
+        delta = (_head_time_mod(sid) - stamp) % mod
+        assert min(delta, mod - delta) <= 5000
+
+
+def test_stable_session_id_rotates_daily_but_same_shape():
+    import re
+
+    a = stable_session_id("key-a", now_s=1760390400.0)
+    assert a == stable_session_id("key-a", now_s=1760390400.0 + 3600.0)
+    assert a != stable_session_id("key-a", now_s=1760390400.0 + 86400.0)
+    assert re.fullmatch(r"ses_[0-9a-f]{12}[0-9A-Za-z]{14}", a)
 
 
 def test_free_tier_sends_public_bearer_but_identity_headers():

@@ -20,29 +20,19 @@ SESSION_ID_FIXTURE = """export const SessionID = Schema.String.check(Schema.isSt
 )
 """
 
-REQUEST_FIXTURE = """    const opencodeProjectID = input.model.providerID.startsWith("opencode")
-      ? (yield* InstanceState.context).project.id
-      : undefined
-    return {
-      headers: {
-        "x-opencode-session-id": input.sessionID,
-        ...(input.parentSessionID ? { "x-opencode-parent-session-id": input.parentSessionID } : {}),
-        ...(input.model.providerID.startsWith("opencode")
-          ? {
-              "x-opencode-project": opencodeProjectID,
-              "x-opencode-session": input.sessionID,
-              "x-opencode-request": input.user.id,
-              "x-opencode-client": input.flags.client,
-              "User-Agent": USER_AGENT,
-            }
-          : {
-              "x-session-affinity": input.sessionID,
-              "X-Session-Id": input.sessionID,
-              "User-Agent": USER_AGENT,
-            }),
-        ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
-      },
-    }
+REQUEST_FIXTURE = """        http: {
+          headers: {
+            "x-opencode-session-id": session.id,
+            ...(session.parentID ? { "x-opencode-parent-session-id": session.parentID } : {}),
+            "x-session-affinity": affinity,
+            "X-Session-Id": affinity,
+            ...(session.parentID ? { "x-parent-session-id": session.parentID } : {}),
+            "User-Agent": App.useragent(app),
+            "x-opencode-project": session.projectID,
+            "x-opencode-session": affinity,
+            "x-opencode-client": app.name,
+          },
+        }
 """
 
 TAGS_FIXTURE = (
@@ -56,7 +46,9 @@ def _sources(**overrides):
         "request": REQUEST_FIXTURE,
         "session_id": SESSION_ID_FIXTURE,
         "identifier": IDENTIFIER_FIXTURE,
-        "title_prompt": TITLE_PREFIX + "\n<rest of the upstream prompt>",
+        "title_prompt": "const PROMPT_TITLE = `"
+        + TITLE_PREFIX
+        + "\n<rest of the upstream prompt>`",
         "tags": TAGS_FIXTURE,
     }
     base.update(overrides)
@@ -75,6 +67,11 @@ def test_parse_expected_session_pattern_shape():
 
 
 def test_parse_expected_detects_request_header():
+    # Upstream dropped x-opencode-request: absence forbids it again.
+    parsed = fp.parse_expected(_sources())
+    assert parsed["forbidden_headers"] == ("x-opencode-request",)
+    assert "x-opencode-request" not in parsed["required_headers"]
+    # ...while presence (hypothetical return) lifts the ban.
     parsed = fp.parse_expected(
         _sources(request=REQUEST_FIXTURE + '\n"x-opencode-request": input.user.id,')
     )

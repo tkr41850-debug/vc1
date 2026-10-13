@@ -38,10 +38,10 @@ WARM_MAX_TOKENS = int(os.getenv("ZEN_SESSION_WARM_TOKENS", "32"))
 
 
 def mint_session_id() -> str:
-    """Fresh genuine-shape ses_ id (12 hex + 14 base62, random)."""
-    raw = os.urandom(20)
-    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-    return "ses_" + raw[:6].hex() + "".join(alphabet[b % 62] for b in raw[6:])
+    """Fresh time-ordered ses_ id (identifier.ts descending())."""
+    from llms.proxy.zen_headers import descending_session_id
+
+    return descending_session_id()
 
 
 def conversation_ref(ingress: str, body: dict, headers) -> str | None:

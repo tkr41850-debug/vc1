@@ -15,6 +15,22 @@ def test_mint_matches_genuine_shape():
     assert mint_session_id() != mint_session_id()
 
 
+def test_mint_head_is_current_time():
+    import time as _time
+
+    def _head_mod(sid: str) -> int:
+        value = int(sid.removeprefix("ses_")[:12], 16)
+        return (((~value) & ((1 << 48) - 1)) - 1) // 0x1000
+
+    before = int(_time.time() * 1000)
+    sid = mint_session_id()
+    after = int(_time.time() * 1000)
+    mod = 2**36
+    for stamp in (before, after):
+        delta = (_head_mod(sid) - stamp) % mod
+        assert min(delta, mod - delta) <= 5000
+
+
 def test_conversation_ref_previous_response_id():
     assert (
         conversation_ref("responses", {"previous_response_id": "resp_1"}, {})

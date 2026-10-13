@@ -147,9 +147,7 @@ fuzzy-matches tools, and bare/renamed sets 403. Instructions pass
 through untouched. Non-client tool calls are steered back with a
 redirect error and re-requested (bounded).
 `x-opencode-session-id` mirrors the session (genuine sends it always).
-No `x-opencode-request`: genuine sends the user id there, but Zen accepts
-omission (probed Oct 2026) so the gateway leaves it out rather than
-fabricate one.
+No `x-opencode-request`: upstream dropped it and Zen 403s when present.
 `host`, `content-length`, `accept-*`, and harness identity headers are dropped;
 httpx regenerates transport headers. Free-tier Zen access depends on the
 opencode identity set; omitting it yields `MissingSessionID`.
