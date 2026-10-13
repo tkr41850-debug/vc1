@@ -56,12 +56,17 @@ def test_claude_capture_drives_notice_and_family():
     # Notice renders them as model-facing text (systemprompt path).
     notice = build_tool_notice(tools, GENUINE_TOOL_NAMES)
     assert "Write" in notice and "Read" in notice
-    # Claude rows ship (Task 4/5): shell/read/write/edit translate
-    # onto Bash/Read/Write/Edit (row contract pinned in
-    # test_compat_table; here the capture proves end-to-end wiring).
+    # Claude rows ship (Task 4/5 + 2026-10-13 native rows):
+    # shell/read/write/edit onto Bash/Read/Write/Edit plus
+    # webfetch/skill/subagent onto WebFetch/Skill/Agent (row contract
+    # pinned in test_compat_table; here the capture proves end-to-end
+    # wiring).
     assert {row[0] for row in TO_CLIENT if row[1] == CLAUDE} == {
         "shell",
         "read",
         "write",
         "edit",
+        "webfetch",
+        "skill",
+        "subagent",
     }

@@ -1580,6 +1580,8 @@ def test_translate_genuine_call_reaches_all_table_names():  # Live-path guard: t
         "grep",
         "webfetch",
         "glob",
+        "skill",
+        "subagent",
     }, names
     runner = (_spark_runner(),)
     owned = owned_tool_names(runner)
@@ -1588,8 +1590,11 @@ def test_translate_genuine_call_reaches_all_table_names():  # Live-path guard: t
 
     # The execute row is channel-gated (needs the luna namespace's
     # documented exec orchestrator — plain function legs steer
-    # generic), so it is exempt from the spark-runner assertion;
-    # every other row-0 name must translate on this leg.
+    # generic), so it is exempt from the spark-runner assertion.
+    # The claude-native rows (webfetch/skill/subagent) need the
+    # 23-tool capture — covered by
+    # test_claude_native_rows_webfetch_skill_subagent below, not the
+    # single-runner loop.
     from tests.test_client_tools import _luna_namespace
 
     ns = (_luna_namespace(),)
@@ -1617,6 +1622,8 @@ def test_translate_genuine_call_reaches_all_table_names():  # Live-path guard: t
     }
     families = {"execute": "luna"}
     for name in sorted(names):
+        if name in ("skill", "subagent"):
+            continue
         o, d, tools, payload = payloads[name]
         got = translate_genuine_call(
             name,
@@ -1706,3 +1713,102 @@ def test_lossy_shell_rows_embed_genuine_marker():
     assert translate_to_client(
         "shell", '{"command": "cat f"}', "codex-plain", owned, defs, runner
     ) == ("exec_command", '{"cmd": "cat f"}')
+
+
+def test_claude_native_rows_webfetch_skill_subagent():
+    # Mid-turn ask 2026-10-13 ("just send them through the IR"):
+    # skill/subagent/webfetch adapt onto the claude leg's NATIVE
+    # tools (declared in the 23-tool capture) — no shell synthesis,
+    # no guessing. webfetch {url} -> WebFetch {url, prompt=url}
+    # (prompt defaults to the url — the fetched page IS the subject);
+    # skill {id} -> Skill {skill}; subagent {description, prompt} ->
+    # Agent {description, prompt}. All fail open (None) on missing
+    # keys or a client shape without the target. Fails today: no
+    # rows exist (all three steer generic).
+    import json as _json
+    from pathlib import Path as _Path
+
+    from llms.proxy.client_tools import (
+        nested_tool_defs,
+        owned_tool_names,
+        translate_genuine_call,
+    )
+    from llms.proxy.compat import translate_to_client
+    from llms.proxy.ir import ToolDef as _ToolDef
+
+    fixture = _Path(__file__).parent / "fixtures" / "claude-schema.jsonl"
+    with open(fixture) as f:
+        body = _json.loads(f.readline())["body"]
+    claude = tuple(
+        _ToolDef(t["name"], t.get("description", ""), t.get("input_schema", {}))
+        for t in body["tools"]
+    )
+    owned = owned_tool_names(claude)
+    defs = {t.name.lower(): t for t in claude if t.name}
+    defs.update(nested_tool_defs(claude))
+    # webfetch: url verbatim, prompt defaults to the url.
+    name, args = translate_to_client(
+        "webfetch",
+        '{"url": "https://example.com"}',
+        "claude",
+        owned,
+        defs,
+        claude,
+    )
+    assert name == "WebFetch", (name, args)
+    assert _json.loads(args) == {
+        "url": "https://example.com",
+        "prompt": "https://example.com",
+    }
+    # skill: id -> skill.
+    name, args = translate_to_client(
+        "skill", '{"id": "marker-skill"}', "claude", owned, defs, claude
+    )
+    assert name == "Skill", (name, args)
+    assert _json.loads(args) == {"skill": "marker-skill"}
+    # subagent: description+prompt verbatim onto Agent.
+    name, args = translate_to_client(
+        "subagent",
+        '{"description": "d", "prompt": "p", "agent": "x", "background": true}',
+        "claude",
+        owned,
+        defs,
+        claude,
+    )
+    assert name == "Agent", (name, args)
+    assert _json.loads(args) == {"description": "d", "prompt": "p"}
+    # Fail open: missing keys, and wrong family (codex-plain has no
+    # WebFetch/Skill/Agent runner — nothing synthesized).
+    assert (
+        translate_to_client(
+            "webfetch", "{}", "claude", owned, defs, claude
+        )
+        is None
+    )
+    assert (
+        translate_to_client(
+            "skill", '{"id": "x"}', "codex-plain", owned, defs, claude
+        )
+        is None
+    )
+    assert (
+        translate_to_client(
+            "subagent",
+            '{"description": "d", "prompt": "p"}',
+            "codex-plain",
+            owned,
+            defs,
+            claude,
+        )
+        is None
+    )
+    # Reachable through the classifier gate (not just the table).
+    for gname, payload in (
+        ("webfetch", {"url": "https://example.com"}),
+        ("skill", {"id": "x"}),
+        ("subagent", {"description": "d", "prompt": "p"}),
+    ):
+        got = translate_genuine_call(
+            gname, _json.dumps(payload), owned, defs, "claude", claude
+        )
+        assert got is not None, gname

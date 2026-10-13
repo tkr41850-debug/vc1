@@ -421,6 +421,69 @@ def _edit_to_claude_edit(payload: dict, required: list) -> str | None:
     return _json.dumps({"file_path": path, "old_string": old, "new_string": new})
 
 
+def _webfetch_to_claude_webfetch(payload: dict, required: list) -> str | None:
+    """genuine `webfetch {url, format, timeout}` onto claude `WebFetch`.
+
+    Family-gated (claude only): `url` verbatim; `prompt` defaults to
+    the url itself (the Q&A question the client schema requires but
+    the genuine payload never carries — the fetched page IS the
+    subject, so echoing the url asks for its content, never a guess
+    at the model's question). `format`/`timeout` drop (same
+    presentation-concern discipline as the curl row). Non-string/
+    blank url, or a client shape without both keys: None.
+    Pure helper.
+    """
+    import json as _json
+
+    url = payload.get("url")
+    if not isinstance(url, str) or not url.strip():
+        return None
+    if not {"url", "prompt"} <= set(required or []):
+        return None
+    return _json.dumps({"url": url.strip(), "prompt": url.strip()})
+
+
+def _skill_to_claude_skill(payload: dict, required: list) -> str | None:
+    """genuine `skill {id}` onto claude-native `Skill {skill}`, or None.
+
+    Family-gated (claude only): key rename `id` -> `skill`.
+    `args` never synthesized (genuine carries none). Non-string id:
+    None (no guess — the generic steer applies). Pure helper.
+    """
+    import json as _json
+
+    skill_id = payload.get("id")
+    if not isinstance(skill_id, str) or not skill_id.strip():
+        return None
+    if "skill" not in set(required or []):
+        return None
+    return _json.dumps({"skill": skill_id})
+
+
+def _subagent_to_claude_task(payload: dict, required: list) -> str | None:
+    """genuine `subagent {description, prompt, ...}` onto claude `Agent`.
+
+    Family-gated (claude only — the capture names it `Agent` with
+    required [description, prompt]; the battery's Task leg dispatches
+    the same capability under its CLI name): `description`+`prompt`
+    verbatim. `agent`/`model`/`sessionID`/`background` drop — the
+    client schema is the contract (no undeclared key is ever
+    synthesized; the CLI fills its own defaults). Non-string
+    description/prompt: None (no guess). Pure helper.
+    """
+    import json as _json
+
+    description = payload.get("description")
+    prompt = payload.get("prompt")
+    if not isinstance(description, str) or not description.strip():
+        return None
+    if not isinstance(prompt, str) or not prompt.strip():
+        return None
+    if not {"description", "prompt"} <= set(required or []):
+        return None
+    return _json.dumps({"description": description, "prompt": prompt})
+
+
 def _write_to_shell_redirect(payload: dict, required: list) -> str | None:
     """genuine `write {path, content}` onto a cmd-runner shell redirect.
 
@@ -525,7 +588,9 @@ def _webfetch_to_shell_curl(payload: dict, required: list) -> str | None:
     Non-string/blank url: None (no guess — the generic steer
     applies). Live 2026-10-12: no codex-plain row, so the
     webfetch leg steered generic and the model emitted bare
-    `shell {}` until the turn died with no fetch.
+    `shell {}` until the turn died with no fetch. The claude leg
+    keeps its NATIVE WebFetch row below (its capture declares
+    WebFetch {url, prompt} — same-shape ownership, no synthesis).
     """
     url = payload.get("url")
     if not isinstance(url, str) or not url.strip():
@@ -608,6 +673,13 @@ TO_CLIENT: tuple = (
     ("read", CLAUDE, "read", _read_to_claude_read),
     ("write", CLAUDE, "write", _write_to_claude_write),
     ("edit", CLAUDE, "edit", _edit_to_claude_edit),
+    ("webfetch", CLAUDE, "webfetch", _webfetch_to_claude_webfetch),
+    ("skill", CLAUDE, "skill", _skill_to_claude_skill),
+    # Genuine `subagent` onto the claude leg's `Agent` tool (the
+    # capture's name; the Task CLI flag dispatches the same
+    # capability — the row keys on the declared client name, not the
+    # CLI spelling).
+    ("subagent", CLAUDE, "agent", _subagent_to_claude_task),
 )
 
 

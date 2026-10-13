@@ -923,3 +923,81 @@ def test_cx_single_request_user_input():
     )
     assert c.returncode == 0, c.stderr[-1000:]
     assert c.stdout.strip().endswith("NOINPUT-PATH-OK")
+
+
+def test_cx_single_subagent_close():
+    """Subagent full lifecycle: spawn + wait + close_agent.
+
+    The spawn leg proves dispatch; this leg proves the CLOSE half —
+    the model collects the delegatee result via wait_agent, then
+    closes the agent with close_agent, and replies with exactly
+    SUBAGENT-CLOSED-OK. The close marker never appears in the prompt,
+    so marker-in-stdout proves close_agent dispatched without the
+    harness failing it (`unsupported call`) and the turn completed
+    after the close (not stalled on a dead agent reference).
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-subagent-close")
+    env = codex_env(home, base, "ak-battery-cx31", sk, SPARK)
+    try:
+        c = run_cli(
+            [
+                CODEX_BIN,
+                "exec",
+                "--skip-git-repo-check",
+                "-s",
+                "workspace-write",
+                (
+                    "Use the spawn_agent tool to start a subagent whose "
+                    "task is to reply with exactly SUBAGENT-OK, then use "
+                    "wait_agent to collect its result, then use "
+                    "close_agent to close that agent, then reply with "
+                    "exactly SUBAGENT-CLOSED-OK and nothing else."
+                ),
+            ],
+            ws,
+            env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.xfail("codex model hung on subagent close lifecycle (harness dynamics)")
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert c.stdout.strip().endswith("SUBAGENT-CLOSED-OK")
+
+
+def test_cx_single_subagent_send_input():
+    """Subagent follow-up: spawn + send_input + wait + close.
+
+    Exercises the registry's message path (not just lifecycle): the
+    model spawns a subagent, sends it a follow-up message with
+    send_input asking it to reply with exactly SENDINPUT-OK, collects
+    the result via wait_agent, closes the agent, and replies with the
+    marker verbatim. Neither marker appears in the prompt — both in
+    stdout proves the message reached the delegatee and its reply
+    propagated back through the registry.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-subagent-send-input")
+    env = codex_env(home, base, "ak-battery-cx32", sk, SPARK)
+    try:
+        c = run_cli(
+            [
+                CODEX_BIN,
+                "exec",
+                "--skip-git-repo-check",
+                "-s",
+                "workspace-write",
+                (
+                    "Use the spawn_agent tool to start a subagent, then "
+                    "use send_input to ask it to reply with exactly "
+                    "SENDINPUT-OK, then use wait_agent to collect its "
+                    "result, then use close_agent to close that agent, "
+                    "then reply with its result verbatim."
+                ),
+            ],
+            ws,
+            env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.xfail("codex model hung on send_input lifecycle (harness dynamics)")
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert "SENDINPUT-OK" in c.stdout

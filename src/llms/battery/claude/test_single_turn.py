@@ -98,11 +98,10 @@ def test_cl_single_bash():
     # (server-side gating, not client-side filtering — live 2026-10-12:
     # --allowedTools=Bash still offered all 23). Pin the enforcement
     # that matters: a Bash tool_use actually ran with the exact input.
-    events = [
-        json.loads(line) for line in sj.stdout.splitlines() if line.strip()
-    ]
+    events = [json.loads(line) for line in sj.stdout.splitlines() if line.strip()]
     uses = [
-        e for e in events
+        e
+        for e in events
         if e.get("type") == "assistant"
         and any(
             (b.get("type") == "tool_use" and b.get("name") == "Bash")
@@ -774,3 +773,37 @@ def test_cl_single_plugin_skill():
     )
     assert c.returncode == 0, c.stderr[-1000:]
     assert c.stdout.strip() == "PLUGIN-MARKER-OK"
+
+
+def test_cl_single_task_close():
+    """Task subagent full lifecycle: delegate + TaskStop teardown.
+
+    Ports the codex close leg (claude's capture has no close_agent —
+    teardown is TaskStop on the background Task id): the model
+    delegates to a subagent for TASK-CLOSE-OK, stops it via TaskStop,
+    and replies with the marker verbatim. Marker-in-stdout proves the
+    delegatee ran; rc=0 proves the stop did not fail the turn.
+    """
+    base, sk = require_live()
+    _, ws = battery_dirs("cl-task-close")
+    env = claude_env(base, "ak-battery-cl24", sk)
+    c = run_cli(
+        [
+            CLAUDE_BIN,
+            "-p",
+            "--model",
+            "haiku",
+            "--output-format",
+            "text",
+            (
+                "Use the Task tool to delegate to a subagent: have it "
+                "reply with exactly TASK-CLOSE-OK and nothing else. "
+                "Stop the task with TaskStop, then reply with its "
+                "result verbatim."
+            ),
+        ],
+        ws,
+        env,
+    )
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert "TASK-CLOSE-OK" in c.stdout
