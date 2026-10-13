@@ -848,8 +848,12 @@ def test_steer_execute_genuine_points_at_nested_channel():
 
 
 def _multi_agent_ns():
-    # Live codex shape: multi_agent_v1 namespace container with nested
-    # sub-agent tools (no exec orchestrator — plain namespace).
+    # Live codex shape (captured 2026-10-13 via stub ingress):
+    # multi_agent_v1 namespace container with nested sub-agent tools
+    # (no exec orchestrator — plain namespace). send_input requires
+    # only `target`; the payload key `message` is OPTIONAL (the binary
+    # documents "Message text to queue on the target agent" as an
+    # optional property) — the renderer must surface it anyway.
     from llms.proxy.translate import from_responses
 
     req = from_responses(
@@ -875,6 +879,19 @@ def _multi_agent_ns():
                             "parameters": {
                                 "type": "object",
                                 "required": ["targets"],
+                            },
+                        },
+                        {
+                            "type": "function",
+                            "name": "send_input",
+                            "description": "Send a message to an existing agent.",
+                            "parameters": {
+                                "type": "object",
+                                "required": ["target"],
+                                "properties": {
+                                    "target": {"type": "string"},
+                                    "message": {"type": "string"},
+                                },
                             },
                         },
                     ],
@@ -1051,7 +1068,6 @@ def test_dotted_nested_call_keeps_route_namespace():
     assert passed[0].get("__route_namespace__") == "multi_agent_v1"
 
 
-
 def test_plain_namespace_notice_lists_nested_not_container():
     # The notice must teach the nested names, never the container.
     from llms.proxy.client_tools import build_tool_notice, display_tool_names
@@ -1085,3 +1101,42 @@ def test_notice_runner_pointer_blesses_executed_history():
     assert "history" in runner_line
     lowered = runner_line.lower()
     assert "do not re-run" in lowered or "already ran" in lowered
+
+
+def test_notice_nested_optional_payload_keys_surface():
+    # Live codex-plain (2026-10-13, cx-subagent-send-input leg): the
+    # harness's send_input declares required=["target"] with the
+    # payload key `message` OPTIONAL. The notice rendered only
+    # required keys (`Call as {"target": ...}`), so the model never
+    # learned the message key existed — it emitted `send_input {}`
+    # 4x across two traces (both battery runs failed identically)
+    # while the sibling close leg (all-required schema) filled
+    # first-try with zero steers. Optional string payload keys must
+    # surface in the Call-as sketch so the model can fill them.
+    from llms.proxy.client_tools import build_tool_notice
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+
+    notice = build_tool_notice(_multi_agent_ns(), GENUINE_TOOL_NAMES)
+    line = next(l for l in notice.split("\n") if "'send_input'" in l)
+    assert '"target"' in line
+    assert '"message"' in line, line
+
+
+def test_nested_redirect_names_optional_payload_keys():
+    # Same leg: the owned-but-invalid correction named only the
+    # missing required key (`target`), never the optional payload
+    # key the turn actually needed (`message`). The correction must
+    # name optional string payload keys alongside the missing ones.
+    from llms.proxy.client_tools import (
+        build_tool_redirect,
+        client_tool_defs,
+        owned_tool_names,
+    )
+
+    tools = _multi_agent_ns()
+    owned = owned_tool_names(tools)
+    defs = client_tool_defs(tools)
+    text = build_tool_redirect("send_input", "{}", owned, defs)
+    assert text is not None
+    assert "target" in text
+    assert "message" in text, text

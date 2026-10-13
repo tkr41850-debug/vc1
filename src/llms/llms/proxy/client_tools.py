@@ -360,15 +360,19 @@ def missing_required_keys(arguments: str, tool: ToolDef) -> list[str] | None:
     return [k for k in required if k not in parsed]
 
 
-def _minimal_arg_example(tool) -> str:
-    """One-line argument example naming only the required keys.
+def _payload_key_bits(tool) -> list[str]:
+    """Sketch bits for required keys plus optional string payload keys.
 
-    The full parameter schema (~1.7KB for exec_command) never converted
-    the model (live spark leg: two verbatim `default.exec_command {}`
-    repeats after the full-shape correction, then budget exhaustion).
-    The notice already carries the full shape — the correction needs
-    the missing key plus a minimal retry sketch, not the schema again.
-    Placeholder values only; the model fills real ones.
+    Required keys first (in declared order), then optional `string`
+    payload keys the model must fill to make the call useful (live
+    codex-plain 2026-10-13: the harness's send_input requires only
+    `target` with the payload key `message` optional — a required-only
+    sketch taught the model `{"target": ...}` with nowhere to put the
+    message, and it emitted `{}` 4x across two battery runs while the
+    all-required sibling leg filled first-try). Non-string optionals
+    (interrupt flags, items arrays, timeouts) stay out: they are
+    harness toggles, not payload the notice must teach. Placeholder
+    values only; the model fills real ones.
     """
     required = (tool.parameters or {}).get("required") or []
     props = (tool.parameters or {}).get("properties") or {}
@@ -376,7 +380,28 @@ def _minimal_arg_example(tool) -> str:
     for key in required:
         kind = (props.get(key) or {}).get("type", "string")
         bits.append(f'"{key}": "<{kind}>"')
-    return "{" + ", ".join(bits) + "}"
+    for key, spec in props.items():
+        if key in required:
+            continue
+        if not isinstance(spec, dict) or spec.get("type", "string") != "string":
+            continue
+        bits.append(f'"{key}": "<string>"')
+    return bits
+
+
+def _minimal_arg_example(tool) -> str:
+    """One-line argument example naming required + payload keys.
+
+    The full parameter schema (~1.7KB for exec_command) never converted
+    the model (live spark leg: two verbatim `default.exec_command {}`
+    repeats after the full-shape correction, then budget exhaustion).
+    The notice already carries the full shape — the correction needs
+    the missing key plus a minimal retry sketch, not the schema again.
+    Required keys plus optional string payload keys (see
+    _payload_key_bits); placeholder values only, the model fills real
+    ones.
+    """
+    return "{" + ", ".join(_payload_key_bits(tool)) + "}"
 
 
 def build_tool_redirect(
@@ -1167,14 +1192,18 @@ def build_tool_notice(
                         continue
                     nname = str(n.get("name"))
                     ndesc = str(n.get("description") or "").split("\n")[0][:160]
-                    nparams = n.get("parameters") if isinstance(n.get("parameters"), dict) else {}
-                    nrequired = (nparams or {}).get("required") or []
-                    nprops = (nparams or {}).get("properties") or {}
-                    bits = []
-                    for key in nrequired:
-                        kind = (nprops.get(key) or {}).get("type", "string")
-                        bits.append(f'"{key}": "<{kind}>"')
-                    example = "{" + ", ".join(bits) + "}"
+                    nparams = (
+                        n.get("parameters")
+                        if isinstance(n.get("parameters"), dict)
+                        else {}
+                    )
+                    # Required keys plus optional string payload keys
+                    # (same sketch as the redirect path — a required-only
+                    # sketch hides payload keys the model must fill; live
+                    # codex-plain 2026-10-13: send_input's optional
+                    # `message` was invisible and the model emitted `{}`).
+                    _ntool = ToolDef(nname, ndesc, dict(nparams or {}))
+                    example = "{" + ", ".join(_payload_key_bits(_ntool)) + "}"
                     if ndesc:
                         lines.append(f"  - '{nname}': {ndesc} Call as {example}.")
                     else:
