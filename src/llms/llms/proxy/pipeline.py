@@ -423,18 +423,20 @@ def _classify_calls(
                 if isinstance(tool, ToolDef)
                 else None
             )
-            if lowered == "wait_agent" and missing and history:
-                # `wait_agent {}` with the id already in this turn's
-                # history (live codex-plain 2026-10-12: the spawn
+            if lowered in ("wait_agent", "close_agent") and missing and history:
+                # `wait_agent {}` / `close_agent {}` with the id already
+                # in this turn's history (live codex-plain: the spawn
                 # output carries {"agent_id"} but the completion
                 # notification races the steered turns, so the model
-                # never fills targets itself). Fill from the spawn
-                # output and pass through — the model cannot act on
-                # a correction naming an id it has not seen.
-                # Sibling registry calls intentionally steer:
-                # send_input needs message content history cannot
-                # supply, and close_agent is destructive — never
-                # auto-fill either.
+                # never fills targets itself — and live 2026-10-13 the
+                # send_input leg proved the same for close_agent: the
+                # model collected SENDINPUT-OK via a filled wait, then
+                # emitted bare `close_agent {}` twice and gave up with
+                # the marker collected but unrelayed). Fill from the
+                # spawn output and pass through — the model cannot act
+                # on a correction naming an id it has not seen.
+                # send_input intentionally still steers: it needs
+                # message content history cannot supply.
                 import json as _json
 
                 from llms.proxy.compat import (
@@ -449,12 +451,20 @@ def _classify_calls(
                     )
                 except Exception:
                     _payload = None
-                if isinstance(_payload, dict) and not _payload.get("targets"):
+                if isinstance(_payload, dict) and not (
+                    _payload.get("targets") or _payload.get("target")
+                ):
                     _ids = _wait_ids(history)
                     if _ids:
+                        _key = "targets" if lowered == "wait_agent" else "target"
                         fixed = {
-                            **{**call, "name": convert_call_name(name, owned)},
-                            "arguments": _json.dumps({"targets": _ids}),
+                            **call,
+                            "name": convert_call_name(name, owned),
+                            "arguments": _json.dumps(
+                                {_key: _ids}
+                                if lowered == "wait_agent"
+                                else {"target": _ids[0]}
+                            ),
                         }
                         if ns and ns.lower() != "default":
                             fixed["__route_namespace__"] = ns

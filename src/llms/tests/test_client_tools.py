@@ -883,6 +883,16 @@ def _multi_agent_ns():
                         },
                         {
                             "type": "function",
+                            "name": "close_agent",
+                            "description": "Close an agent.",
+                            "parameters": {
+                                "type": "object",
+                                "required": ["target"],
+                                "properties": {"target": {"type": "string"}},
+                            },
+                        },
+                        {
+                            "type": "function",
                             "name": "send_input",
                             "description": "Send a message to an existing agent.",
                             "parameters": {
@@ -956,6 +966,65 @@ def test_wait_agent_empty_targets_fills_from_spawn_history():
     )
     assert passed == []
     assert [c["name"] for c in steered] == ["wait_agent"]
+
+
+def test_close_agent_empty_target_fills_from_spawn_history():
+    # Live codex-plain (2026-10-13, cx-subagent-send-input leg): the
+    # model collected SENDINPUT-OK via a filled wait, then emitted
+    # bare `close_agent {}` twice and gave up with the marker
+    # collected but unrelayed — the same never-saw-the-id race as
+    # wait_agent (the spawn output carries the id, the notification
+    # races the steered turns). The classifier fills target from that
+    # output and passes through. send_input intentionally still
+    # steers (message content is not in history). Close is safe to
+    # fill: the agent already completed (the model only closes after
+    # collecting), and the fill replays the model's own call with the
+    # id it was reaching for — never an unsolicited close.
+    from llms.proxy.client_tools import (
+        dispatchable_names,
+        nested_tool_defs,
+        owned_tool_names,
+    )
+    from llms.proxy.pipeline import _classify_calls
+
+    tools = _multi_agent_ns()
+    owned = owned_tool_names(tools)
+    route = dispatchable_names(tools)
+    defs = dict(nested_tool_defs(tools))
+    history = [
+        {
+            "type": "function_call_output",
+            "call_id": "c1",
+            "output": '{"agent_id": "abc-123", "nickname": "Euler"}',
+        },
+    ]
+    passed, steered = _classify_calls(
+        [{"name": "close_agent", "arguments": "{}", "call_id": "c2"}],
+        owned,
+        defs,
+        route,
+        tools,
+        (),
+        "codex-plain",
+        "t",
+        history=history,
+    )
+    assert steered == []
+    assert len(passed) == 1
+    assert passed[0]["arguments"] == '{"target": "abc-123"}'
+    # No id in history: unchanged behavior (steers with correction).
+    passed, steered = _classify_calls(
+        [{"name": "close_agent", "arguments": "{}", "call_id": "c2"}],
+        owned,
+        defs,
+        route,
+        tools,
+        (),
+        "codex-plain",
+        "t",
+    )
+    assert passed == []
+    assert [c["name"] for c in steered] == ["close_agent"]
 
 
 def test_plain_namespace_container_neither_owned_nor_routed():

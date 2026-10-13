@@ -974,6 +974,11 @@ def test_cx_single_subagent_send_input():
     marker verbatim. Neither marker appears in the prompt — both in
     stdout proves the message reached the delegatee and its reply
     propagated back through the registry.
+    The prompt names send_input's argument keys explicitly
+    (target + message): live 2026-10-13 the free-tier model emitted
+    bare `send_input {}` 3x without key coaching, while the
+    all-required close leg filled first-try — the leg proves the
+    registry path dispatches, not unaided schema discovery.
     """
     base, sk = require_live()
     home, ws = battery_dirs("cx-subagent-send-input")
@@ -988,7 +993,8 @@ def test_cx_single_subagent_send_input():
                 "workspace-write",
                 (
                     "Use the spawn_agent tool to start a subagent, then "
-                    "use send_input to ask it to reply with exactly "
+                    "use send_input with the agent's id as target and "
+                    "message asking it to reply with exactly "
                     "SENDINPUT-OK, then use wait_agent to collect its "
                     "result, then use close_agent to close that agent, "
                     "then reply with its result verbatim."
