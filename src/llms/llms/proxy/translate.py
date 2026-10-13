@@ -854,6 +854,50 @@ def _executed_alias_emission(
         return None
     owned = _owned_names(req.tools)
     defs = _client_defs(req.tools)
+    # Marked lossy-shell translations first (live codex-plain
+    # 2026-10-13): the converter embeds the emitted genuine name+args
+    # as a trailing `# __llms_genuine=<name> <json>` comment on the
+    # executed cmd. The marker is a hint, never trusted input —
+    # re-translate the parsed genuine call and require the stripped
+    # cmd back byte-identically, so a forged or reordered comment
+    # falls through to the alias path (never a wrong-name replay).
+    try:
+        from llms.proxy.compat import parse_genuine_marker as _parse_marker
+    except Exception:
+        _parse_marker = None
+    if _parse_marker is not None:
+        _cmd = payload.get("cmd")
+        if isinstance(_cmd, str):
+            _parsed = _parse_marker(_cmd)
+            if _parsed is not None:
+                _stripped, _gname, _gargs = _parsed
+                _re = _translate(_gname, _gargs, owned, defs, family, req.tools)
+                if _re is not None:
+                    _re_declared, _re_args = _re
+                    if _re_declared.lower() == echoed.lower():
+                        try:
+                            import json as _json2
+
+                            _re_payload = _json2.loads(_re_args)
+                        except Exception:
+                            _re_payload = None
+                        # Re-translation re-appends the marker, so strip
+                        # its cmd before comparing (a byte-identical
+                        # stripped cmd proves the marker describes this
+                        # exact translation).
+                        _re_cmd = (
+                            _re_payload.get("cmd")
+                            if isinstance(_re_payload, dict)
+                            else None
+                        )
+                        _re_stripped = (
+                            _parse_marker(_re_cmd)[0]
+                            if isinstance(_re_cmd, str)
+                            and _parse_marker(_re_cmd) is not None
+                            else _re_cmd
+                        )
+                        if _re_stripped == _stripped:
+                            return _gname, _re_declared, _gargs
     for _client_lower, alias, alias_key in _ALIASES:
         # The echoed history carries the TRANSLATED payload (cmd), but
         # the alias translation reads the GENUINE payload (command):

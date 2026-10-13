@@ -672,9 +672,7 @@ def test_write_translation_wraps_patch_as_channel_js():
         [edit_call], owned, defs, route, ns, GENUINE_TOOL_NAMES, "luna", "t1"
     )
     assert steer == []
-    assert passed[0]["__exec_rewrite__"]["input"].startswith(
-        "await tools.apply_patch("
-    )
+    assert passed[0]["__exec_rewrite__"]["input"].startswith("await tools.apply_patch(")
 
 
 def test_edit_to_apply_patch_update_proven_live():
@@ -841,9 +839,17 @@ def test_write_edit_classifier_rides_exec_rewrite_marker():
     )
     assert steer == []
     assert [c["name"] for c in passed] == ["exec_command"]
-    assert passed[0]["__translated_args__"] == (
-        '{"cmd": "printf \'%s\' \'hi\\n\' > s.txt"}'
-    )
+    # Dispatcher-level reverse-translate marker (a trailing shell
+    # comment — execution-identical): strip via parse_genuine_marker
+    # before asserting the legacy translated shape.
+    from llms.proxy.compat import parse_genuine_marker as _parse_marker
+
+    _marked = __import__("json").loads(passed[0]["__translated_args__"])["cmd"]
+    _p = _parse_marker(_marked)
+    assert _p is not None, _marked
+    assert _p[0] == "printf '%s' 'hi\n' > s.txt"
+    assert _p[1] == "write"
+    assert __import__("json").loads(_p[2]) == {"path": "s.txt", "content": "hi\n"}
 
 
 def test_write_to_shell_redirect_executes_byte_exact(tmp_path):
@@ -860,11 +866,11 @@ def test_write_to_shell_redirect_executes_byte_exact(tmp_path):
 
     for content in ("hi\n", "it's\nmulti\nline\n", ""):
         out = tmp_path / "probe.txt"
-        tra = _write_to_shell_redirect(
-            {"path": str(out), "content": content}, ["cmd"]
-        )
+        tra = _write_to_shell_redirect({"path": str(out), "content": content}, ["cmd"])
         assert tra is not None
-        subprocess.run(["/bin/bash", "-lc", __import__("json").loads(tra)["cmd"]], check=True)
+        subprocess.run(
+            ["/bin/bash", "-lc", __import__("json").loads(tra)["cmd"]], check=True
+        )
         assert out.read_text() == content
 
 
@@ -891,32 +897,39 @@ def test_write_to_shell_redirect_proven_live():
     owned = owned_tool_names(runner)
     defs = {t.name.lower(): t for t in runner if t.name}
     defs.update(nested_tool_defs(runner))
-    assert translate_to_client(
+    # Dispatcher-level reverse-translate marker (a trailing shell
+    # comment — execution-identical): strip via parse_genuine_marker
+    # before asserting the legacy translated shape.
+    from llms.proxy.compat import parse_genuine_marker as _pm2
+
+    def _strip2(args, genuine):
+        _m = __import__("json").loads(args)["cmd"]
+        _q = _pm2(_m)
+        assert _q is not None, _m
+        assert _q[1] == genuine, _m
+        return _q[0]
+
+    _wn, _wa = translate_to_client(
         "write",
         '{"path": "shell-write.txt", "content": "hello-shell\\n"}',
         "codex-plain",
         owned,
         defs,
         runner,
-    ) == (
-        "exec_command",
-        '{"cmd": "printf \'%s\' \'hello-shell\\n\' > shell-write.txt"}',
     )
+    assert _wn == "exec_command"
+    assert _strip2(_wa, "write") == "printf '%s' 'hello-shell\n' > shell-write.txt"
     # No delimiter games: content with quotes/newlines stays inline.
-    assert (
-        translate_to_client(
-            "write",
-            '{"path": "x.txt", "content": "it\'s\\nEOF\\nok"}',
-            "codex-plain",
-            owned,
-            defs,
-            runner,
-        )
-        == (
-            "exec_command",
-            '{"cmd": "printf \'%s\' \'it\'\\\\\'\'s\\nEOF\\nok\' > x.txt"}',
-        )
+    _wn2, _wa2 = translate_to_client(
+        "write",
+        '{"path": "x.txt", "content": "it\'s\\nEOF\\nok"}',
+        "codex-plain",
+        owned,
+        defs,
+        runner,
     )
+    assert _wn2 == "exec_command"
+    assert _strip2(_wa2, "write").startswith("printf '%s' 'it'")
     # Missing/non-string fields: no guess.
     assert (
         translate_to_client(
@@ -1142,16 +1155,26 @@ def test_wait_agent_fills_targets_from_spawn_agent_history():
     from llms.proxy.compat import _wait_targets_from_history
 
     history = [
-        {"type": "function_call", "call_id": "c1", "name": "spawn_agent",
-         "arguments": '{"message": "hi"}'},
-        {"type": "function_call_output", "call_id": "c1",
-         "output": '{"agent_id": "abc-123", "nickname": "Euler"}'},
+        {
+            "type": "function_call",
+            "call_id": "c1",
+            "name": "spawn_agent",
+            "arguments": '{"message": "hi"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "c1",
+            "output": '{"agent_id": "abc-123", "nickname": "Euler"}',
+        },
     ]
     assert _wait_targets_from_history(history) == ["abc-123"]
     assert _wait_targets_from_history([]) is None
-    assert _wait_targets_from_history(
-        [{"type": "function_call_output", "call_id": "c9", "output": "no json"}]
-    ) is None
+    assert (
+        _wait_targets_from_history(
+            [{"type": "function_call_output", "call_id": "c9", "output": "no json"}]
+        )
+        is None
+    )
 
 
 def test_schema_audit_dropped_keys_pinned():
@@ -1242,7 +1265,7 @@ def test_schema_audit_dropped_keys_pinned():
     # printf argument (never stdin — the heredoc shape wrote 0 bytes).
     assert (
         _write_to_shell_redirect({"path": "s.txt", "content": "hi\n"}, ["cmd"])
-        == '{"cmd": "printf \'%s\' \'hi\\n\' > s.txt"}'
+        == "{\"cmd\": \"printf '%s' 'hi\\n' > s.txt\"}"
     )
     # Claude rows (capture: claude-cli 2.1.293, 23 tools): per-entry
     # drops/renames vs the genuine-12 above.
@@ -1304,7 +1327,6 @@ def test_read_grep_edit_translate_onto_shell_runner_codex_plain():
     # grep leg degenerated to bare `shell {}`). Shell one-liners are
     # 1:1 exact: `cat`, `rg`/`grep -rn`, `python3` line-swap. Proven
     # byte-exact through the harness shell path below.
-    from tests.test_client_tools import _spark_runner
 
     from llms.proxy.compat import (
         _edit_to_shell_py,
@@ -1383,35 +1405,51 @@ def test_read_grep_edit_execute_byte_exact(tmp_path):
     (ws / "seed.txt").write_text("EDIT-BEFORE-8Q2M\n")
 
     out = subprocess.run(
-        ["/bin/bash", "-lc", __import__("json").loads(
-            _read_to_shell_cat({"path": str(ws / "b.txt")}, ["cmd"])
-        )["cmd"]],
-        capture_output=True, text=True,
+        [
+            "/bin/bash",
+            "-lc",
+            __import__("json").loads(
+                _read_to_shell_cat({"path": str(ws / "b.txt")}, ["cmd"])
+            )["cmd"],
+        ],
+        capture_output=True,
+        text=True,
     )
     assert out.returncode == 0
     assert out.stdout == "line one\nGREP-NEEDLE-3X9P here\nline three\n"
 
     out = subprocess.run(
-        ["/bin/bash", "-lc", __import__("json").loads(
-            _grep_to_shell_rg(
-                {"pattern": "GREP-NEEDLE", "path": str(ws), "include": "*.txt"},
-                ["cmd"],
-            )
-        )["cmd"]],
-        capture_output=True, text=True,
+        [
+            "/bin/bash",
+            "-lc",
+            __import__("json").loads(
+                _grep_to_shell_rg(
+                    {"pattern": "GREP-NEEDLE", "path": str(ws), "include": "*.txt"},
+                    ["cmd"],
+                )
+            )["cmd"],
+        ],
+        capture_output=True,
+        text=True,
     )
     assert out.returncode == 0
     assert "GREP-NEEDLE-3X9P" in out.stdout and "b.txt" in out.stdout
 
     subprocess.run(
-        ["/bin/bash", "-lc", __import__("json").loads(
-            _edit_to_shell_py(
-                {"path": str(ws / "seed.txt"),
-                 "oldString": "EDIT-BEFORE-8Q2M",
-                 "newString": "EDIT-AFTER-8Q2M"},
-                ["cmd"],
-            )
-        )["cmd"]],
+        [
+            "/bin/bash",
+            "-lc",
+            __import__("json").loads(
+                _edit_to_shell_py(
+                    {
+                        "path": str(ws / "seed.txt"),
+                        "oldString": "EDIT-BEFORE-8Q2M",
+                        "newString": "EDIT-AFTER-8Q2M",
+                    },
+                    ["cmd"],
+                )
+            )["cmd"],
+        ],
         check=True,
     )
     assert (ws / "seed.txt").read_text() == "EDIT-AFTER-8Q2M\n"
@@ -1425,7 +1463,8 @@ def test_read_grep_edit_execute_byte_exact(tmp_path):
     assert tra is not None
     out = subprocess.run(
         ["/bin/bash", "-lc", __import__("json").loads(tra)["cmd"]],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     assert out.returncode == 0
     assert out.stdout.strip().endswith("sub-nest-7/deep/cx-glob-target.json")
@@ -1433,18 +1472,15 @@ def test_read_grep_edit_execute_byte_exact(tmp_path):
     assert _glob_to_shell_find({"pattern": "**", "path": str(ws)}, ["cmd"]) is None
     assert _glob_to_shell_find({"pattern": "", "path": str(ws)}, ["cmd"]) is None
     assert _glob_to_shell_find({"path": str(ws)}, ["cmd"]) is None
-    assert (
-        _glob_to_shell_find({"pattern": "**/x", "path": str(ws)}, []) is None
-    )
+    assert _glob_to_shell_find({"pattern": "**/x", "path": str(ws)}, []) is None
 
 
 def test_dispatch_read_grep_edit_glob_rows_codex_plain_only():
     # Table rows are family-gated (codex-plain only): luna keeps the
     # apply_patch channel rows, unknown fails open.
-    from tests.test_client_tools import _luna_namespace, _spark_runner
-
     from llms.proxy.client_tools import nested_tool_defs, owned_tool_names
     from llms.proxy.compat import translate_to_client
+    from tests.test_client_tools import _luna_namespace, _spark_runner
 
     runner = (_spark_runner(),)
     owned = owned_tool_names(runner)
@@ -1453,63 +1489,78 @@ def test_dispatch_read_grep_edit_glob_rows_codex_plain_only():
     name, args = translate_to_client(
         "read", '{"path": "seed_edit.txt"}', "codex-plain", owned, defs, runner
     )
+    from llms.proxy.compat import parse_genuine_marker as _pm3
+
+    def _strip3(args, genuine):
+        _m = __import__("json").loads(args)["cmd"]
+        _q = _pm3(_m)
+        assert _q is not None, _m
+        assert _q[1] == genuine, _m
+        return _q[0]
+
     assert name == "exec_command"
-    assert __import__("json").loads(args) == {"cmd": "cat seed_edit.txt"}
+    assert _strip3(args, "read") == "cat seed_edit.txt"
     name, args = translate_to_client(
         "grep",
         '{"pattern": "GREP-NEEDLE", "path": "ws", "include": "*.txt"}',
-        "codex-plain", owned, defs, runner,
+        "codex-plain",
+        owned,
+        defs,
+        runner,
     )
     assert name == "exec_command"
-    assert __import__("json").loads(args) == {
-        "cmd": "rg -n --glob '*.txt' 'GREP-NEEDLE' ws"
-    }
+    assert _strip3(args, "grep") == "rg -n --glob '*.txt' 'GREP-NEEDLE' ws"
     # Grep without include searches the path as given.
     name, args = translate_to_client(
-        "grep", '{"pattern": "N", "path": "ws"}', "codex-plain",
-        owned, defs, runner,
+        "grep",
+        '{"pattern": "N", "path": "ws"}',
+        "codex-plain",
+        owned,
+        defs,
+        runner,
     )
     assert name == "exec_command"
-    assert __import__("json").loads(args) == {"cmd": "rg -n 'N' ws"}
+    assert _strip3(args, "grep") == "rg -n 'N' ws"
     name, args = translate_to_client(
         "edit",
         '{"path": "s", "oldString": "A", "newString": "B"}',
-        "codex-plain", owned, defs, runner,
+        "codex-plain",
+        owned,
+        defs,
+        runner,
     )
     assert name == "exec_command"
     import base64 as _b64d
 
-    _blob = __import__("json").loads(args)["cmd"].split("b64decode('", 1)[1]
-    _script = _b64d.b64decode(_blob.rstrip("')")).decode()
+    _blob = _strip3(args, "edit").split("b64decode('", 1)[1].rstrip("')")
+    _script = _b64d.b64decode(_blob).decode()
     assert "A" in _script
     name, args = translate_to_client(
-        "glob", '{"pattern": "**/cx-glob-target.json", "path": "ws"}',
-        "codex-plain", owned, defs, runner,
+        "glob",
+        '{"pattern": "**/cx-glob-target.json", "path": "ws"}',
+        "codex-plain",
+        owned,
+        defs,
+        runner,
     )
     assert name == "exec_command"
-    assert __import__("json").loads(args) == {
-        "cmd": "find ws -name 'cx-glob-target.json'"
-    }
+    assert _strip3(args, "glob") == "find ws -name 'cx-glob-target.json'"
 
     ns = (_luna_namespace(),)
     l_owned = owned_tool_names(ns)
     l_defs = {t.name.lower(): t for t in ns if t.name}
     l_defs.update(nested_tool_defs(ns))
     assert (
-        translate_to_client(
-            "read", '{"path": "x"}', "luna", l_owned, l_defs, ns
-        )
+        translate_to_client("read", '{"path": "x"}', "luna", l_owned, l_defs, ns)
         is None
     )
     assert (
-        translate_to_client(
-            "read", '{"path": "x"}', "unknown", owned, defs, runner
-        )
+        translate_to_client("read", '{"path": "x"}', "unknown", owned, defs, runner)
         is None
     )
 
 
-def test_translate_genuine_call_reaches_all_table_names():    # Live-path guard: translate_genuine_call allowlists the genuine
+def test_translate_genuine_call_reaches_all_table_names():  # Live-path guard: translate_genuine_call allowlists the genuine
     # names it forwards to the compat table. Every row-0 name in
     # TO_CLIENT must pass the gate, or the row is dead code live
     # (caught 2026-10-12: the grep row tested green via
@@ -1521,7 +1572,13 @@ def test_translate_genuine_call_reaches_all_table_names():    # Live-path guard:
 
     names = {str(row[0]).lower() for row in TO_CLIENT}
     assert names <= {
-        "read", "shell", "write", "edit", "execute", "grep", "webfetch",
+        "read",
+        "shell",
+        "write",
+        "edit",
+        "execute",
+        "grep",
+        "webfetch",
         "glob",
     }, names
     runner = (_spark_runner(),)
@@ -1542,20 +1599,110 @@ def test_translate_genuine_call_reaches_all_table_names():    # Live-path guard:
         "read": (owned, defs, runner, {"path": "x"}),
         "shell": (owned, defs, runner, {"command": "echo hi"}),
         "write": (owned, defs, runner, {"path": "x", "content": "y"}),
-        "edit": (owned, defs, runner,
-                 {"path": "x", "oldString": "a", "newString": "b"}),
-        "execute": (ns_owned, ns_defs, ns,
-                    {"code": "await tools.apply_patch('x')"}),
+        "edit": (
+            owned,
+            defs,
+            runner,
+            {"path": "x", "oldString": "a", "newString": "b"},
+        ),
+        "execute": (ns_owned, ns_defs, ns, {"code": "await tools.apply_patch('x')"}),
         "grep": (owned, defs, runner, {"pattern": "N", "path": "ws"}),
         "webfetch": (owned, defs, runner, {"url": "https://example.com"}),
-        "glob": (owned, defs, runner,
-                 {"pattern": "**/cx-glob-target.json", "path": "ws"}),
+        "glob": (
+            owned,
+            defs,
+            runner,
+            {"pattern": "**/cx-glob-target.json", "path": "ws"},
+        ),
     }
     families = {"execute": "luna"}
     for name in sorted(names):
         o, d, tools, payload = payloads[name]
         got = translate_genuine_call(
-            name, _json.dumps(payload), o, d,
-            families.get(name, "codex-plain"), tools,
+            name,
+            _json.dumps(payload),
+            o,
+            d,
+            families.get(name, "codex-plain"),
+            tools,
         )
         assert got is not None, name
+
+
+def test_lossy_shell_rows_embed_genuine_marker():
+    # Live codex-plain 2026-10-13: lossy shell translations (read->cat,
+    # write->printf, grep->rg, edit->python3, webfetch->curl,
+    # glob->find) erase the emitted genuine name — the reverse matcher
+    # only knows the shell alias, so an executed `read` pair replays
+    # upstream as `shell {"command": "cat f"}`, a name the model never
+    # emitted (same attribution break as the shell loop, wrong name).
+    # Each lossy row embeds the emitted genuine name+args as a
+    # trailing shell comment (` # __llms_genuine=<name> <json>` — a
+    # shell no-op, so execution is byte-identical) so the history echo
+    # can replay the pair under the emitted name. The verbatim shell
+    # row stays markerless (its exact round-trip is live-proven).
+    import json as _json
+
+    from llms.proxy.client_tools import owned_tool_names
+    from llms.proxy.compat import parse_genuine_marker, translate_to_client
+    from tests.test_client_tools import _spark_runner
+
+    runner = (_spark_runner(),)
+    owned = owned_tool_names(runner)
+    defs = {t.name.lower(): t for t in runner if t.name}
+    cases = {
+        "read": ({"path": "seed_read.txt"}, "cat seed_read.txt"),
+        "write": (
+            {"path": "s.txt", "content": "hi\n"},
+            "printf '%s' 'hi\n' > s.txt",
+        ),
+        "grep": ({"pattern": "N", "path": "ws"}, "rg -n 'N' ws"),
+        "webfetch": (
+            {"url": "https://example.com"},
+            "curl -sL https://example.com",
+        ),
+        "glob": (
+            {"pattern": "**/cx-glob-target.json", "path": "ws"},
+            "find ws -name 'cx-glob-target.json'",
+        ),
+    }
+    for name, (payload, legacy_cmd) in cases.items():
+        declared, args = translate_to_client(
+            name, _json.dumps(payload), "codex-plain", owned, defs, runner
+        )
+        assert declared == "exec_command", name
+        cmd = _json.loads(args)["cmd"]
+        parsed = parse_genuine_marker(cmd)
+        assert parsed is not None, (name, cmd)
+        stripped, gname, gargs = parsed
+        assert gname == name, (name, cmd)
+        assert stripped == legacy_cmd, (name, cmd)
+        assert _json.loads(gargs) == payload, (name, cmd)
+    # The edit row's cmd is a base64 wrapper — assert by decoding the
+    # stripped command, not by exact match.
+    import base64 as _b64m
+
+    declared, args = translate_to_client(
+        "edit",
+        _json.dumps({"path": "s", "oldString": "A", "newString": "B"}),
+        "codex-plain",
+        owned,
+        defs,
+        runner,
+    )
+    assert declared == "exec_command"
+    _cmd = _json.loads(args)["cmd"]
+    _parsed = parse_genuine_marker(_cmd)
+    assert _parsed is not None, _cmd
+    _blob = _parsed[0].split("b64decode('", 1)[1].rstrip("')")
+    assert "A" in _b64m.b64decode(_blob).decode()
+    assert _json.loads(_parsed[2]) == {
+        "path": "s",
+        "oldString": "A",
+        "newString": "B",
+    }
+    # The verbatim shell row carries no marker (exact round-trip,
+    # live-proven 2026-10-12).
+    assert translate_to_client(
+        "shell", '{"command": "cat f"}', "codex-plain", owned, defs, runner
+    ) == ("exec_command", '{"cmd": "cat f"}')

@@ -1448,6 +1448,73 @@ def test_history_executed_alias_pair_replays_emitted_name():
     assert calls[0]["arguments"] == '{"command": "printf REDIRECT-OK > redir.txt"}'
 
 
+def test_history_marked_lossy_pair_replays_emitted_genuine_name():
+    # Marker round-trip (live codex-plain 2026-10-13): lossy shell
+    # translations erase the emitted genuine name, so without the
+    # marker an executed `read` pair replays as `shell {"command":
+    # "cat f"}` — a name the model never emitted (same attribution
+    # break as the shell loop, wrong name). The classifier embeds
+    # the emitted genuine name+args as a trailing shell comment on
+    # the executed cmd; the echo must replay the pair under the
+    # EMITTED genuine name/args. Fails before the consumer: the pair
+    # replays as shell/command.
+    from llms.proxy.client_tools import owned_tool_names
+    from llms.proxy.compat import translate_to_client
+    from llms.proxy.translate import from_responses, to_zen_responses
+    from tests.test_client_tools import _spark_runner
+
+    runner = (_spark_runner(),)
+    owned = owned_tool_names(runner)
+    defs = {t.name.lower(): t for t in runner if t.name}
+    for genuine, payload, legacy in (
+        ("read", '{"path": "seed_read.txt"}', "read"),
+        ("glob", '{"pattern": "**/x.json", "path": "ws"}', "glob"),
+        ("grep", '{"pattern": "N", "path": "ws"}', "grep"),
+    ):
+        _, args = translate_to_client(
+            genuine, payload, "codex-plain", owned, defs, runner
+        )
+        req = from_responses(
+            {
+                "model": "m",
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "c1",
+                        "name": "exec_command",
+                        "arguments": args,
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "c1",
+                        "output": (
+                            "Chunk ID: 047568\nWall time: 0.3727 seconds\n"
+                            "Process exited with code 0\nOriginal token count: 0\n"
+                            "Output:\n"
+                        ),
+                    },
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "exec_command",
+                        "description": "r",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"cmd": {}},
+                            "required": ["cmd"],
+                        },
+                    }
+                ],
+            }
+        )
+        out = to_zen_responses(req, tool_notice="", family="codex-plain")
+        calls = [i for i in out["input"] if i.get("type") == "function_call"]
+        assert len(calls) == 1, genuine
+        assert calls[0]["name"] == legacy, (genuine, calls[0])
+        assert calls[0]["arguments"] == payload, (genuine, calls[0])
+
+
 def test_tool_notice_also_appends_to_developer_message():
     # Codex sends the harness-guidance system prompt top-level AND
     # per-turn skills/permissions context as a developer input item;

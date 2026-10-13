@@ -60,6 +60,56 @@ def detect_family(user_agent: str | None, ingress: str, tools: tuple = ()) -> st
     return UNKNOWN
 
 
+def _mark_shell_cmd(cmd: str, genuine: str, payload: dict) -> str:
+    """Shell cmd + trailing reverse-translate marker comment, or cmd unchanged.
+
+    Lossy shell translations (read->cat, write->printf, ...) erase the
+    emitted genuine name: history-echo records the translated payload,
+    and the reverse matcher only knows the shell alias — so an
+    executed `read` pair replays as `shell {"command": "cat f"}`, a
+    name the model never emitted (live codex-plain 2026-10-13; the
+    same attribution break as the shell loop, wrong name). The
+    classifier's own markers (__translated_args__ etc.) are popped
+    before the client and never reach history — the marker must ride
+    the EXECUTED payload itself. A trailing `#` comment is a shell
+    no-op (execution byte-identical) and always present in the echoed
+    translated arguments. Callers reverse it via parse_genuine_marker
+    + round-trip re-translation (never trusted blind). Pure helper.
+    """
+    import json as _json
+
+    try:
+        return f"{cmd} # __llms_genuine={genuine} {_json.dumps(payload)}"
+    except Exception:
+        return cmd
+
+
+def parse_genuine_marker(cmd: str) -> tuple[str, str, str] | None:
+    """(stripped cmd, genuine name, genuine args) from a marked cmd, or None.
+
+    Never guesses: a missing/malformed marker returns None (callers
+    fail open to the alias path), and the caller must round-trip-verify
+    (re-translate the parsed genuine call and compare the stripped cmd)
+    — the comment is a hint, not trusted input. Pure helper.
+    """
+    import json as _json
+
+    tag = " # __llms_genuine="
+    if not isinstance(cmd, str) or tag not in cmd:
+        return None
+    stripped, _, tail = cmd.rpartition(tag)
+    name, _, args = tail.partition(" ")
+    if not name or not args:
+        return None
+    try:
+        payload = _json.loads(args)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return stripped, name, args
+
+
 def _shell_to_cmd(payload: dict, required: list) -> str | None:
     """shell {"command"} onto a cmd-shaped client runner, or None.
 
@@ -452,9 +502,7 @@ def _grep_to_shell_rg(payload: dict, required: list) -> str | None:
     if not isinstance(path, str) or not path.strip():
         return None
     include = payload.get("include")
-    if include is not None and (
-        not isinstance(include, str) or not include.strip()
-    ):
+    if include is not None and (not isinstance(include, str) or not include.strip()):
         return None
     if "cmd" not in set(required or []):
         return None
@@ -536,7 +584,9 @@ def _edit_to_shell_py(payload: dict, required: list) -> str | None:
         "open(p,'w').write(s.replace(o,n))"
     )
     blob = _b64.b64encode(script.encode()).decode()
-    return _json.dumps({"cmd": f"python3 -c \"exec(__import__('base64').b64decode('{blob}'))\""})
+    return _json.dumps(
+        {"cmd": f"python3 -c \"exec(__import__('base64').b64decode('{blob}'))\""}
+    )
 
 
 # Dispatch table: (genuine name, family ["*" = any], client lowered name,
@@ -651,6 +701,34 @@ def translate_to_client(
         required = (tool.parameters or {}).get("required") or []
         converted = convert(payload, required)
         if converted is not None:
+            # Reverse-translate marker (live codex-plain 2026-10-13):
+            # lossy shell-row translations (genuine `read` onto
+            # `exec_command {"cmd": "cat f"}`) erase the emitted name,
+            # so history-echo can only reverse-match through the
+            # shell-alias rows and replays the pair as `shell
+            # {"command": "cat f"}` — a name the model never emitted
+            # (same attribution break as the shell loop, wrong name).
+            # Embed the emitted genuine name+args as a trailing shell
+            # comment on the executed cmd (a `#` no-op — execution
+            # byte-identical) so the echo can replay the emitted
+            # pair; the consumer verifies by round-trip re-translation
+            # (never trusted blind). Only the single-key `cmd` shape
+            # marks (complex translated payloads stay verbatim — the
+            # alias path already covers verbatim `shell`), and never
+            # the verbatim shell row itself (its exact round-trip is
+            # live-proven).
+            if genuine != "shell" and client_lower == "exec_command" and fam == family:
+                try:
+                    _cmd_payload = _json.loads(converted)
+                except Exception:
+                    _cmd_payload = None
+                if (
+                    isinstance(_cmd_payload, dict)
+                    and set(_cmd_payload) == {"cmd"}
+                    and isinstance(_cmd_payload.get("cmd"), str)
+                ):
+                    _marked = _mark_shell_cmd(_cmd_payload["cmd"], genuine, payload)
+                    converted = _json.dumps({"cmd": _marked})
             return declared, converted
     return None
 
