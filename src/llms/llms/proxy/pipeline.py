@@ -457,14 +457,25 @@ def _classify_calls(
                     _ids = _wait_ids(history)
                     if _ids:
                         _key = "targets" if lowered == "wait_agent" else "target"
+                        _filled_args = _json.dumps(
+                            {_key: _ids}
+                            if lowered == "wait_agent"
+                            else {"target": _ids[0]}
+                        )
                         fixed = {
                             **call,
                             "name": convert_call_name(name, owned),
-                            "arguments": _json.dumps(
-                                {_key: _ids}
-                                if lowered == "wait_agent"
-                                else {"target": _ids[0]}
-                            ),
+                            "arguments": _filled_args,
+                            # The streaming replay swaps frame payload
+                            # only on the rewrite markers — never a
+                            # plain `arguments` change (live codex-plain
+                            # 2026-10-13: a filled close_agent replayed
+                            # the raw `{}` frames and the harness
+                            # rejected it). Ride the same marker the
+                            # genuine->client translation uses: both
+                            # replays consume it, neither leaks it
+                            # downstream (both pop it).
+                            "__translated_args__": _filled_args,
                         }
                         if ns and ns.lower() != "default":
                             fixed["__route_namespace__"] = ns

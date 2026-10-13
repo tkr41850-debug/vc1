@@ -1145,3 +1145,96 @@ def test_streaming_normalizes_client_tool_casing():
     # None to_client: verbatim (today's behavior for genuine legs).
     verbatim = _asyncio.run(run_case(None))
     assert '"name":"bash"' in verbatim or '"name": "bash"' in verbatim
+
+
+def test_streaming_fold_close_fill_reaches_downstream_frames():
+    """A history-filled close_agent replays FILLED args downstream.
+
+    Live codex-plain (2026-10-13, cx-subagent-send-input leg): the model
+    emits bare `close_agent {}` after collecting via a filled wait; the
+    classifier fills target from the spawn output in history, but the
+    streaming replay only swaps frame payload on the genuine-translation
+    marker (__translated_args__) / exec marker — the fill arm sets
+    neither, so the filled arguments die in the classifier and the raw
+    `{}` frames replay downstream. The harness rejects them
+    (`unsupported call: close_agent`), the model gives up, the marker
+    is collected but never relayed. The synthesize replay applies the
+    plain-arguments change (its elif branch); the streaming replay
+    must do the same: a classifier-filled call swaps the added +
+    done frame payloads to the filled arguments.
+    """
+    import asyncio as _asyncio
+    import json as _json
+
+    import httpx as _httpx
+
+    from llms.proxy import forward as _forward
+    from llms.proxy.ir import ToolDef
+
+    closer = ToolDef(
+        "close_agent",
+        "Close an agent.",
+        {
+            "type": "object",
+            "properties": {"target": {"type": "string"}},
+            "required": ["target"],
+        },
+    )
+
+    def _turn():
+        return (
+            "event: response.output_item.added\n"
+            'data: {"type":"response.output_item.added","output_index":1,'
+            '"item":{"id":"c9","type":"function_call",'
+            '"name":"close_agent","arguments":""}}\n\n'
+            "event: response.function_call_arguments.done\n"
+            'data: {"type":"response.function_call_arguments.done",'
+            '"output_index":1,"item_id":"c9","name":"close_agent",'
+            '"arguments":"{}"}\n\n'
+            "event: response.completed\n"
+            'data: {"type":"response.completed","response":{"id":"r9",'
+            '"status":"completed","usage":{"input_tokens":1,'
+            '"output_tokens":1}}}\n\n'
+        )
+
+    async def handler(request):
+        return _httpx.Response(
+            200,
+            content=_turn().encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def scenario():
+        client = _httpx.AsyncClient(transport=_httpx.MockTransport(handler))
+        req = client.build_request("POST", "http://x", json={"model": "m"})
+        upstream = await client.send(req, stream=True)
+        out = []
+        async for chunk in _forward.fold_and_steer_streaming(
+            upstream,
+            client=client,
+            url="http://x",
+            headers={},
+            outbound={
+                "model": "m",
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "call_id": "c1",
+                        "output": '{"agent_id": "abc-123"}',
+                    }
+                ],
+            },
+            trace_id="t-close-fill",
+            client_names={"close_agent"},
+            client_tools=(closer,),
+            family="codex-plain",
+        ):
+            out.append(chunk)
+        return b"".join(out).decode()
+
+    raw = _asyncio.run(scenario())
+    filled = _json.dumps({"target": "abc-123"})
+    # The filled arguments reach the wire (JSON-escaped inside the
+    # frame payload): downstream folds the id, not the raw {} the
+    # model emitted.
+    assert _json.dumps(filled) in raw, raw[-2000:]
