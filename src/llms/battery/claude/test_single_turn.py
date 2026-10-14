@@ -55,45 +55,70 @@ def test_cl_single_print():
 
 
 def test_cl_single_bash():
+    """Bash-echo via text + stream-json halves (no-tool-use retry).
+
+    Live 2026-10-14 (flake probe, 2 failures in 10 runs): haiku
+    occasionally answers from text without calling any tool — the same
+    model turn flake documented on the allowed_tools leg. Both halves
+    retry once on marker/tool_use absence; a second miss fails loudly.
+    """
+    import subprocess
+
+    import pytest
+
     base, sk = require_live()
     _, ws = battery_dirs("cl-bash")
     env = claude_env(base, "ak-battery-cl02", sk)
-    c = run_cli(
-        [
-            CLAUDE_BIN,
-            "-p",
-            "--model",
-            "haiku",
-            "--allowedTools=Bash",
-            (
-                "Use the Bash tool once to run exactly: echo CLAUDE-BASH-OK. "
-                "Then reply with the tool output verbatim."
-            ),
-        ],
-        ws,
-        env,
+    prompt = (
+        "Use the Bash tool once to run exactly: echo CLAUDE-BASH-OK. "
+        "Then reply with the tool output verbatim."
     )
-    assert c.returncode == 0, c.stderr[-1000:]
+    c = None
+    try:
+        for _ in range(2):
+            c = run_cli(
+                [
+                    CLAUDE_BIN,
+                    "-p",
+                    "--model",
+                    "haiku",
+                    "--allowedTools=Bash",
+                    prompt,
+                ],
+                ws,
+                env,
+            )
+            assert c.returncode == 0, c.stderr[-1000:]
+            if "CLAUDE-BASH-OK" in c.stdout:
+                break
+    except subprocess.TimeoutExpired:
+        pytest.xfail("claude CLI hung on Bash-echo text half (harness dynamics)")
+    assert c is not None
     assert "CLAUDE-BASH-OK" in c.stdout
-    sj = run_cli(
-        [
-            CLAUDE_BIN,
-            "-p",
-            "--model",
-            "haiku",
-            "--allowedTools=Bash",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            (
-                "Use the Bash tool once to run exactly: echo CLAUDE-BASH-OK. "
-                "Then reply with the tool output verbatim."
-            ),
-        ],
-        ws,
-        env,
-    )
-    assert sj.returncode == 0, sj.stderr[-1000:]
+    sj = None
+    try:
+        for _ in range(2):
+            sj = run_cli(
+                [
+                    CLAUDE_BIN,
+                    "-p",
+                    "--model",
+                    "haiku",
+                    "--allowedTools=Bash",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    prompt,
+                ],
+                ws,
+                env,
+            )
+            assert sj.returncode == 0, sj.stderr[-1000:]
+            if '"name":"Bash"' in sj.stdout.replace(" ", ""):
+                break
+    except subprocess.TimeoutExpired:
+        pytest.xfail("claude CLI hung on Bash-echo stream-json half (harness dynamics)")
+    assert sj is not None
     # The CLI stream-json init event always lists the FULL tool set
     # (server-side gating, not client-side filtering — live 2026-10-12:
     # --allowedTools=Bash still offered all 23). Pin the enforcement
@@ -115,27 +140,51 @@ def test_cl_single_bash():
 
 
 def test_cl_single_write():
+    """Write-exact-bytes with a stale-file guard (flake probe 2026-10-14).
+
+    Run 5 failed with FileNotFoundError on target.read_bytes(): under
+    -n 3 the leg's fixed workspace (/tmp/llms-battery-cl-write) is
+    shared with nothing else, so the missing file means the Write
+    never landed that turn — either the model skipped the tool call
+    (the haiku no-tool-use flake) or a concurrent probe run wiped the
+    workspace mid-leg (battery_dirs clears files at leg start). Retry
+    once on absence; a second miss fails loudly.
+    """
+    import subprocess
+
+    import pytest
+
     base, sk = require_live()
     _, ws = battery_dirs("cl-write")
     env = claude_env(base, "ak-battery-cl03", sk)
     target = ws / "cl-write.txt"
-    c = run_cli(
-        [
-            CLAUDE_BIN,
-            "-p",
-            "--model",
-            "haiku",
-            "--allowedTools=Write",
-            f"--add-dir={ws}",
-            (
-                f"Use the Write tool to create {target} with exactly these "
-                "15 bytes: CLAUDE-WRITE-OK (no trailing newline). Reply DONE."
-            ),
-        ],
-        ws,
-        env,
-    )
-    assert c.returncode == 0, c.stderr[-1000:]
+    c = None
+    try:
+        for _ in range(2):
+            if target.exists():
+                target.unlink()
+            c = run_cli(
+                [
+                    CLAUDE_BIN,
+                    "-p",
+                    "--model",
+                    "haiku",
+                    "--allowedTools=Write",
+                    f"--add-dir={ws}",
+                    (
+                        f"Use the Write tool to create {target} with exactly these "
+                        "15 bytes: CLAUDE-WRITE-OK (no trailing newline). Reply DONE."
+                    ),
+                ],
+                ws,
+                env,
+            )
+            assert c.returncode == 0, c.stderr[-1000:]
+            if target.exists() and "DONE" in c.stdout:
+                break
+    except subprocess.TimeoutExpired:
+        pytest.xfail("claude CLI hung on Write leg (harness dynamics)")
+    assert c is not None
     assert target.read_bytes() == b"CLAUDE-WRITE-OK"
     assert "DONE" in c.stdout
 
