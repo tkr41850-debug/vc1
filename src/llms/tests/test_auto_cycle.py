@@ -444,3 +444,90 @@ def test_failed_bounce_keeps_retry(cycle_world, monkeypatch):
     assert rt.retry_until > time.monotonic()
     _wait_cycling(registry, False)
     assert rt.retry_until > time.monotonic()
+
+
+def test_lifespan_yields_before_boot_poll_completes(tmp_path, monkeypatch):
+    """Warp pool boot must not block the lifespan yield (healthz fast).
+
+    Live (other machine): ~30s dark /healthz with several enabled
+    warps — the lifespan awaited ensure_pool + forced refresh_health
+    per provider sequentially before yielding, and uvicorn serves
+    nothing until the yield. Boot now runs as a background task:
+    the yield (and /healthz) must land while the poll is still
+    in flight, with boot_epoch stamped + fetched_at moved on settle.
+    """
+    import asyncio as _asyncio
+    import time as _time
+
+    from llms.proxy.main import create_app
+    from llms.proxy.providers import Provider
+
+    import threading as _threading
+
+    release_poll = _threading.Event()
+    calls: list = []
+
+    async def _slow_pool(provider):
+        calls.append(("pool", provider.id))
+        return object()
+
+    async def _slow_refresh(provider, force=False):
+        calls.append(("refresh", provider.id))
+        # Block until the test body releases us. Pre-yield boot runs
+        # this INSIDE the lifespan: the TestClient below would never
+        # finish entering (its enter waits for the yield) and the
+        # wait_for below times out -> RED. Background boot yields
+        # first, so entry completes and the release fires -> GREEN.
+        # NOTE: must run on the lifespan loop. TestClient runs the
+        # portal loop in a worker thread; threading.Event (not
+        # asyncio.Event) bridges the test thread and the loop.
+        await _asyncio.wait_for(
+            _asyncio.to_thread(release_poll.wait), timeout=10
+        )
+
+        class _H:
+            fetched_at = _time.monotonic()
+
+        return _H()
+
+    settings = make_settings(data_dir=str(tmp_path))
+    app = create_app(settings)
+    registry = app.state.providers
+    registry.save(
+        [
+            Provider(
+                id="boot-warp",
+                label="B",
+                kind="warp",
+                models=[],
+                enabled=True,
+                exits=1,
+            )
+        ]
+    )
+    monkeypatch.setattr(registry, "ensure_pool", _slow_pool)
+    monkeypatch.setattr(registry, "refresh_health", _slow_refresh)
+
+    entered = False
+    # Timing pin: with background boot the lifespan yields while the
+    # poll is still blocked, so entry + /healthz land in ~1s. With
+    # pre-yield boot the entry blocks on the 10s poll timeout first
+    # (~10s+) -- the ceiling below fails LOUDLY on regression
+    # instead of hanging the suite.
+    import time as _wall
+
+    t0 = _wall.monotonic()
+    with TestClient(app) as tc:
+        entered = True
+        r = tc.get("/healthz")
+        assert r.status_code == 200
+        assert r.json() == {"status": "ok"}
+        release_poll.set()
+    entry_s = _wall.monotonic() - t0
+    assert entered
+    assert entry_s < 8, f"lifespan blocked on boot poll ({entry_s:.1f}s)"
+    # Settle ran to completion after release.
+    kinds = [k for k, _ in calls]
+    assert "refresh" in kinds
+    rt = registry.runtime("boot-warp")
+    assert rt.boot_epoch > 0

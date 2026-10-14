@@ -87,44 +87,71 @@ async def lifespan(app: FastAPI):
     # Stamp boot_epoch: without it a restarted enabled warp with down
     # tunnels reads `preparing` forever instead of aging into `unhealthy`
     # past the boot grace (derive short-circuits on boot_epoch <= 0).
-    # Force the first health poll here (not lazily on first traffic): the
-    # snapshot backing the admin UI starts at fetched_at 0, and the
-    # providers SSE is push-only (no timer refresh) — without this the
-    # row sits on boot state until first traffic or a manual Debug
-    # forced-refresh. Pool boot itself is best-effort; a failed poll
-    # surfaces as the health error, never a boot failure.
-    try:
-        import time as _time
+    # The pool boot + first health poll run in a BACKGROUND task, never
+    # pre-yield: uvicorn serves nothing (not even /healthz) until the
+    # lifespan yields, and each provider costs a forced `warp-cli
+    # status` wave against cold-booting daemons (~5s per provider —
+    # live: ~30s dark healthz with several enabled warps). Same task
+    # shape as the enable ack (_settle_enabled in routes/providers.py):
+    # boot_epoch stamps aging, forced refresh moves fetched_at and
+    # publishes, gen guard exits silently on supersede. Pool boot
+    # itself is best-effort; a failed poll surfaces as the health
+    # error, never a boot failure. The admin UI snapshot starts at
+    # fetched_at 0 and the providers SSE is push-only — the background
+    # task publishes on settle so the row converges without waiting
+    # for first traffic or a manual Debug forced-refresh.
+    import time as _time
 
-        for provider in app.state.providers.load():
-            if provider.kind == "warp" and provider.enabled:
-                rt = app.state.providers.runtime(provider.id)
-                try:
-                    await app.state.providers.ensure_pool(provider)
-                except Exception as exc:
-                    # Pool boot failure must not orphan the epoch: an
-                    # unstamped runtime reads `preparing` forever (the
-                    # derive grace arm short-circuits on boot_epoch <= 0
-                    # and fetched_at never moves), so a provider whose
-                    # pool failed to start sat on boot state until a
-                    # manual Debug forced-refresh. Stamp first, then let
-                    # the poll below record the failure as health error.
-                    rt.boot_epoch = _time.monotonic()
-                    logger.warning("provider %s pool boot failed: %r", provider.id, exc)
-                    try:
-                        await app.state.providers.refresh_health(provider, force=True)
-                    except Exception as exc2:
-                        logger.warning(
-                            "provider %s boot poll failed: %r", provider.id, exc2
-                        )
-                    continue
-                rt.boot_epoch = _time.monotonic()
-                try:
-                    await app.state.providers.refresh_health(provider, force=True)
-                except Exception as exc:
-                    logger.warning("provider %s boot poll failed: %r", provider.id, exc)
+    try:
+        _boot_providers = [
+            p for p in app.state.providers.load() if p.kind == "warp" and p.enabled
+        ]
     except Exception as exc:
         logger.warning("warp supervisor boot failed: %s", exc)
+        _boot_providers = []
+
+    async def _settle_boot() -> None:
+        for provider in _boot_providers:
+            rt = app.state.providers.runtime(provider.id)
+            try:
+                await app.state.providers.ensure_pool(provider)
+            except Exception as exc:
+                # Pool boot failure must not orphan the epoch: an
+                # unstamped runtime reads `preparing` forever (the
+                # derive grace arm short-circuits on boot_epoch <= 0
+                # and fetched_at never moves), so a provider whose
+                # pool failed to start sat on boot state until a
+                # manual Debug forced-refresh. Stamp first, then let
+                # the poll below record the failure as health error.
+                rt.boot_epoch = _time.monotonic()
+                logger.warning("provider %s pool boot failed: %r", provider.id, exc)
+                try:
+                    await app.state.providers.refresh_health(provider, force=True)
+                except Exception as exc2:
+                    logger.warning(
+                        "provider %s boot poll failed: %r", provider.id, exc2
+                    )
+                try:
+                    hub = getattr(app.state, "admin_hub", None)
+                    if hub is not None:
+                        await hub.publish("providers")
+                except Exception:
+                    pass
+                continue
+            rt.boot_epoch = _time.monotonic()
+            try:
+                await app.state.providers.refresh_health(provider, force=True)
+            except Exception as exc:
+                logger.warning("provider %s boot poll failed: %r", provider.id, exc)
+            try:
+                hub = getattr(app.state, "admin_hub", None)
+                if hub is not None:
+                    await hub.publish("providers")
+            except Exception:
+                pass
+
+    if _boot_providers:
+        asyncio.create_task(_settle_boot())
     async with httpx.AsyncClient(
         base_url=settings.zen_base_url,
         timeout=settings.request_timeout_s,
