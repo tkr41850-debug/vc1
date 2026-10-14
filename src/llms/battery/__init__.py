@@ -59,6 +59,15 @@ def battery_dirs(tag: str) -> tuple[Path, Path]:
     for f in ws.glob("*"):
         if f.is_file():
             f.unlink()
+    # /tmp is a small tmpfs here and codex/claude CLIs accumulate
+    # rollout transcripts under home/sessions (~100M per leg per run —
+    # live 2026-10-14: a 10x probe filled the 3.9G tmpfs to 100% and
+    # failed legs with ENOSPC). No leg reads another leg's sessions —
+    # every leg re-seeds its own history — so prune them at leg start.
+    # The gateway log (/tmp/llms.log) remains the primary trace.
+    import shutil
+
+    shutil.rmtree(home / "sessions", ignore_errors=True)
     return home, ws
 
 
