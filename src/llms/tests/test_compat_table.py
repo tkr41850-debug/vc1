@@ -1812,3 +1812,201 @@ def test_claude_native_rows_webfetch_skill_subagent():
             gname, _json.dumps(payload), owned, defs, "claude", claude
         )
         assert got is not None, gname
+
+
+def test_skill_subagent_steer_pin_codex_plain():
+    # GAP 1/2 steer-pin (2026-10-14): genuine `skill` / `subagent`
+    # emissions on the codex-plain family must NOT translate — there is
+    # no live proof of harness support for a Skill/Agent runner there
+    # (the TO_CLIENT table carries only the CLAUDE rows below), so both
+    # names fail open (None) and the generic redirect teaches them.
+    # A translation row is only justified with live proof of harness
+    # support; until then this test pins the steer behavior, and the
+    # table-shape assertion fails LOUDLY if anyone adds a row.
+    import json as _json
+
+    from llms.proxy.client_tools import (
+        nested_tool_defs,
+        owned_tool_names,
+        translate_genuine_call,
+    )
+    from llms.proxy.compat import (
+        CLAUDE,
+        CODEX_PLAIN,
+        TO_CLIENT,
+        translate_to_client,
+    )
+    from tests.test_client_tools import _spark_runner
+
+    # Table-shape pin: skill/subagent rows exist ONLY for the claude
+    # family (skill->Skill, subagent->Agent). No codex-plain row, no
+    # "*" all-family row — either would translate without live proof.
+    assert {
+        (genuine, fam) for genuine, fam, _client, _conv in TO_CLIENT
+        if genuine in ("skill", "subagent")
+    } == {("skill", CLAUDE), ("subagent", CLAUDE)}
+    assert [
+        (fam, client) for genuine, fam, client, _conv in TO_CLIENT
+        if genuine == "skill"
+    ] == [(CLAUDE, "skill")]
+    assert [
+        (fam, client) for genuine, fam, client, _conv in TO_CLIENT
+        if genuine == "subagent"
+    ] == [(CLAUDE, "agent")]
+
+    # Codex-plain leg (spark exec_command runner): table level and
+    # classifier-gate level both fail open.
+    runner = (_spark_runner(),)
+    owned = owned_tool_names(runner)
+    defs = {t.name.lower(): t for t in runner if t.name}
+    defs.update(nested_tool_defs(runner))
+    assert (
+        translate_to_client(
+            "skill", '{"id": "marker-skill"}', CODEX_PLAIN, owned, defs, runner
+        )
+        is None
+    )
+    assert (
+        translate_to_client(
+            "subagent",
+            '{"description": "d", "prompt": "p"}',
+            CODEX_PLAIN,
+            owned,
+            defs,
+            runner,
+        )
+        is None
+    )
+    assert (
+        translate_genuine_call(
+            "skill",
+            _json.dumps({"id": "marker-skill"}),
+            owned,
+            defs,
+            CODEX_PLAIN,
+            runner,
+        )
+        is None
+    )
+    assert (
+        translate_genuine_call(
+            "subagent",
+            _json.dumps({"description": "d", "prompt": "p"}),
+            owned,
+            defs,
+            CODEX_PLAIN,
+            runner,
+        )
+        is None
+    )
+
+    # Regression guard: the CLAUDE rows still translate (skill {id} ->
+    # Skill {skill}; subagent {description, prompt} -> Agent).
+    tools = _claude_tools()
+    c_owned = owned_tool_names(tools)
+    c_defs = {t.name.lower(): t for t in tools if t.name}
+    c_defs.update(nested_tool_defs(tools))
+    assert translate_to_client(
+        "skill", '{"id": "marker-skill"}', CLAUDE, c_owned, c_defs, tools
+    ) == ("Skill", '{"skill": "marker-skill"}')
+    assert translate_to_client(
+        "subagent",
+        '{"description": "d", "prompt": "p"}',
+        CLAUDE,
+        c_owned,
+        c_defs,
+        tools,
+    ) == ("Agent", '{"description": "d", "prompt": "p"}')
+
+
+def test_execute_on_plain_leg_steers_generic():
+    # GAP 3 audit: the `execute` compat row reads ("execute", "*", "exec")
+    # but the dispatcher gates it on the luna namespace's documented exec
+    # orchestrator (translate_to_client's `genuine == "execute"` branch
+    # requires a namespace exec description plus owned `exec`). On the
+    # codex-plain leg (plain function runner, no namespace) the row never
+    # fires — genuine `execute {"code": ...}` steers generic, never a
+    # translation. No live proof exists of a plain-leg execute shape, so
+    # no row ships without one (fail-open steer-pin). This test pins that
+    # contract: a future row addition must update it deliberately.
+    import json as _json
+
+    from llms.proxy.client_tools import (
+        dispatchable_names,
+        nested_tool_defs,
+        owned_tool_names,
+        steer_to_equivalent,
+    )
+    from llms.proxy.compat import TO_CLIENT, translate_to_client
+    from llms.proxy.pipeline import _classify_calls, _steer_output_for
+    from llms.proxy.zen_tools import GENUINE_TOOL_NAMES
+    from tests.test_client_tools import _luna_namespace, _spark_runner
+
+    # The row exists but is dispatcher-gated on the exec channel, not the
+    # family tag: exactly one execute row, family "*".
+    _exec_rows = [r for r in TO_CLIENT if r[0] == "execute"]
+    assert len(_exec_rows) == 1
+    assert _exec_rows[0][1] == "*"
+
+    args = _json.dumps({"code": "await tools.apply_patch('*** Begin Patch ***')"})
+    runner = (_spark_runner(),)
+    owned = owned_tool_names(runner)
+    defs = {t.name.lower(): t for t in runner if t.name}
+    defs.update(nested_tool_defs(runner))
+    # Table level: None on plain AND unknown (no namespace channel).
+    assert (
+        translate_to_client("execute", args, "codex-plain", owned, defs, runner)
+        is None
+    )
+    assert translate_to_client("execute", args, "unknown", owned, defs, runner) is None
+    # ...while luna (namespace channel) still rewrites verbatim.
+    ns = (_luna_namespace(),)
+    n_owned = owned_tool_names(ns)
+    n_defs = {t.name.lower(): t for t in ns if t.name}
+    n_defs.update(nested_tool_defs(ns))
+    assert translate_to_client("execute", args, "luna", n_owned, n_defs, ns) == (
+        "exec",
+        "await tools.apply_patch('*** Begin Patch ***')",
+    )
+    # Classifier level: steers, never passes through.
+    route = dispatchable_names(runner)
+    (call,) = [{"call_id": "c1", "name": "execute", "arguments": args}]
+    passed, steer = _classify_calls(
+        [dict(call)],
+        owned,
+        defs,
+        route,
+        runner,
+        GENUINE_TOOL_NAMES,
+        "codex-plain",
+        "t1",
+    )
+    assert passed == []
+    assert [c["name"] for c in steer] == ["execute"]
+    # Steer shape: no directed equivalent (no channel to teach), so the
+    # generic list names the runner — pin the exact text so a future
+    # channel-teaching change fails loudly here.
+    assert (
+        steer_to_equivalent("execute", args, owned, defs, GENUINE_TOOL_NAMES, runner)
+        is None
+    )
+    assert _steer_output_for(
+        {"name": "execute", "arguments": args},
+        args,
+        {"exec_command"},
+        owned,
+        defs,
+        runner,
+        GENUINE_TOOL_NAMES,
+    ) == (
+        "Tool 'execute' is not available in this session. Use one of "
+        "these tools instead: exec_command. If none fits, answer directly "
+        "without calling a tool."
+    )
+    # Blank code steers too (no payload to translate anywhere).
+    (blank,) = [{"call_id": "c2", "name": "execute", "arguments": "{}"}]
+    passed, steer = _classify_calls(
+        [blank], owned, defs, route, runner, GENUINE_TOOL_NAMES, "codex-plain", "t1"
+    )
+    assert passed == []
+    assert [c["name"] for c in steer] == ["execute"]

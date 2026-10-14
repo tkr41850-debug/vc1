@@ -1238,3 +1238,88 @@ def test_streaming_fold_close_fill_reaches_downstream_frames():
     # frame payload): downstream folds the id, not the raw {} the
     # model emitted.
     assert _json.dumps(filled) in raw, raw[-2000:]
+
+
+def test_streaming_fold_wait_multitarget_fill_reaches_downstream_frames():
+    """Mirrors test_streaming_fold_close_fill_reaches_downstream_frames for
+    the wait leg with two spawn outputs: the classifier fills the FULL
+    id list {"targets": [id1, id2]}, and the streaming replay swaps the
+    added + done frame payloads to the filled arguments.
+    """
+    import asyncio as _asyncio
+    import json as _json
+
+    import httpx as _httpx
+
+    from llms.proxy import forward as _forward
+    from llms.proxy.ir import ToolDef
+
+    waiter = ToolDef(
+        "wait_agent",
+        "Wait for agents.",
+        {
+            "type": "object",
+            "properties": {"targets": {"type": "array"}},
+            "required": ["targets"],
+        },
+    )
+
+    def _turn():
+        return (
+            "event: response.output_item.added\n"
+            'data: {"type":"response.output_item.added","output_index":1,'
+            '"item":{"id":"c9","type":"function_call",'
+            '"name":"wait_agent","arguments":""}}\n\n'
+            "event: response.function_call_arguments.done\n"
+            'data: {"type":"response.function_call_arguments.done",'
+            '"output_index":1,"item_id":"c9","name":"wait_agent",'
+            '"arguments":"{}"}\n\n'
+            "event: response.completed\n"
+            'data: {"type":"response.completed","response":{"id":"r9",'
+            '"status":"completed","usage":{"input_tokens":1,'
+            '"output_tokens":1}}}\n\n'
+        )
+
+    async def handler(request):
+        return _httpx.Response(
+            200,
+            content=_turn().encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def scenario():
+        client = _httpx.AsyncClient(transport=_httpx.MockTransport(handler))
+        req = client.build_request("POST", "http://x", json={"model": "m"})
+        upstream = await client.send(req, stream=True)
+        out = []
+        async for chunk in _forward.fold_and_steer_streaming(
+            upstream,
+            client=client,
+            url="http://x",
+            headers={},
+            outbound={
+                "model": "m",
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "call_id": "c1",
+                        "output": '{"agent_id": "agent-1"}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "c2",
+                        "output": '{"agent_id": "agent-2"}',
+                    },
+                ],
+            },
+            trace_id="t-wait-multifill",
+            client_names={"wait_agent"},
+            client_tools=(waiter,),
+            family="codex-plain",
+        ):
+            out.append(chunk)
+        return b"".join(out).decode()
+
+    raw = _asyncio.run(scenario())
+    filled = _json.dumps({"targets": ["agent-1", "agent-2"]})
+    assert _json.dumps(filled) in raw, raw[-2000:]

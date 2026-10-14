@@ -1209,3 +1209,126 @@ def test_nested_redirect_names_optional_payload_keys():
     assert text is not None
     assert "target" in text
     assert "message" in text, text
+
+
+def test_wait_agent_multi_target_fills_both_ids():
+    # GAP (a): two spawns in history — the fill arm must pass the FULL
+    # id list through as {"targets": [id1, id2]}, not just the first.
+    # _wait_targets_from_history returns all agent_ids in order and the
+    # wait_agent branch fills {_key: _ids} (only close_agent takes
+    # _ids[0]). Fails loudly if a future edit truncates to one id.
+    from llms.proxy.client_tools import (
+        dispatchable_names,
+        nested_tool_defs,
+        owned_tool_names,
+    )
+    from llms.proxy.pipeline import _classify_calls
+
+    tools = _multi_agent_ns()
+    owned = owned_tool_names(tools)
+    route = dispatchable_names(tools)
+    defs = dict(nested_tool_defs(tools))
+    history = [
+        {
+            "type": "function_call_output",
+            "call_id": "c1",
+            "output": '{"agent_id": "agent-1", "nickname": "Alpha"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "c2",
+            "output": '{"agent_id": "agent-2", "nickname": "Beta"}',
+        },
+    ]
+    passed, steered = _classify_calls(
+        [{"name": "wait_agent", "arguments": "{}", "call_id": "c3"}],
+        owned,
+        defs,
+        route,
+        tools,
+        (),
+        "codex-plain",
+        "t",
+        history=history,
+    )
+    assert steered == []
+    assert len(passed) == 1
+    assert passed[0]["arguments"] == '{"targets": ["agent-1", "agent-2"]}'
+    # Replay marker rides along so the streaming fold swaps frames.
+    assert passed[0].get("__translated_args__") == passed[0]["arguments"]
+
+
+def test_close_agent_fills_without_prior_wait_and_marks_replay():
+    # GAP (b), classifier leg: a lone spawn output in history (NO prior
+    # wait_agent output anywhere) plus bare close_agent {} must fill
+    # {"target": id} AND set __translated_args__ so the streaming
+    # replay swaps the added/done frame payloads (mirrors
+    # test_streaming_fold_close_fill_reaches_downstream_frames, which
+    # covers the replay leg verbatim and needs no duplicate).
+    from llms.proxy.client_tools import (
+        dispatchable_names,
+        nested_tool_defs,
+        owned_tool_names,
+    )
+    from llms.proxy.pipeline import _classify_calls
+
+    tools = _multi_agent_ns()
+    owned = owned_tool_names(tools)
+    route = dispatchable_names(tools)
+    defs = dict(nested_tool_defs(tools))
+    history = [
+        {
+            "type": "function_call_output",
+            "call_id": "c1",
+            "output": '{"agent_id": "abc-123", "nickname": "Euler"}',
+        },
+    ]
+    assert not any(
+        isinstance(i, dict) and i.get("name") == "wait_agent" for i in history
+    )
+    passed, steered = _classify_calls(
+        [{"name": "close_agent", "arguments": "{}", "call_id": "c2"}],
+        owned,
+        defs,
+        route,
+        tools,
+        (),
+        "codex-plain",
+        "t",
+        history=history,
+    )
+    assert steered == []
+    assert len(passed) == 1
+    assert passed[0]["arguments"] == '{"target": "abc-123"}'
+    assert passed[0].get("__translated_args__") == '{"target": "abc-123"}'
+
+
+def test_spawn_agent_empty_string_passthrough():
+    # GAP (c): spawn_agent declares parameters {} with NO required
+    # keys, so an empty-args emission (arguments '' — the wire form,
+    # not '{}') must pass through rather than steer. Covers both the
+    # bare and dotted emission forms.
+    from llms.proxy.client_tools import (
+        dispatchable_names,
+        nested_tool_defs,
+        owned_tool_names,
+    )
+    from llms.proxy.pipeline import _classify_calls
+
+    tools = _multi_agent_ns()
+    owned = owned_tool_names(tools)
+    route = dispatchable_names(tools)
+    defs = dict(nested_tool_defs(tools))
+    for name in ("spawn_agent", "multi_agent_v1.spawn_agent"):
+        passed, steered = _classify_calls(
+            [{"name": name, "arguments": ""}],
+            owned,
+            defs,
+            route,
+            tools,
+            (),
+            "codex-plain",
+            "t",
+        )
+        assert steered == [], name
+        assert [c["name"] for c in passed] == ["spawn_agent"], name
