@@ -983,27 +983,43 @@ def test_cx_single_subagent_send_input():
     base, sk = require_live()
     home, ws = battery_dirs("cx-subagent-send-input")
     env = codex_env(home, base, "ak-battery-cx32", sk, SPARK)
-    try:
-        c = run_cli(
-            [
-                CODEX_BIN,
-                "exec",
-                "--skip-git-repo-check",
-                "-s",
-                "workspace-write",
-                (
-                    "Use the spawn_agent tool to start a subagent, then "
-                    "use send_input with the agent's id as target and "
-                    "message asking it to reply with exactly "
-                    "SENDINPUT-OK, then use wait_agent to collect its "
-                    "result, then use close_agent to close that agent, "
-                    "then reply with its result verbatim."
-                ),
-            ],
-            ws,
-            env,
-        )
-    except subprocess.TimeoutExpired:
-        pytest.xfail("codex model hung on send_input lifecycle (harness dynamics)")
+    prompt = (
+        "Use the spawn_agent tool to start a subagent, then "
+        "use send_input with the agent's id as target and "
+        "message asking it to reply with exactly "
+        "SENDINPUT-OK, then use wait_agent to collect its "
+        "result, then use close_agent to close that agent, "
+        "then reply with its result verbatim."
+    )
+    # Live 2026-10-13/14: the model sometimes emits
+    # `spawn_agent` with a `reasoning_effort` key the harness
+    # rejects for this custom-provider model (its
+    # supported_reasoning_levels list is EMPTY — omission is
+    # the only working shape, and it is already omitted from
+    # config.toml deliberately), then degenerates into
+    # empty-arg retries and the leg dies before send_input.
+    # A model-side flake, not a proxy steer — retry once on
+    # marker absence like the claude allow leg.
+    c = None
+    for _ in range(2):
+        try:
+            c = run_cli(
+                [
+                    CODEX_BIN,
+                    "exec",
+                    "--skip-git-repo-check",
+                    "-s",
+                    "workspace-write",
+                    prompt,
+                ],
+                ws,
+                env,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.xfail("codex model hung on send_input lifecycle (harness dynamics)")
+        assert c is not None
+        if c.returncode == 0 and "SENDINPUT-OK" in c.stdout:
+            break
+    assert c is not None
     assert c.returncode == 0, c.stderr[-1000:]
     assert "SENDINPUT-OK" in c.stdout
