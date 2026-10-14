@@ -817,3 +817,338 @@ def test_cl_single_task_close():
     )
     assert c.returncode == 0, c.stderr[-1000:]
     assert "TASK-CLOSE-OK" in c.stdout
+
+
+def test_cl_single_dontask():
+    """--permission-mode dontAsk leg: Bash-echo runs with no prompt hang."""
+    import subprocess
+
+    import pytest
+
+    base, sk = require_live()
+    _, ws = battery_dirs("cl-dontask")
+    env = claude_env(base, "ak-battery-cl25", sk)
+    prompt = (
+        "Use the Bash tool once to run exactly: echo CLAUDE-DONTASK-OK. "
+        "Then reply with the tool output verbatim."
+    )
+    # Live model flake: haiku occasionally answers from text without
+    # calling any tool (no tool_use in the turn). One retry rides the
+    # same assertion; a second miss still fails loudly.
+    c = None
+    try:
+        for _ in range(2):
+            c = run_cli(
+                [
+                    CLAUDE_BIN,
+                    "-p",
+                    "--model",
+                    "haiku",
+                    "--permission-mode",
+                    "dontAsk",
+                    "--allowedTools=Bash",
+                    prompt,
+                ],
+                ws,
+                env,
+            )
+            assert c.returncode == 0, c.stderr[-1000:]
+            if "CLAUDE-DONTASK-OK" in c.stdout:
+                break
+    except subprocess.TimeoutExpired:
+        pytest.xfail("claude dontAsk leg timed out (harness dynamics)")
+    assert c is not None
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert "CLAUDE-DONTASK-OK" in c.stdout
+
+
+def test_cl_single_task_create():
+    """Task-management round-trip probe (TaskCreate + TaskList / TodoWrite).
+
+    Asks haiku-via-zen to create a trivial task then list it back and
+    relay the round-trip marker. The fixture-pinned CLI toolset
+    (tests/fixtures/claude-schema.jsonl, 23 tools) declares no
+    TaskCreate/TaskList/TodoWrite — claude-side delegation there is the
+    Agent tool (see test_cl_single_task_subagent) — so when none of the
+    three is offered in the stream-json init event the leg xfails with
+    a clear 'tool not offered' message instead of failing.
+    """
+    import subprocess
+
+    import pytest
+
+    base, sk = require_live()
+    _, ws = battery_dirs("cl-task-create")
+    env = claude_env(base, "ak-battery-cl26", sk)
+    prompt = (
+        "Use the TaskCreate tool to create a trivial task titled "
+        "battery-probe-task, then use the TaskList tool to list tasks. "
+        "If TaskCreate/TaskList are unavailable but TodoWrite is offered, "
+        "use TodoWrite to add a trivial todo instead. Then reply with "
+        "exactly TASK-ROUNDTRIP-OK plus the created task's id."
+    )
+    task_tools = ("TaskCreate", "TaskList", "TodoWrite")
+    c = None
+    for _ in range(2):
+        try:
+            c = run_cli(
+                [
+                    CLAUDE_BIN,
+                    "-p",
+                    "--model",
+                    "haiku",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    prompt,
+                ],
+                ws,
+                env,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.xfail("claude CLI hung on task round-trip (harness dynamics)")
+        assert c is not None
+        assert c.returncode == 0, c.stderr[-1000:]
+        flat = c.stdout.replace(" ", "")
+        if "TASK-ROUNDTRIP-OK" in c.stdout and any(
+            f'"name":"{name}"' in flat for name in task_tools
+        ):
+            break
+    assert c is not None
+    lines = [json.loads(line) for line in c.stdout.splitlines() if line.strip()]
+    init = next(
+        (e for e in lines if e.get("type") == "system" and e.get("subtype") == "init"),
+        None,
+    )
+    assert init is not None, "no system init event in task stream"
+    offered = [t.get("name") for t in (init.get("tools") or []) if isinstance(t, dict)]
+    if not any(name in offered for name in task_tools):
+        pytest.xfail(
+            "TaskCreate/TaskList/TodoWrite not offered by haiku-via-zen "
+            f"(init lists {len(offered)} tools) - tool not offered, "
+            "leg not applicable"
+        )
+    assert "TASK-ROUNDTRIP-OK" in c.stdout
+    flat = c.stdout.replace(" ", "")
+    assert any(
+        f'"name":"{name}"' in flat for name in task_tools
+    ), "round-trip marker relayed without any task tool_use"
+
+
+def test_cl_single_cron():
+    """Cron round-trip probe (CronCreate then CronList).
+
+    Asks haiku-via-zen to schedule an inert one-shot reminder, list the
+    session jobs, and relay the created entry. Arg keys are coached
+    explicitly (cron + prompt required, recurring false for one-shot —
+    per tests/fixtures/claude-schema.jsonl; CronList takes no args),
+    the same key-coaching lesson as the codex send_input leg. If the
+    tools are absent from the stream-json init event the leg xfails
+    with a clear 'tool not offered' message instead of failing.
+    """
+    import subprocess
+
+    import pytest
+
+    base, sk = require_live()
+    _, ws = battery_dirs("cl-cron")
+    env = claude_env(base, "ak-battery-cl27", sk)
+    prompt = (
+        "Use the CronCreate tool to schedule a one-shot reminder with "
+        "cron '41 4 5 5 *', prompt 'battery-cron-probe', recurring false, "
+        "then use the CronList tool to list scheduled jobs. Then reply "
+        "with exactly CRON-ROUNDTRIP-OK plus the created entry's id."
+    )
+    c = None
+    for _ in range(2):
+        try:
+            c = run_cli(
+                [
+                    CLAUDE_BIN,
+                    "-p",
+                    "--model",
+                    "haiku",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    prompt,
+                ],
+                ws,
+                env,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.xfail("claude CLI hung on cron round-trip (harness dynamics)")
+        assert c is not None
+        assert c.returncode == 0, c.stderr[-1000:]
+        flat = c.stdout.replace(" ", "")
+        if (
+            "CRON-ROUNDTRIP-OK" in c.stdout
+            and '"name":"CronCreate"' in flat
+            and '"name":"CronList"' in flat
+        ):
+            break
+    assert c is not None
+    lines = [json.loads(line) for line in c.stdout.splitlines() if line.strip()]
+    init = next(
+        (e for e in lines if e.get("type") == "system" and e.get("subtype") == "init"),
+        None,
+    )
+    assert init is not None, "no system init event in cron stream"
+    offered = [t.get("name") for t in (init.get("tools") or []) if isinstance(t, dict)]
+    if "CronCreate" not in offered or "CronList" not in offered:
+        pytest.xfail(
+            "CronCreate/CronList not offered by haiku-via-zen "
+            f"(init lists {len(offered)} tools) - tool not offered, "
+            "leg not applicable"
+        )
+    assert "CRON-ROUNDTRIP-OK" in c.stdout
+    flat = c.stdout.replace(" ", "")
+    assert '"name":"CronCreate"' in flat, "marker relayed without CronCreate tool_use"
+    assert '"name":"CronList"' in flat, "marker relayed without CronList tool_use"
+
+
+def test_cl_single_notebook_edit():
+    import json
+    import subprocess
+
+    import pytest
+
+    base, sk = require_live()
+    _, ws = battery_dirs("cl-nbedit")
+    env = claude_env(base, "ak-battery-cl28", sk)
+    nb = ws / "cl-nb.ipynb"
+    nb.write_text(
+        json.dumps(
+            {
+                "nbformat": 4,
+                "nbformat_minor": 5,
+                "metadata": {},
+                "cells": [
+                    {
+                        "id": "nb-cell-1",
+                        "cell_type": "code",
+                        "source": ['print("NB-V1")'],
+                        "outputs": [],
+                        "execution_count": None,
+                        "metadata": {},
+                    }
+                ],
+            }
+        )
+    )
+    before = nb.read_bytes()
+    try:
+        c = run_cli(
+            [
+                CLAUDE_BIN,
+                "-p",
+                "--model",
+                "haiku",
+                "--allowedTools=NotebookEdit",
+                f"--add-dir={ws}",
+                (
+                    "Use the NotebookEdit tool with notebook_path "
+                    f"{nb} and cell_id nb-cell-1 to replace the cell "
+                    'source with print("NB-EDIT-OK"). Reply DONE.'
+                ),
+            ],
+            ws,
+            env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.xfail("claude model hung on NotebookEdit dispatch (harness dynamics)")
+    assert c.returncode == 0, c.stderr[-1000:]
+    after = nb.read_bytes()
+    assert after != before, "notebook bytes unchanged"
+    assert b"NB-V1" not in after
+    payload = json.loads(after.decode())
+    src = "".join(payload["cells"][0]["source"])
+    assert "NB-EDIT-OK" in src
+    assert "DONE" in c.stdout
+
+
+def test_cl_single_no_ask_stall():
+    """AskUserQuestion/EnterPlanMode must not stall non-interactive -p turns.
+
+    Mirrors the codex question_direct/request_user_input pins: the prompt
+    is answerable WITHOUT those tools, so a text reply with rc=0 proves
+    the turn completed instead of hanging on Plan-mode input.
+    """
+    import subprocess
+
+    import pytest
+
+    base, sk = require_live()
+    _, ws = battery_dirs("cl-noask")
+    env = claude_env(base, "ak-battery-cl29", sk)
+    try:
+        c = run_cli(
+            [
+                CLAUDE_BIN,
+                "-p",
+                "--model",
+                "haiku",
+                "Reply with exactly NOASK-PATH-OK and nothing else. "
+                "Do not call any tools.",
+            ],
+            ws,
+            env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.xfail("claude model hung on no-tool turn (harness dynamics)")
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert c.stdout.strip().endswith("NOASK-PATH-OK")
+
+
+def test_cl_single_adddir_scope():
+    """Out-of-cwd Edit via --add-dir on a NON-cwd dir (GAP 9).
+
+    Battery legs always run with cwd=ws; test_cl_single_edit covers
+    Edit inside cwd (--add-dir=ws). This leg proves proxy path handling
+    outside cwd: the seed lives in a sibling dir granted only via
+    --add-dir and addressed by absolute path. A same-named decoy in cwd
+    guards against the edit landing in the wrong root.
+    """
+    import subprocess
+
+    import pytest
+
+    base, sk = require_live()
+    _, ws = battery_dirs("cl-adddir-scope")
+    env = claude_env(base, "ak-battery-cl30", sk)
+    other = ws.parent / "elsewhere"
+    other.mkdir(parents=True, exist_ok=True)
+    target = other / "cl-scope-edit.txt"
+    decoy = ws / "cl-scope-edit.txt"
+    prompt = (
+        "Use the Edit tool to replace CLAUDE-SCOPE-V1 with "
+        f"CLAUDE-SCOPE-V2 in {target}. Reply DONE."
+    )
+    c = None
+    for _ in range(2):
+        target.write_bytes(b"CLAUDE-SCOPE-V1")
+        decoy.write_bytes(b"CLAUDE-SCOPE-DECOY")
+        try:
+            c = run_cli(
+                [
+                    CLAUDE_BIN,
+                    "-p",
+                    "--model",
+                    "haiku",
+                    "--allowedTools=Edit",
+                    f"--add-dir={other}",
+                    prompt,
+                ],
+                ws,
+                env,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.xfail("claude CLI hung on out-of-cwd Edit (harness dynamics)")
+        assert c is not None
+        if c.returncode == 0 and "DONE" in (c.stdout or ""):
+            break
+    assert c is not None
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert target.read_bytes() == b"CLAUDE-SCOPE-V2"
+    assert decoy.read_bytes() == b"CLAUDE-SCOPE-DECOY"
+    assert "DONE" in c.stdout

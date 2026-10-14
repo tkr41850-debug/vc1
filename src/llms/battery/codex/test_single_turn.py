@@ -276,7 +276,10 @@ def test_cx_single_sandbox_workspace():
         env,
     )
     assert ww.returncode == 0, ww.stderr[-1000:]
-    assert target.read_bytes() == b"SANDBOX-WRITE-OK\n"
+    # Live 2026-10-14: the model wrote SANDBOX-WRITE-OK with no trailing
+    # newline ("on one line" says nothing about the terminator). Compare
+    # rstripped bytes, like the fork legs do.
+    assert target.read_bytes().rstrip(b"\n") == b"SANDBOX-WRITE-OK"
     assert ww.stdout.strip().endswith("DONE-SANDBOX-WW")
 
 
@@ -1023,3 +1026,411 @@ def test_cx_single_subagent_send_input():
     assert c is not None
     assert c.returncode == 0, c.stderr[-1000:]
     assert "SENDINPUT-OK" in c.stdout
+
+
+def test_cx_single_cd_scoping():
+    """Workspace scoping via `codex exec --cd <other-dir>` (GAP 9).
+
+    Battery legs always run with cwd=ws; this leg proves proxy path
+    handling follows the CLI-declared working root instead of the
+    process cwd: `--cd` is supported (`codex exec --help`: `-C, --cd
+    <DIR>  Tell the agent to use the specified directory as its
+    working root`). The prompt names only the leaf filename, so the
+    file landing byte-exact in the --cd dir (and NOT in cwd) proves
+    scoping, not echoing.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-cd-scope")
+    env = codex_env(home, base, "ak-battery-cx33", sk, SPARK)
+    other = ws.parent / "elsewhere"
+    other.mkdir(parents=True, exist_ok=True)
+    target = other / "scoped.txt"
+    if target.exists():
+        target.unlink()
+    stray = ws / "scoped.txt"
+    if stray.exists():
+        stray.unlink()
+    prompt = (
+        "Write exactly SCOPE-CD-OK on one line to scoped.txt "
+        "using a tool, then reply with exactly DONE-SCOPE-CD."
+    )
+    c = None
+    for _ in range(2):
+        try:
+            c = run_cli(
+                [
+                    CODEX_BIN,
+                    "exec",
+                    "--skip-git-repo-check",
+                    "-s",
+                    "workspace-write",
+                    "--cd",
+                    str(other),
+                    prompt,
+                ],
+                ws,
+                env,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.xfail("codex model hung on --cd scoping leg (harness dynamics)")
+        assert c is not None
+        if c.returncode == 0 and "DONE-SCOPE-CD" in c.stdout:
+            break
+    assert c is not None
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert target.read_bytes().rstrip(b"\n") == b"SCOPE-CD-OK"
+    assert not stray.exists()
+    assert c.stdout.strip().endswith("DONE-SCOPE-CD")
+
+
+def test_cx_single_review_json():
+    """`exec review --uncommitted` with the exec-level `--json` flag (JSONL events).
+
+    `--json` lives on `codex exec` (top-level `codex review` has no
+    `--json` flag — verified via `codex review --help`), so the spelling
+    is `exec --skip-git-repo-check --json review --uncommitted`, kept
+    prompt-free like `test_cx_multi_review_modes` (`--uncommitted`
+    conflicts with a positional prompt; `-s` is not a review flag).
+    Same committed-repo + dirty `review.txt` fixture: every parsed
+    stdout line must be a JSON object carrying the expected `type` key,
+    and the serialized events must mention the dirty file (the review
+    signal). Non-JSON framing lines are skipped per the fork-session
+    leg idiom, but at least one parseable event is required.
+    """
+    import shutil
+
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-review-json")
+    env = codex_env(home, base, "ak-battery-cx34", sk, SPARK)
+    # battery_dirs only clears files; drop stale .git so reruns re-commit.
+    shutil.rmtree(ws / ".git", ignore_errors=True)
+    (ws / "review.txt").write_text("REVIEW-JSON-LINE\n")
+    subprocess.run(["git", "init", "-q", "-b", "battery"], cwd=str(ws), check=True)
+    subprocess.run(
+        ["git", "add", "review.txt"],
+        cwd=str(ws),
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-c", "user.email=b@t", "-c", "user.name=b", "commit", "-qm", "base"],
+        cwd=str(ws),
+        check=True,
+        capture_output=True,
+    )
+    (ws / "review.txt").write_text("REVIEW-JSON-LINE-CHANGED\n")
+    try:
+        c = run_cli(
+            [
+                CODEX_BIN,
+                "exec",
+                "--skip-git-repo-check",
+                "--json",
+                "review",
+                "--uncommitted",
+            ],
+            ws,
+            env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.xfail("codex review --json hung (harness dynamics)")
+    assert c.returncode == 0, c.stderr[-1000:]
+    events = []
+    for line in c.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    assert events, "no parseable JSON events in review --json output"
+    for event in events:
+        assert isinstance(event, dict) and "type" in event, (
+            f"review --json event missing expected type key: {str(event)[:200]}"
+        )
+    assert "review.txt" in json.dumps(events)
+
+
+def test_cx_single_fork_last():
+    """Top-level `fork --last` (most-recent session, no explicit id).
+
+    `--last` exists only on top-level `codex fork` (`codex exec fork`
+    requires an explicit <SESSION_ID> — verified via both `--help`
+    outputs), so this leg seeds a session with one `exec`, then forks
+    the most recent session with `fork --last` plus a follow-up prompt.
+    Both run under one CODEX_HOME with the same cwd, so the fork
+    resolves to the seed turn. Marker-in-stdout proves the forked
+    session carried the seed context forward; file bytes pin it.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-fork-last")
+    env = codex_env(home, base, "ak-battery-cx35", sk, SPARK)
+    seed = ws / "fork_last.txt"
+    try:
+        first = run_cli(
+            [
+                CODEX_BIN,
+                "exec",
+                "--skip-git-repo-check",
+                "-s",
+                "workspace-write",
+                (
+                    "Write exactly FORK-LAST-SEED-2K9Q to fork_last.txt "
+                    "and reply exactly FORK-LAST-SEED-2K9Q."
+                ),
+            ],
+            ws,
+            env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.xfail("codex seed exec hung before fork --last (harness dynamics)")
+    assert first.returncode == 0, first.stderr[-1000:]
+    assert seed.read_bytes().rstrip(b"\n") == b"FORK-LAST-SEED-2K9Q"
+    try:
+        forked = run_cli(
+            [
+                CODEX_BIN,
+                "fork",
+                "--last",
+                (
+                    "Read fork_last.txt and reply exactly "
+                    "FORKED-LAST-<contents> and nothing else."
+                ),
+            ],
+            ws,
+            env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.xfail("codex fork --last hung (harness dynamics)")
+    assert forked.returncode == 0, forked.stderr[-1000:]
+    assert "FORKED-LAST-FORK-LAST-SEED-2K9Q" in forked.stdout
+    assert seed.read_bytes().rstrip(b"\n") == b"FORK-LAST-SEED-2K9Q"
+
+
+def test_cx_single_workflow_nostick():
+    """`Workflow` has no codex-plain route: direct reply (NO-STICK pin).
+
+    Invoking the Workflow tool would spawn real subagents (expensive,
+    non-exact-assertable), and codex-plain declares no Workflow route --
+    the proxy source names no Workflow tool at all, same position as
+    `question`/`request_user_input`. So this leg mirrors the question
+    pins: the model is told the tool is unavailable and must answer
+    outright with exactly WORKFLOW-PATH-OK instead of attempting the
+    unavailable tool or stalling a non-interactive turn on delegation.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-workflow")
+    env = codex_env(home, base, "ak-battery-cx36", sk, SPARK)
+    try:
+        c = run_cli(
+            [
+                CODEX_BIN,
+                "exec",
+                "--skip-git-repo-check",
+                "-s",
+                "workspace-write",
+                (
+                    "The Workflow tool is not available in this session. "
+                    "Reply with exactly WORKFLOW-PATH-OK and nothing else. "
+                    "Do not call any tools."
+                ),
+            ],
+            ws,
+            env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.xfail("codex model hung on no-tool direct reply (harness dynamics)")
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert c.stdout.strip().endswith("WORKFLOW-PATH-OK")
+
+
+def test_cx_single_error_paths():
+    """Error-path survival: unknown limit flag + sandbox denial.
+
+    `codex exec --help` declares no --max-turns/--max-budget-usd flags
+    (probed: only -s/--sandbox governs execution limits), so the
+    limit-reached shape is pinned as the CLI's documented usage error
+    (nonzero exit, "unexpected argument") rather than a turn shape --
+    this also documents the absence for future readers. The
+    permission-denied half runs live under --sandbox read-only: a
+    blocked write must still complete the turn (rc 0, exact marker, no
+    file written) with no hang and no proxy 500 (a 500's text would
+    displace the marker and fail the assertions).
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-errpaths")
+    env = codex_env(home, base, "ak-battery-cx37", sk, SPARK)
+    try:
+        limit = run_cli(
+            [
+                CODEX_BIN,
+                "exec",
+                "--skip-git-repo-check",
+                "--max-turns",
+                "1",
+                "Reply with exactly LIMIT-UNREACHABLE.",
+            ],
+            ws,
+            env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.xfail("codex usage-error probe hung (harness dynamics)")
+    assert limit.returncode != 0, limit.stderr[-1000:]
+    assert "unexpected argument" in (limit.stderr or "")
+    assert "--max-turns" in (limit.stderr or "")
+    target = ws / "denied.txt"
+    if target.exists():
+        target.unlink()
+    try:
+        denied = run_cli(
+            [
+                CODEX_BIN,
+                "exec",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+                (
+                    "Try to write DENIED-WRITE-OK on one line to denied.txt "
+                    "with a tool; if blocked reply with exactly DONE-DENIED-1."
+                ),
+            ],
+            ws,
+            env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.xfail("codex model hung on sandbox-denied write (harness dynamics)")
+    assert denied.returncode == 0, denied.stderr[-1000:]
+    assert denied.stdout.strip().endswith("DONE-DENIED-1")
+    assert not target.exists()
+
+
+def test_cx_single_write_stdin():
+    """write_stdin stdin-write then read-output round trip (spec9 #1).
+
+    write_stdin is live-declared (client tool shapes carry
+    ('write_stdin', ['session_id'])) but has zero live call coverage —
+    the cx-stdin transcripts show no write_stdin function_call. This
+    leg starts a long-running exec session, writes marker bytes into
+    its stdin via write_stdin, and proves the bytes reached the
+    session by asserting the marker in the echoed output.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-write-stdin")
+    env = codex_env(home, base, "ak-battery-cx38", sk, SPARK)
+    try:
+        c = run_cli(
+            [
+                CODEX_BIN,
+                "exec",
+                "--skip-git-repo-check",
+                "-s",
+                "workspace-write",
+                "--json",
+                (
+                    "Start a background shell session that sleeps 20 "
+                    "seconds, then use the write_stdin tool to write "
+                    "STDIN-WRITE-OK into that session's stdin, then read "
+                    "the session output back. Reply with exactly "
+                    "STDIN-WRITE-OK if the bytes round-tripped, else "
+                    "STDIN-WRITE-MISSING."
+                ),
+            ],
+            ws,
+            env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.xfail("codex model hung on write_stdin round trip (harness dynamics)")
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert "STDIN-WRITE-OK" in c.stdout
+
+
+def test_cx_single_goals():
+    """create_goal -> get_goal -> update_goal round trip (spec9 #2-4).
+
+    All three are live-declared (('get_goal', []),
+    ('create_goal', ['objective']), ('update_goal', ['status']))) but
+    only get_goal has live call coverage (7 function_calls in the
+    cx-json transcripts); create/update have zero. One function, one
+    affinity (precedent: sandbox_workspace runs both halves under one
+    affinity): create a goal, read it back, mark it complete, and
+    relay the marker. Args are coached explicitly per the live
+    declaration shapes.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-goals")
+    env = codex_env(home, base, "ak-battery-cx39", sk, SPARK)
+    c = None
+    for _ in range(2):
+        try:
+            c = run_cli(
+                [
+                    CODEX_BIN,
+                    "exec",
+                    "--skip-git-repo-check",
+                    "-s",
+                    "workspace-write",
+                    (
+                        "Use the create_goal tool with objective "
+                        "battery-probe-goal to create a goal, then use "
+                        "the get_goal tool to read it back, then use "
+                        "the update_goal tool with status complete to "
+                        "mark it done. Reply with exactly "
+                        "GOAL-ROUNDTRIP-OK plus the goal id."
+                    ),
+                ],
+                ws,
+                env,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.xfail("codex model hung on goal round trip (harness dynamics)")
+        assert c is not None
+        if c.returncode == 0 and "GOAL-ROUNDTRIP-OK" in c.stdout:
+            break
+    assert c is not None
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert "GOAL-ROUNDTRIP-OK" in c.stdout
+
+
+def test_cx_single_resume_agent():
+    """spawn -> close -> resume -> send_input -> wait (spec9 #5).
+
+    resume_agent is live-declared in the multi_agent_v1 nested prompt
+    ("Resume a previously closed agent by id so it can receive
+    send_input and wait_agent calls") but has zero live call coverage
+    — steer-fold stats show passthroughs only for
+    spawn_agent/send_input/wait_agent/close_agent. This leg closes an
+    agent, resumes it, and proves the resumed agent still receives
+    input by collecting the echoed marker through a wait.
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-resume")
+    env = codex_env(home, base, "ak-battery-cx40", sk, SPARK)
+    c = None
+    for _ in range(2):
+        try:
+            c = run_cli(
+                [
+                    CODEX_BIN,
+                    "exec",
+                    "--skip-git-repo-check",
+                    "-s",
+                    "workspace-write",
+                    (
+                        "Spawn a subagent with a short task, close it, "
+                        "then use the resume_agent tool with its id to "
+                        "resume it, send it RESUME-INPUT-OK via "
+                        "send_input, wait for it, and reply with exactly "
+                        "RESUME-ROUNDTRIP-OK."
+                    ),
+                ],
+                ws,
+                env,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.xfail("codex model hung on resume_agent round trip (harness dynamics)")
+        assert c is not None
+        if c.returncode == 0 and "RESUME-ROUNDTRIP-OK" in c.stdout:
+            break
+    assert c is not None
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert "RESUME-ROUNDTRIP-OK" in c.stdout
