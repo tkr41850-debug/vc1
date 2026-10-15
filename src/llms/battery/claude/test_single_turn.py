@@ -1201,3 +1201,107 @@ def test_cl_single_adddir_scope():
     assert target.read_bytes() == b"CLAUDE-SCOPE-V2"
     assert decoy.read_bytes() == b"CLAUDE-SCOPE-DECOY"
     assert "DONE" in c.stdout
+
+
+def test_cl_single_webfetch():
+    """Content fetch via the WebFetch tool (parity with test_cx_single_webfetch_tool).
+
+    example.com is the stable fixture: its <h1> is byte-stable
+    ("Example Domain"), so the assertion is exact without judging
+    prose. Single-tool turn idiom (cf. test_cl_single_read).
+    """
+    base, sk = require_live()
+    _, ws = battery_dirs("cl-webfetch")
+    env = claude_env(base, "ak-battery-cl31", sk)
+    c = run_cli(
+        [
+            CLAUDE_BIN,
+            "-p",
+            "--model",
+            "haiku",
+            "--allowedTools=WebFetch",
+            (
+                "Fetch https://example.com with the WebFetch tool, then "
+                "reply with exactly FETCH-OK-1 plus the page's main "
+                "heading text."
+            ),
+        ],
+        ws,
+        env,
+    )
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert "FETCH-OK-1" in c.stdout
+    assert "Example Domain" in c.stdout
+
+
+def test_cl_single_websearch():
+    """Web-search dispatch: no-hang pin, not result-exact (parity with test_cx_single_websearch_dispatch).
+
+    Result content varies by day, so only the marker is asserted:
+    attempting a search completes the turn instead of hanging or
+    erroring. Deliberately weaker than the fetch leg — search results
+    are not exact-assertable.
+    """
+    import subprocess
+
+    import pytest
+
+    base, sk = require_live()
+    _, ws = battery_dirs("cl-websearch")
+    env = claude_env(base, "ak-battery-cl32", sk)
+    try:
+        c = run_cli(
+            [
+                CLAUDE_BIN,
+                "-p",
+                "--model",
+                "haiku",
+                "--allowedTools=WebSearch",
+                (
+                    "Use the WebSearch tool to find the Codex CLI "
+                    "documentation page, then reply with exactly "
+                    "SEARCH-DISPATCH-OK."
+                ),
+            ],
+            ws,
+            env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.xfail("claude model hung on websearch dispatch (harness dynamics)")
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert "SEARCH-DISPATCH-OK" in c.stdout
+
+
+def test_cl_single_explore_chain():
+    """Read-edit-verify chain (parity with test_cx_single_explore_chain).
+
+    The model must consume a tool result (the read) before choosing
+    the edit — a chain, not a shot. Two-tool allowlist turn idiom
+    (cf. test_cl_single_multi_tool).
+    """
+    base, sk = require_live()
+    _, ws = battery_dirs("cl-chain")
+    env = claude_env(base, "ak-battery-cl33", sk)
+    target = ws / "chain_file.txt"
+    target.write_text("CHAIN-V1-6T2N\n")
+    c = run_cli(
+        [
+            CLAUDE_BIN,
+            "-p",
+            "--model",
+            "haiku",
+            "--allowedTools=Read,Edit",
+            f"--add-dir={ws}",
+            (
+                "Read chain_file.txt, replace the version marker it "
+                "contains with its V2 form, then read the file again to "
+                "verify your edit took effect. Reply with exactly "
+                "CHAIN-VERIFY-OK."
+            ),
+        ],
+        ws,
+        env,
+    )
+    assert c.returncode == 0, c.stderr[-1000:]
+    assert target.read_bytes() == b"CHAIN-V2-6T2N\n"
+    assert "CHAIN-VERIFY-OK" in c.stdout

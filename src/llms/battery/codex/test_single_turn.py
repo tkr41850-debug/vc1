@@ -1460,3 +1460,65 @@ def test_cx_single_resume_agent():
             "resume passthrough (harness dynamics)"
         )
     assert "RESUME-ROUNDTRIP-OK" in c.stdout
+
+
+def test_cx_single_json_envelope():
+    """Default + --json output envelope (parity with test_cl_single_output_format).
+
+    Both spellings must carry the marker; the --json half must yield
+    at least one parseable event, each a dict carrying "type"
+    (mirrors the review_json assertion loop and the fork-session
+    skip-unparseable idiom).
+    """
+    base, sk = require_live()
+    home, ws = battery_dirs("cx-json-env")
+    env = codex_env(home, base, "ak-battery-cx41", sk, SPARK)
+    try:
+        text = run_cli(
+            [
+                CODEX_BIN,
+                "exec",
+                "--skip-git-repo-check",
+                "-s",
+                "workspace-write",
+                "Reply with exactly FMT-ENV-OK.",
+            ],
+            ws,
+            env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.xfail("codex model hung on plain envelope leg (harness dynamics)")
+    assert text.returncode == 0, text.stderr[-1000:]
+    assert "FMT-ENV-OK" in text.stdout
+    try:
+        js = run_cli(
+            [
+                CODEX_BIN,
+                "exec",
+                "--skip-git-repo-check",
+                "-s",
+                "workspace-write",
+                "--json",
+                "Reply with exactly FMT-ENV-OK.",
+            ],
+            ws,
+            env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.xfail("codex model hung on --json envelope leg (harness dynamics)")
+    assert js.returncode == 0, js.stderr[-1000:]
+    assert "FMT-ENV-OK" in js.stdout
+    events = []
+    for line in js.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    assert events, "no parseable JSON events in --json envelope output"
+    for event in events:
+        assert isinstance(event, dict) and "type" in event, (
+            f"--json envelope event missing expected type key: {str(event)[:200]}"
+        )
