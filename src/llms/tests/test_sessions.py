@@ -78,6 +78,60 @@ def test_tracker_lookup_remember_expiry():
     assert tracker.lookup("k", "chain:r1") is None
 
 
+def test_plausible_session_id_accepts_fresh_rejects_garbage():
+    import time as _time
+
+    from llms.proxy.zen_headers import descending_session_id, plausible_session_id
+
+    assert plausible_session_id(descending_session_id())
+    assert not plausible_session_id("ses_" + "ab" * 6 + "0" * 14)
+    assert not plausible_session_id("not-a-session")
+    assert not plausible_session_id("")
+    assert not plausible_session_id(None)
+    old = descending_session_id(now_ms=int(_time.time() * 1000) - 90 * 86400 * 1000)
+    assert not plausible_session_id(old)
+    future = descending_session_id(now_ms=int(_time.time() * 1000) + 30 * 60 * 1000)
+    assert plausible_session_id(future)
+
+
+def test_genuine_incoming_session_rides_unchanged(mock_upstream, tmp_path):
+    """Relay/complete-passthrough: a genuine caller carrying a plausible
+    session keeps it end to end (headers + prompt_cache_key) instead of
+    a re-mint; implausible ids fall back to minted."""
+    from llms.proxy.zen_headers import descending_session_id
+    from tests.conftest import TEST_SECRET, build_app_client, make_settings
+
+    client, seen = mock_upstream
+    genuine = descending_session_id()
+    with build_app_client(
+        make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
+    ) as tc:
+        r = tc.post(
+            "/v1/responses",
+            json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            headers={
+                "Authorization": f"Bearer {TEST_SECRET}",
+                "User-Agent": "opencode/latest/2.0.29/cli",
+                "x-opencode-session": genuine,
+            },
+        )
+        assert r.status_code == 200
+        assert seen["headers"]["x-opencode-session"] == genuine
+        assert seen["headers"]["x-opencode-session-id"] == genuine
+        assert seen["json"]["prompt_cache_key"] == genuine
+        r2 = tc.post(
+            "/v1/responses",
+            json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            headers={
+                "Authorization": f"Bearer {TEST_SECRET}",
+                "User-Agent": "opencode/latest/2.0.29/cli",
+                "x-opencode-session": "ses_deadbeefdead00",
+            },
+        )
+        assert r2.status_code == 200
+        assert seen["headers"]["x-opencode-session"] != "ses_deadbeefdead00"
+
+
 def test_chained_turns_reuse_session(mock_upstream, tmp_path):
     """A previous_response_id continuation rides the first turn's session."""
     from tests.conftest import (

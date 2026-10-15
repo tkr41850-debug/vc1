@@ -30,7 +30,7 @@ def _relay_settings(**overrides):
     from tests.conftest import make_settings
 
     base = {
-        "zen_base_url": "https://opencode.ai/zen/v1",
+        "zen_base_url": "https://opencode.ai/inference/v1",
         "zen_api_key": "",
         "upstream_relay_url": "https://upstream.example",
         "upstream_relay_key": "sk-relay-test",
@@ -56,7 +56,8 @@ def test_relay_url_falls_back_to_zen_without_config():
 
     settings = _relay_settings(upstream_relay_url="", upstream_relay_key="")
     assert (
-        relay_url_for(settings, "responses") == "https://opencode.ai/zen/v1/responses"
+        relay_url_for(settings, "responses")
+        == "https://opencode.ai/inference/v1/responses"
     )
 
 
@@ -139,7 +140,7 @@ def test_relay_end_to_end_hits_upstream_not_zen(app_client=None):
 
     settings: Settings = _mk(
         data_dir=tmp,
-        zen_base_url="https://opencode.ai/zen/v1",
+        zen_base_url="https://opencode.ai/inference/v1",
         zen_api_key="",
         upstream_relay_url="https://upstream.example",
         upstream_relay_key="sk-relay-test",

@@ -10,7 +10,9 @@ from fastapi import Request
 @dataclass(frozen=True)
 class Settings:
     zen_base_url: str = field(
-        default_factory=lambda: os.getenv("ZEN_BASE_URL", "https://opencode.ai/zen/v1")
+        default_factory=lambda: os.getenv(
+            "ZEN_BASE_URL", "https://opencode.ai/inference/v1"
+        )
     )
     zen_api_key: str = field(default_factory=lambda: os.getenv("ZEN_API_KEY", ""))
     upstream_relay_url: str = field(
@@ -20,7 +22,7 @@ class Settings:
         default_factory=lambda: os.getenv("UPSTREAM_RELAY_KEY", "")
     )
     opencode_version: str = field(
-        default_factory=lambda: os.getenv("ZEN_GATEWAY_OPENCODE_VERSION", "2.0.22")
+        default_factory=lambda: os.getenv("ZEN_GATEWAY_OPENCODE_VERSION", "2.0.29")
     )
     opencode_channel: str = field(
         default_factory=lambda: os.getenv("ZEN_GATEWAY_CHANNEL", "latest")

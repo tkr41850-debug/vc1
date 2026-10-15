@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import datetime as _datetime
 import hashlib
+import re as _re
 import time as _time
 
 from llms.proxy.config import Settings
 
 _BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+_SESSION_RE = _re.compile(r"ses_[0-9a-f]{12}[0-9A-Za-z]{14}\Z")
 
 
 def descending_session_id(now_ms: int | None = None, rand: bytes | None = None) -> str:
@@ -48,6 +50,30 @@ def stable_session_id(api_key: str, now_s: float | None = None) -> str:
     seed = api_key if api_key else "anonymous-free-tier"
     digest = hashlib.sha256(f"{seed}\x00{day.isoformat()}".encode()).digest()
     return descending_session_id(now_ms=day_start_ms, rand=digest[6:20])
+
+
+def plausible_session_id(
+    value: object,
+    now_ms: int | None = None,
+    max_age_ms: int = 60 * 86400 * 1000,
+) -> bool:
+    """True when value decodes to a plausible descending session id.
+
+    Shape plus timestamp plausibility (identifier.ts descending(): the
+    head carries ``~(ts*0x1000+c)`` mod 2**48, so the stamp survives
+    only mod 2**36 ms — checked on that ring against now, accepting up
+    to ``max_age_ms`` old or 1h future skew; the counter borrow (<=1
+    ring unit) is absorbed by the window). Uniform-garbage heads land
+    in-window ~7% of the time at the default 60d — fine for a
+    trust-but-verify gate whose fallback is a fresh mint (never leak a
+    gate-killing id upstream, never reject a genuine long session).
+    """
+    if not isinstance(value, str) or not _SESSION_RE.match(value):
+        return False
+    low = (((1 << 48) - 1 - int(value[4:16], 16)) // 0x1000) % 2**36
+    now = int(now_ms if now_ms is not None else _time.time() * 1000) % 2**36
+    age = (now - low) % 2**36
+    return age <= max_age_ms or age >= 2**36 - 3600_000
 
 
 def build_zen_headers(

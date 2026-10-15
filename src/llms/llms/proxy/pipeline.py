@@ -48,7 +48,11 @@ from llms.proxy.translate_response import (
     deltas_to_response_ir,
 )
 from llms.proxy.zen_fingerprint import note_free_tier_error
-from llms.proxy.zen_headers import build_zen_headers, stable_session_id
+from llms.proxy.zen_headers import (
+    build_zen_headers,
+    plausible_session_id,
+    stable_session_id,
+)
 from llms.proxy.zen_prompts import TITLE_PREFIX
 from llms.proxy.zen_tools import GENUINE_TOOL_NAMES, GENUINE_TOOLS
 
@@ -1424,9 +1428,7 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
         _msgs = list(getattr(req, "messages", ()) or ())
         _last_is_user = bool(_msgs) and getattr(_msgs[-1], "role", "") == "user"
         if _last_is_user:
-            _ack = _ran_ack(
-                req, _family_for(request, ingress, req, requested)
-            )
+            _ack = _ran_ack(req, _family_for(request, ingress, req, requested))
         if _ack is not None:
             logger.info(
                 "[%s] already-ran ack: binding %s success to emitted %s",
@@ -1471,6 +1473,17 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
     # Chat has no such field/gate; messages needs a real API key instead.
     session_id = stable_session_id(settings.zen_api_key)
     is_new_conversation = False
+    session_assigned = False
+    # Relay/complete-passthrough: a genuine caller (real opencode or our
+    # own relay hop, which presents the opencode identity) already
+    # carries a server-plausible session — validated below, before any
+    # mint/remember, so the request rides end to end unchanged (same
+    # session in headers, prompt_cache_key, and bucket affinity).
+    _incoming_session = (
+        request.headers.get("x-opencode-session", "")
+        if is_genuine_opencode(request.headers)
+        else ""
+    )
     session_tracker = getattr(request.app.state, "sessions", None)
     if session_tracker is not None and ingress == "responses":
         ref = sessions.conversation_ref(ingress, body, request.headers)
@@ -1481,18 +1494,42 @@ async def run(request: Request, settings: Settings, ingress: str) -> Response:
             reserved = _reserved_session(request, ingress, req.model, body)
             if reserved is not None:
                 session_id = reserved
+                session_assigned = True
+            elif _incoming_session and plausible_session_id(_incoming_session):
+                session_id = _incoming_session
+                session_assigned = True
+                _remember_reservation(request, ingress, req.model, body, session_id)
             else:
                 session_id = sessions.mint_session_id()
+                session_assigned = True
                 _remember_reservation(request, ingress, req.model, body, session_id)
                 is_new_conversation = True
         else:
             hit = session_tracker.lookup(secret_key, ref)
             if hit is not None:
                 session_id = hit
+                session_assigned = True
             elif not ref.startswith("chain:"):
-                session_id = sessions.mint_session_id()
-                session_tracker.remember(secret_key, ref, session_id)
-                is_new_conversation = True
+                if _incoming_session and plausible_session_id(_incoming_session):
+                    session_id = _incoming_session
+                    session_assigned = True
+                    session_tracker.remember(secret_key, ref, session_id)
+                else:
+                    session_id = sessions.mint_session_id()
+                    session_assigned = True
+                    session_tracker.remember(secret_key, ref, session_id)
+                    is_new_conversation = True
+    if (
+        not session_assigned
+        and _incoming_session
+        and plausible_session_id(_incoming_session)
+    ):
+        # Untracked legs (chat/messages, tracker-absent): keep the
+        # genuine session instead of the stable fallback. Implausible
+        # ids fall through to the minted/stable session — never leak a
+        # gate-killing id upstream. Warming never fires here (only on
+        # fresh mints above), so adopted sessions stay untouched.
+        session_id = _incoming_session
     genuine = is_genuine_opencode(request.headers)
     if egress == "responses":
         outbound["prompt_cache_key"] = session_id
@@ -2177,7 +2214,7 @@ def _exit_idx_for_port(rt, port: int | None) -> int | None:
         for w in exits:
             try:
                 if int(getattr(w, "socks", 0) or 0) == int(port):
-                    return int(getattr(w, "idx"))
+                    return int(w.idx)
             except Exception:
                 continue
         return None

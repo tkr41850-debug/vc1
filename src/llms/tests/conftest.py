@@ -18,7 +18,7 @@ from llms.proxy.main import create_app
 
 def make_settings(**overrides) -> Settings:
     base = {
-        "zen_base_url": "https://opencode.ai/zen/v1",
+        "zen_base_url": "https://opencode.ai/inference/v1",
         "zen_api_key": "",
         "opencode_version": "1.18.4",
         "opencode_client": "cli",
@@ -178,7 +178,7 @@ def mock_upstream(upstream_seen):
 
     transport = httpx.MockTransport(handler)
     client = httpx.AsyncClient(
-        transport=transport, base_url="https://opencode.ai/zen/v1"
+        transport=transport, base_url="https://opencode.ai/inference/v1"
     )
     yield client, upstream_seen
 
