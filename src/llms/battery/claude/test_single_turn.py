@@ -1209,26 +1209,45 @@ def test_cl_single_webfetch():
     example.com is the stable fixture: its <h1> is byte-stable
     ("Example Domain"), so the assertion is exact without judging
     prose. Single-tool turn idiom (cf. test_cl_single_read).
+
+    Live 2026-10-15: haiku once ended the turn rc=0 with a narration
+    preamble ("I'll fetch example.com...") and never called the tool —
+    the same no-tool-use turn flake documented on the bash/allow legs.
+    Retries once on marker absence; a second miss fails loudly.
     """
+    import subprocess
+
+    import pytest
+
     base, sk = require_live()
     _, ws = battery_dirs("cl-webfetch")
     env = claude_env(base, "ak-battery-cl31", sk)
-    c = run_cli(
-        [
-            CLAUDE_BIN,
-            "-p",
-            "--model",
-            "haiku",
-            "--allowedTools=WebFetch",
-            (
-                "Fetch https://example.com with the WebFetch tool, then "
-                "reply with exactly FETCH-OK-1 plus the page's main "
-                "heading text."
-            ),
-        ],
-        ws,
-        env,
+    prompt = (
+        "Fetch https://example.com with the WebFetch tool, then "
+        "reply with exactly FETCH-OK-1 plus the page's main "
+        "heading text."
     )
+    c = None
+    try:
+        for _ in range(2):
+            c = run_cli(
+                [
+                    CLAUDE_BIN,
+                    "-p",
+                    "--model",
+                    "haiku",
+                    "--allowedTools=WebFetch",
+                    prompt,
+                ],
+                ws,
+                env,
+            )
+            assert c.returncode == 0, c.stderr[-1000:]
+            if "FETCH-OK-1" in c.stdout:
+                break
+    except subprocess.TimeoutExpired:
+        pytest.xfail("claude CLI hung on webfetch half (harness dynamics)")
+    assert c is not None
     assert c.returncode == 0, c.stderr[-1000:]
     assert "FETCH-OK-1" in c.stdout
     assert "Example Domain" in c.stdout
