@@ -12,7 +12,7 @@ RESP_PAYLOAD = {
     "id": "resp_abc",
     "object": "response",
     "status": "completed",
-    "model": "muse-spark-1.3-contributor-free",
+    "model": "glm-5.3-flash-free",
     "output": [
         {
             "type": "message",
@@ -40,9 +40,9 @@ CHAT_PAYLOAD = {
 
 
 def test_responses_to_chat_text():
-    out = responses_to_chat(RESP_PAYLOAD, "muse-spark-1.3-contributor-free")
+    out = responses_to_chat(RESP_PAYLOAD, "glm-5.3-flash-free")
     assert out["id"] == "chatcmpl-abc"
-    assert out["model"] == "muse-spark-1.3-contributor-free"
+    assert out["model"] == "glm-5.3-flash-free"
     choice = out["choices"][0]
     assert choice["message"]["content"] == "hello"
     assert choice["message"]["tool_calls"] is None

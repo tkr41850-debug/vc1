@@ -62,7 +62,7 @@ class Warp429Egress:
                     "id": "resp-fake",
                     "object": "response",
                     "status": "completed",
-                    "model": "muse-spark",
+                    "model": "glm-5.3-flash-free",
                     "output": [],
                     "usage": {"input_tokens": 1, "output_tokens": 1},
                 },
@@ -162,12 +162,12 @@ def cycle_world(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "refresh_health", _refresh)
     registry.save(
         [
-            Provider(id="pool1", kind="warp", exits=2, models=["muse-*"]),
+            Provider(id="pool1", kind="warp", exits=2, models=["glm-5.3-*"]),
             Provider(
                 id="noproxy",
                 label="Direct",
                 kind="noproxy",
-                models=["muse-*"],
+                models=["glm-5.3-*"],
                 enabled=True,
             ),
         ]
@@ -191,7 +191,7 @@ def cycle_world(tmp_path, monkeypatch):
 def _post(tc):
     return tc.post(
         "/v1/responses",
-        json={"model": "muse-spark", "input": "hi"},
+        json={"model": "glm-5.3-flash-free", "input": "hi"},
         headers=TEST_HEADERS,
     )
 
@@ -339,7 +339,7 @@ def test_noproxy_429_never_bounces(app_client, tmp_path, monkeypatch):
     tc.app.state.providers = registry
     r = tc.post(
         "/v1/responses",
-        json={"model": "muse-spark", "input": "hi"},
+        json={"model": "glm-5.3-flash-free", "input": "hi"},
         headers=TEST_HEADERS,
     )
     assert r.status_code == 429

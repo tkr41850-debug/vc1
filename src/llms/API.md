@@ -170,7 +170,8 @@ opencode identity set; omitting it yields `MissingSessionID`.
 
 ## Model routing (static)
 
-- `/responses`: `muse-spark*`, `gpt-*`, `grok-*`
+- `/responses`: `glm-5.3*` (overrides the chat `glm-*` rule), `gpt-*`,
+  `grok-*`
 - `/chat/completions`: `deepseek*`, `kimi*`, `glm-*`, `minimax*`, `mimo*`,
   `big-pickle`, `ling-*`, `nemotron*`, `qwen3-coder`, `trinity*`, `ring-*`,
   `north-*`, `hy3*`

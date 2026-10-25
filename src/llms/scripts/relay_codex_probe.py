@@ -20,7 +20,7 @@ import sys
 PORT = int(os.getenv("ZEN_GATEWAY_PORT", "8789"))
 BASE = f"http://127.0.0.1:{PORT}"
 CODEX_BIN = os.getenv("CODEX_BIN", "/home/uqmm/.nvm/versions/node/v24.15.0/bin/codex")
-SPARK = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
+SPARK = os.getenv("PROBE_MODEL", "glm-5.3-flash-free")
 LOG_PATH = os.getenv("PROBE_LOG", "/tmp/llms.log")
 
 

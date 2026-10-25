@@ -80,7 +80,7 @@ def cell_spark(home, workspace, secret: str) -> int:
         home,
         workspace,
         secret,
-        "muse-spark-1.3-contributor-free",
+        "glm-5.3-flash-free",
         _prompt("matrix-spark.txt"),
         "matrix-spark.txt",
     )

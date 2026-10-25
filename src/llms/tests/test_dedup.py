@@ -23,7 +23,8 @@ def _slow_client(delay_s: float, calls: list):
         )
 
     return httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
 
 
@@ -42,7 +43,7 @@ def test_slow_request_429s_then_claims_held_response(tmp_path):
 
     calls: list = []
     with _app(tmp_path, _slow_client(1.0, calls)) as tc:
-        body = {"model": "muse-spark-1.3-contributor-free", "input": "hi"}
+        body = {"model": "glm-5.3-flash-free", "input": "hi"}
         first = tc.post("/v1/responses", json=body, headers=TEST_HEADERS)
         assert first.status_code == 429
         assert first.headers["retry-after"] == "20"
@@ -81,13 +82,14 @@ def test_streaming_bypasses_dedup(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with _app(tmp_path, client, timeout_s=0.01) as tc:
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "hi",
                 "stream": True,
             },
@@ -106,7 +108,7 @@ def test_distinct_bodies_do_not_coalesce(tmp_path):
         for text in ("alpha", "beta"):
             r = tc.post(
                 "/v1/responses",
-                json={"model": "muse-spark-1.3-contributor-free", "input": text},
+                json={"model": "glm-5.3-flash-free", "input": text},
                 headers=TEST_HEADERS,
             )
             assert r.status_code == 429
@@ -139,7 +141,8 @@ def test_fresh_retries_reuse_reserved_session(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with build_app_client(
         make_settings(data_dir=str(tmp_path), max_timeout_s=60.0),
@@ -153,7 +156,7 @@ def test_fresh_retries_reuse_reserved_session(tmp_path):
             tc.app.state.dedup._entries.clear()
             r = tc.post(
                 "/v1/responses",
-                json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+                json={"model": "glm-5.3-flash-free", "input": "hi"},
                 headers=TEST_HEADERS,
             )
             assert r.status_code == 200
@@ -168,7 +171,7 @@ def test_dedup_429_does_not_poison_pool(tmp_path):
     with _app(tmp_path, _slow_client(1.0, calls)) as tc:
         r = tc.post(
             "/v1/responses",
-            json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            json={"model": "glm-5.3-flash-free", "input": "hi"},
             headers=TEST_HEADERS,
         )
         assert r.status_code == 429
@@ -208,14 +211,15 @@ def test_error_responses_are_never_held(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with build_app_client(
         make_settings(data_dir=str(tmp_path), max_timeout_s=60.0),
         client,
         seed_key=TEST_SECRET,
     ) as tc:
-        body = {"model": "muse-spark-1.3-contributor-free", "input": "hi"}
+        body = {"model": "glm-5.3-flash-free", "input": "hi"}
         first = tc.post("/v1/responses", json=body, headers=TEST_HEADERS)
         assert first.status_code == 429
         assert "x-llms-dedup" not in first.headers

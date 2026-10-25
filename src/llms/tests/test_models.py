@@ -33,15 +33,15 @@ def test_models_exposes_limits_effort_routing_and_tools(app_client):
     data = {
         m["id"]: m for m in tc.get("/v1/models", headers=TEST_HEADERS).json()["data"]
     }
-    spark = data["muse-spark-1.3-contributor-free"]
-    assert spark["context_window"] == 1000000
-    assert spark["max_output_tokens"] == 131072
-    assert spark["reasoning_effort"] == ["low", "medium", "high"]
+    spark = data["glm-5.3-flash-free"]
+    assert spark["context_window"] == 200000
+    assert spark["max_output_tokens"] == 32000
+    assert spark["reasoning_effort"] == ["low", "high", "max"]
     assert spark["zen_endpoint"] == "responses"
     assert spark["tools"] is True
     assert spark["streaming"] is True
     assert spark["pricing"] == {"input": 0, "output": 0}
-    assert spark["contributor_terms"] is True
+    assert spark["contributor_terms"] is False
     deepseek = data["deepseek-v4-flash-free"]
     assert deepseek["zen_endpoint"] == "chat"
     assert deepseek["thinking_toggle"] is True

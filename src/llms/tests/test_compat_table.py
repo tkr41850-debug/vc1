@@ -49,12 +49,8 @@ def test_family_for_breaks_ua_tie_with_requested_model():
     from llms.proxy.pipeline import _family_for
     from tests.test_client_tools import _luna_namespace, _spark_runner
 
-    luna_req = RequestIR(
-        model="muse-spark-1.3-contributor-free", tools=(_luna_namespace(),)
-    )
-    spark_req = RequestIR(
-        model="muse-spark-1.3-contributor-free", tools=(_spark_runner(),)
-    )
+    luna_req = RequestIR(model="glm-5.3-flash-free", tools=(_luna_namespace(),))
+    spark_req = RequestIR(model="glm-5.3-flash-free", tools=(_spark_runner(),))
 
     class _H:
         def __init__(self, ua):
@@ -62,9 +58,7 @@ def test_family_for_breaks_ua_tie_with_requested_model():
 
     assert _family_for(_H(CODEX_UA), "responses", luna_req, "gpt-5.6-luna") == "luna"
     assert (
-        _family_for(
-            _H(CODEX_UA), "responses", luna_req, "muse-spark-1.3-contributor-free"
-        )
+        _family_for(_H(CODEX_UA), "responses", luna_req, "glm-5.3-flash-free")
         == "codex-plain"
     )
     assert (
@@ -519,7 +513,7 @@ def test_streaming_steer_log_records_call_arguments(caplog):
 
     client = _httpx.AsyncClient(
         transport=_httpx.MockTransport(handler),
-        base_url="https://opencode.ai/zen/v1",
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     from tests.test_client_tools import _luna_namespace
 
@@ -1779,16 +1773,9 @@ def test_claude_native_rows_webfetch_skill_subagent():
     assert _json.loads(args) == {"description": "d", "prompt": "p"}
     # Fail open: missing keys, and wrong family (codex-plain has no
     # WebFetch/Skill/Agent runner — nothing synthesized).
+    assert translate_to_client("webfetch", "{}", "claude", owned, defs, claude) is None
     assert (
-        translate_to_client(
-            "webfetch", "{}", "claude", owned, defs, claude
-        )
-        is None
-    )
-    assert (
-        translate_to_client(
-            "skill", '{"id": "x"}', "codex-plain", owned, defs, claude
-        )
+        translate_to_client("skill", '{"id": "x"}', "codex-plain", owned, defs, claude)
         is None
     )
     assert (
@@ -1842,15 +1829,16 @@ def test_skill_subagent_steer_pin_codex_plain():
     # family (skill->Skill, subagent->Agent). No codex-plain row, no
     # "*" all-family row — either would translate without live proof.
     assert {
-        (genuine, fam) for genuine, fam, _client, _conv in TO_CLIENT
+        (genuine, fam)
+        for genuine, fam, _client, _conv in TO_CLIENT
         if genuine in ("skill", "subagent")
     } == {("skill", CLAUDE), ("subagent", CLAUDE)}
     assert [
-        (fam, client) for genuine, fam, client, _conv in TO_CLIENT
-        if genuine == "skill"
+        (fam, client) for genuine, fam, client, _conv in TO_CLIENT if genuine == "skill"
     ] == [(CLAUDE, "skill")]
     assert [
-        (fam, client) for genuine, fam, client, _conv in TO_CLIENT
+        (fam, client)
+        for genuine, fam, client, _conv in TO_CLIENT
         if genuine == "subagent"
     ] == [(CLAUDE, "agent")]
 
@@ -1955,8 +1943,7 @@ def test_execute_on_plain_leg_steers_generic():
     defs.update(nested_tool_defs(runner))
     # Table level: None on plain AND unknown (no namespace channel).
     assert (
-        translate_to_client("execute", args, "codex-plain", owned, defs, runner)
-        is None
+        translate_to_client("execute", args, "codex-plain", owned, defs, runner) is None
     )
     assert translate_to_client("execute", args, "unknown", owned, defs, runner) is None
     # ...while luna (namespace channel) still rewrites verbatim.

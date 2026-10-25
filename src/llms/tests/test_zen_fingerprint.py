@@ -36,7 +36,7 @@ REQUEST_FIXTURE = """        http: {
 """
 
 TAGS_FIXTURE = (
-    '[{"name": "v2.0.29"}, {"name": "v2.0.22"}, {"name": "v2.0.12"},'
+    '[{"name": "v2.1.0"}, {"name": "v2.0.22"}, {"name": "v2.0.12"},'
     ' {"name": "v2.0.9"}, {"name": "v1.18.32"}, {"name": "not-a-version"}]'
 )
 
@@ -80,7 +80,7 @@ def test_parse_expected_detects_request_header():
 
 def test_list_v2_versions_descending():
     assert fp.list_v2_versions(TAGS_FIXTURE) == [
-        "v2.0.29",
+        "v2.1.0",
         "v2.0.22",
         "v2.0.12",
         "v2.0.9",

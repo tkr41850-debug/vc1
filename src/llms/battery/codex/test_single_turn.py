@@ -13,7 +13,7 @@ from battery import battery_dirs, codex_env, require_live, run_cli
 CODEX_BIN = __import__("os").getenv(
     "CODEX_BIN", "/home/uqmm/.nvm/versions/node/v24.15.0/bin/codex"
 )
-SPARK = "muse-spark-1.3-contributor-free"
+SPARK = "glm-5.3-flash-free"
 
 
 def _stop_sign_png_bytes(size: int = 128) -> bytes:
@@ -1448,7 +1448,9 @@ def test_cx_single_resume_agent():
                 env,
             )
         except subprocess.TimeoutExpired:
-            pytest.xfail("codex model hung on resume_agent round trip (harness dynamics)")
+            pytest.xfail(
+                "codex model hung on resume_agent round trip (harness dynamics)"
+            )
         assert c is not None
         if c.returncode == 0 and "RESUME-ROUNDTRIP-OK" in c.stdout:
             break

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-RESPONSES_PREFIXES = ("muse-spark", "gpt-", "grok-")
+RESPONSES_PREFIXES = ("glm-5.3-", "gpt-", "grok-")
 
 CHAT_PREFIXES = (
     "deepseek",
@@ -26,10 +26,7 @@ ENDPOINT_PATH = {
     "messages": "/messages",
 }
 
-FREE_RESPONSES_MODELS = (
-    "muse-spark-1.3-contributor-free",
-    "muse-spark-1.2-contributor-free",
-)
+FREE_RESPONSES_MODELS = ("glm-5.3-flash-free",)
 
 FREE_CHAT_MODELS = (
     "deepseek-v4-flash-free",

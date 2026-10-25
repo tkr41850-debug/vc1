@@ -47,7 +47,7 @@ EXPECTED = {
     # ua_version must be a version Zen currently ACCEPTS (newest is not
     # automatically safe — the allowlist lags releases. Only bump after
     # a live probe 200s.
-    "ua_version": "2.0.29",
+    "ua_version": "2.1.0",
     "ua_channel": "latest",
     "required_headers": (
         "authorization",
@@ -241,7 +241,7 @@ def mint_probe_session() -> str:
 def probe_version_accepted(
     version: str,
     title_prompt: str,
-    base_url: str = "https://opencode.ai/inference/v1",
+    base_url: str = "https://opencode.ai/inference/openai/v1",
     timeout: float = 30.0,
 ) -> bool:
     """Live-probe whether Zen accepts a UA version (canonical recipe).
@@ -256,7 +256,7 @@ def probe_version_accepted(
     session = mint_probe_session()
     body = json.dumps(
         {
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "prompt_cache_key": session,
             "stream": True,
             "max_output_tokens": 16,
@@ -316,7 +316,7 @@ def apply_version(new_version: str, root: Path | None = None) -> None:
 
 
 def run_refresh(
-    base_url: str = "https://opencode.ai/inference/v1",
+    base_url: str = "https://opencode.ai/inference/openai/v1",
     timeout: float = FETCH_TIMEOUT_S,
     root: Path | None = None,
 ) -> dict:
@@ -393,7 +393,7 @@ def should_check_now(data_dir: str | Path) -> bool:
 def note_free_tier_error(
     data_dir: str | Path,
     trace_id: str,
-    base_url: str = "https://opencode.ai/inference/v1",
+    base_url: str = "https://opencode.ai/inference/openai/v1",
 ) -> None:
     """Background a fingerprint re-check after a Zen FreeTierError (cooldown-gated)."""
     try:

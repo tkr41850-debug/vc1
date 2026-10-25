@@ -43,7 +43,7 @@ needs `/dev/net/tun` + `NET_ADMIN` (wired in `docker-compose.yml`) for
 warp-svc to bring the tunnel up; without them pools stay unhealthy and
 everything still serves direct.
 
-## Claude Code (free, via Muse Spark)
+## Claude Code (free, via GLM 5.3 Flash)
 
 Client side (`~/.bashrc`, then `source ~/.bashrc`; create the `sk-` key in
 the admin UI first — needs `just llms up` running):
@@ -51,7 +51,7 @@ the admin UI first — needs `just llms up` running):
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8789"
 export ANTHROPIC_AUTH_TOKEN="sk-your-key"
-export ANTHROPIC_MODEL="muse-spark-1.3-contributor-free"
+export ANTHROPIC_MODEL="glm-5.3-flash-free"
 ```
 
 Prefer `ANTHROPIC_AUTH_TOKEN` over `ANTHROPIC_API_KEY` here: it is sent as
@@ -71,11 +71,11 @@ Server side (same file is fine on the same machine — `just llms up` inherits i
 re-run `just llms up` afterwards so the server picks it up):
 
 ```bash
-export MODEL_ALIASES="gpt-*=muse-spark-1.3-contributor-free,claude-*=muse-spark-1.3-contributor-free"
+export MODEL_ALIASES="gpt-*=glm-5.3-flash-free,claude-*=glm-5.3-flash-free"
 ```
 
 This is belt-and-braces behind `ANTHROPIC_MODEL`: even if Claude falls back
-to its own default (e.g. `gpt-5.4-xhigh-fast`), llms still serves Muse Spark
+to its own default (e.g. `gpt-5.4-xhigh-fast`), llms still serves GLM 5.3 Flash
 instead of failing with a billing 401. One-shot alternative without touching
 `.bashrc`: `MODEL_ALIASES="..." just llms up`.
 
@@ -88,20 +88,20 @@ Third-party clients keep the shaping (tool injection + canonical chat
 system lead) that the free-tier gate requires.
 
 ```sh
-just llms probe        # OpenAI SDK → Responses → Muse Spark
-just llms probe-codex  # Codex CLI  → Responses → Muse Spark
+just llms probe        # OpenAI SDK → Responses → GLM 5.3 Flash
+just llms probe-codex  # Codex CLI  → Responses → GLM 5.3 Flash
 just llms probe-dsh    # DeepSeek harness (chat) → auto-translated to model endpoint
 just llms probe-claude # Claude Code headless (needs a messages-capable model)
 ```
 
-### Codex CLI (free, via Muse Spark)
+### Codex CLI (free, via GLM 5.3 Flash)
 
 Codex talks the Responses wire API and streams SSE. Point it at the
 gateway in `~/.codex/config.toml` (create the `sk-` key in the admin UI
 first — needs `just llms up` running):
 
 ```toml
-model = "muse-spark-1.3-contributor-free"
+model = "glm-5.3-flash-free"
 model_provider = "zen-proxy"
 
 [model_providers.zen-proxy]
@@ -124,7 +124,7 @@ llms translates to the model's native Zen endpoint. Configure in code:
 ```python
 DeepSeekHarnessConfig(
     provider="deepseek-official",
-    model="muse-spark-1.3-contributor-free",  # or deepseek-v4-flash-free
+    model="glm-5.3-flash-free",  # or deepseek-v4-flash-free
     base_url="http://127.0.0.1:8789/v1",
     api_key="sk-your-key",
     profile="sdk-minimal",
@@ -176,11 +176,11 @@ across ready exits; with none ready it fails open to direct.
 | Variable | Default | Purpose |
 |---|---|---|
 | `ZEN_API_KEY` | — | Operator Zen key; empty = anonymous free tier |
-| `ZEN_BASE_URL` | `https://opencode.ai/zen/v1` | Upstream gateway |
-| `ZEN_DEFAULT_MODEL` | `muse-spark-1.3-contributor-free` | Responses fallback |
-| `ZEN_DEFAULT_CHAT_MODEL` | `muse-spark-1.3-contributor-free` | Chat fallback |
+| `ZEN_BASE_URL` | `https://opencode.ai/inference/openai/v1` | Upstream gateway |
+| `ZEN_DEFAULT_MODEL` | `glm-5.3-flash-free` | Responses fallback |
+| `ZEN_DEFAULT_CHAT_MODEL` | `glm-5.3-flash-free` | Chat fallback |
 | `ZEN_DEFAULT_MESSAGES_MODEL` | `claude-haiku-4-5` | Messages fallback |
-| `ZEN_GATEWAY_OPENCODE_VERSION/CLIENT/PROJECT` | `2.0.12`/`cli`/`global` | Upstream identity headers |
+| `ZEN_GATEWAY_OPENCODE_VERSION/CLIENT/PROJECT` | `2.1.0`/`cli`/`global` | Upstream identity headers |
 | `ZEN_GATEWAY_CHANNEL` | `latest` | `User-Agent: opencode/<channel>/<version>/<client>` |
 | `ZEN_SESSION_WARMING` | `1` | Title warming call on new responses conversations (`0` off) |
 | `ZEN_SESSION_TTL_S` | `1800` | Conversation→session map entry lifetime |
@@ -189,7 +189,7 @@ across ready exits; with none ready it fails open to direct.
 | `SLOT_COOLDOWN_S` | `60` | Minimum bucket cooldown after a rate limit |
 | `MAX_TIMEOUT` | `60` | Seconds a non-streaming request may run before the client gets `429 + Retry-After: 20` while upstream work continues in the background (a retry with the same body claims the held response; `0` disables) |
 | `EGRESS_MODE` | `direct` | Reserved; warp providers route via SOCKS when healthy, else fail open to direct |
-| `MODEL_ALIASES` | — | Opt-in remap, e.g. `gpt-*=muse-spark-1.3-contributor-free,claude-*=muse-spark-1.3-contributor-free`. Stabilizes clients pinned to billed models, but the client sees the requested id while another model answers |
+| `MODEL_ALIASES` | — | Opt-in remap, e.g. `gpt-*=glm-5.3-flash-free,claude-*=glm-5.3-flash-free`. Stabilizes clients pinned to billed models, but the client sees the requested id while another model answers |
 | `WARP_EXITS` (`WARP_SLOTS` legacy) | `8` | Default warp exits per provider (per-provider `exits` overrides) |
 | `WARP_HOLD_TIMEOUT` | `10` | Seconds to wait for a ready warp exit |
 | `WARP_REG_INTERVAL_SEC` | `28800` | Stagger between slot registrations (Cloudflare rate limit) |

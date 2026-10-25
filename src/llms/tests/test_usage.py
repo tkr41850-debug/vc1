@@ -165,7 +165,7 @@ def test_usage_recorded_for_responses(mock_upstream, tmp_path):
             tc,
             None,
             "v1/responses",
-            {"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            {"model": "glm-5.3-flash-free", "input": "hi"},
         )
         assert r.status_code == 200
         usage = tc.app.state.usage.snapshot()["keys"][TEST_SECRET]
@@ -221,7 +221,7 @@ def test_stream_counts_request_without_tokens(app_client, mock_upstream):
         tc,
         None,
         "v1/responses",
-        {"model": "muse-spark-1.3-contributor-free", "input": "hi", "stream": True},
+        {"model": "glm-5.3-flash-free", "input": "hi", "stream": True},
     )
     assert r.status_code == 200
     snap = tc.app.state.usage.snapshot()["keys"][TEST_SECRET]

@@ -42,7 +42,7 @@ def test_non_stream_passthrough_with_model_override(app_client, mock_upstream):
     r = tc.post(
         "/v1/responses",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "input": "say hi",
             "stream": False,
         },
@@ -51,7 +51,7 @@ def test_non_stream_passthrough_with_model_override(app_client, mock_upstream):
     assert r.status_code == 200
     assert r.json()["output"][0]["content"][0]["text"] == "hi"
     assert seen["url"].endswith("/responses")
-    assert seen["json"]["model"] == "muse-spark-1.3-contributor-free"
+    assert seen["json"]["model"] == "glm-5.3-flash-free"
     assert seen["json"]["stream"] is True
     assert seen["headers"]["x-opencode-client"] == "cli"
     assert seen["headers"]["user-agent"].startswith("opencode/")
@@ -63,7 +63,7 @@ def test_responses_egress_prompt_cache_key_matches_session(app_client):
     r = tc.post(
         "/v1/responses",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "input": "say hi",
             "stream": False,
         },
@@ -80,7 +80,7 @@ def test_anonymous_instructions_pass_through_untouched(app_client):
     r = tc.post(
         "/v1/responses",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "instructions": "Be brief.",
             "input": "hi",
         },
@@ -99,7 +99,7 @@ def test_anonymous_bare_single_gets_genuine_tools_only(app_client):
     tc, seen = app_client
     r = tc.post(
         "/v1/responses",
-        json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+        json={"model": "glm-5.3-flash-free", "input": "hi"},
         headers=TEST_HEADERS,
     )
     assert r.status_code == 200
@@ -116,7 +116,7 @@ def test_anonymous_dialogue_without_tools_gets_genuine_tools(app_client):
     r = tc.post(
         "/v1/responses",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "input": [
                 {"role": "user", "content": "hi"},
                 {"role": "assistant", "content": "hello"},
@@ -139,7 +139,7 @@ def test_anonymous_tooled_turn_sends_genuine_superset(app_client):
     r = tc.post(
         "/v1/responses",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "instructions": "Be brief.",
             "input": "hi",
             "tools": [
@@ -207,7 +207,8 @@ def test_steering_redirects_genuine_calls(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with build_app_client(
         make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
@@ -215,7 +216,7 @@ def test_steering_redirects_genuine_calls(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "hi",
                 "tools": [
                     {
@@ -291,7 +292,8 @@ def test_steering_names_client_tools_in_queued_message(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with build_app_client(
         make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
@@ -299,7 +301,7 @@ def test_steering_names_client_tools_in_queued_message(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "read the readme",
                 "tools": [
                     {
@@ -391,7 +393,8 @@ def _steer_app_client(tmp_path, first_body: bytes, second_body: bytes):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     tc = build_app_client(
         make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
@@ -414,7 +417,7 @@ def test_client_named_genuine_tool_call_case_insensitive_passthrough(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "read notes",
                 "tools": [
                     {
@@ -455,7 +458,7 @@ def test_client_named_genuine_tool_call_passes_through_unsteered(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "read notes",
                 "tools": [
                     {
@@ -502,7 +505,7 @@ def test_undeclared_genuine_tool_call_still_steers(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "hi",
                 "tools": [
                     {
@@ -548,7 +551,7 @@ def test_hallucinated_tool_call_with_no_client_tools_still_steers(tmp_path):
     with tc_ctx as tc:
         r = tc.post(
             "/v1/responses",
-            json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            json={"model": "glm-5.3-flash-free", "input": "hi"},
             headers=TEST_HEADERS,
         )
     assert r.status_code == 200
@@ -581,7 +584,7 @@ def test_anonymous_nonstream_synthesizes_json_from_upstream_sse(
     for tc, seen in _stream_seen_client(mock_upstream, tmp_path):
         r = tc.post(
             "/v1/responses",
-            json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            json={"model": "glm-5.3-flash-free", "input": "hi"},
             headers=TEST_HEADERS,
         )
         assert r.status_code == 200
@@ -596,7 +599,7 @@ def test_anonymous_nonstream_chat_synthesizes_across_dialects(mock_upstream, tmp
         r = tc.post(
             "/v1/chat/completions",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "messages": [{"role": "user", "content": "hi"}],
             },
             headers=TEST_HEADERS,
@@ -625,7 +628,7 @@ def test_bare_responses_alias(app_client):
     tc, seen = app_client
     r = tc.post(
         "/responses",
-        json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+        json={"model": "glm-5.3-flash-free", "input": "hi"},
         headers=TEST_HEADERS,
     )
     assert r.status_code == 200
@@ -654,7 +657,7 @@ def test_upstream_error_forwarded(app_client, mock_upstream):
     seen_dict["mode"] = "upstream_error"
     r = tc.post(
         "/v1/responses",
-        json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+        json={"model": "glm-5.3-flash-free", "input": "hi"},
         headers=TEST_HEADERS,
     )
     assert r.status_code == 401
@@ -668,7 +671,7 @@ def test_stream_strips_cost_frames(app_client, mock_upstream):
     r = tc.post(
         "/v1/responses",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "input": "hi",
             "stream": True,
         },
@@ -687,7 +690,7 @@ def test_affinity_prefix_still_routes(app_client):
     for path in ("/v1/responses", "/ak-team1/v1/responses"):
         r = tc.post(
             path,
-            json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            json={"model": "glm-5.3-flash-free", "input": "hi"},
             headers=TEST_HEADERS,
         )
         assert r.status_code == 200, path
@@ -735,7 +738,8 @@ def test_tool_call_arguments_survive_synthesize(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with build_app_client(
         make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
@@ -743,7 +747,7 @@ def test_tool_call_arguments_survive_synthesize(tmp_path):
         r = tc.post(
             "/v1/chat/completions",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "messages": [{"role": "user", "content": "pwd please"}],
                 "tools": [
                     {
@@ -888,7 +892,8 @@ def test_streaming_steer_folds_undeclared_call_end_to_end(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with build_app_client(
         _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
@@ -896,7 +901,7 @@ def test_streaming_steer_folds_undeclared_call_end_to_end(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "run echo",
                 "stream": True,
                 "tools": [
@@ -945,7 +950,7 @@ def test_streaming_owned_name_converts_casing_and_passes_through(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "run echo",
                 "stream": True,
                 "tools": [
@@ -989,7 +994,7 @@ def test_streaming_owned_name_missing_key_steers(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "run echo",
                 "stream": True,
                 "tools": [
@@ -1040,7 +1045,7 @@ def test_owned_name_converts_casing_and_passes_through_synthesize(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "run echo",
                 "tools": [
                     {
@@ -1082,7 +1087,7 @@ def test_owned_name_missing_key_steers_synthesize(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "run echo",
                 "tools": [
                     {
@@ -1133,7 +1138,7 @@ def test_streaming_empty_args_steer_coerces_to_empty_object(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "run echo",
                 "stream": True,
                 "tools": [
@@ -1175,7 +1180,7 @@ def test_synthesize_empty_args_steer_coerces_to_empty_object(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "run echo",
                 "tools": [
                     {
@@ -1218,7 +1223,7 @@ def test_owned_missing_key_redirect_corrects_arguments(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "run echo",
                 "tools": [
                     {
@@ -1262,7 +1267,7 @@ def test_genuine_nonstreaming_valid_turn_never_steers(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "instructions": "You are opencode.",
                 "input": "hi",
                 "tools": [
@@ -1306,7 +1311,7 @@ def test_deferred_only_tools_notice_lists_them_e2e(app_client):
     r = tc.post(
         "/v1/responses",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "instructions": "Be brief.",
             "input": [
                 {
@@ -1414,7 +1419,8 @@ def test_streaming_steer_mixed_turn_replaces_whole_dead_turn(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with build_app_client(
         _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
@@ -1422,7 +1428,7 @@ def test_streaming_steer_mixed_turn_replaces_whole_dead_turn(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "run echo",
                 "stream": True,
                 "tools": [
@@ -1469,7 +1475,7 @@ def test_streaming_fold_case_variant_declared_name_passes(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "read notes",
                 "stream": True,
                 "tools": [
@@ -1510,7 +1516,8 @@ def test_streaming_fold_genuine_client_passes_through(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     genuine_headers = {
         "Authorization": f"Bearer {TEST_SECRET}",
@@ -1523,7 +1530,7 @@ def test_streaming_fold_genuine_client_passes_through(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "run x",
                 "stream": True,
                 "tools": [
@@ -1563,7 +1570,8 @@ def test_streaming_steer_reports_chained_response_id(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with build_app_client(
         _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
@@ -1571,7 +1579,7 @@ def test_streaming_steer_reports_chained_response_id(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "say hi",
                 "stream": True,
                 "tools": [
@@ -1618,7 +1626,8 @@ def test_streaming_steer_rerequest_error_signals_not_replays(tmp_path):
         return httpx.Response(500, content=b"upstream blew up")
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with build_app_client(
         _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
@@ -1626,7 +1635,7 @@ def test_streaming_steer_rerequest_error_signals_not_replays(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "run echo",
                 "stream": True,
                 "tools": [
@@ -1689,7 +1698,8 @@ def test_streaming_steer_exhaustion_fails_closed_with_redirect_text(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with build_app_client(
         _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
@@ -1697,7 +1707,7 @@ def test_streaming_steer_exhaustion_fails_closed_with_redirect_text(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "run echo",
                 "stream": True,
                 "tools": [
@@ -1748,7 +1758,8 @@ def test_synthesize_steer_exhaustion_fails_closed_with_redirect_json(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with build_app_client(
         _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
@@ -1756,7 +1767,7 @@ def test_synthesize_steer_exhaustion_fails_closed_with_redirect_json(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "run echo",
                 "tools": [
                     {
@@ -1800,7 +1811,7 @@ def test_genuine_shell_translates_onto_client_exec_command(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "run echo",
                 "tools": [
                     {
@@ -1865,7 +1876,7 @@ def test_executed_call_acknowledges_completion_without_reemit(tmp_path):
         first = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "Run shell command printf REDIRECT-OK > redir.txt via the shell tool",
                 "tools": tools,
             },
@@ -1884,7 +1895,7 @@ def test_executed_call_acknowledges_completion_without_reemit(tmp_path):
         second = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": [
                     {
                         "type": "function_call",
@@ -1947,7 +1958,7 @@ def test_nonconsecutive_identical_repeat_still_replays(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": [
                     {
                         "type": "function_call",
@@ -2014,7 +2025,7 @@ def test_direct_repeat_without_alias_marker_still_replays(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": [
                     {
                         "type": "function_call",
@@ -2104,7 +2115,8 @@ def test_streaming_nested_exec_command_replays_as_exec_custom_call(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with build_app_client(
         _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
@@ -2326,7 +2338,7 @@ def test_genuine_read_translates_onto_shell_runner_not_view_image(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "read file",
                 "tools": [
                     {
@@ -2408,7 +2420,8 @@ def test_streaming_delta_shell_translates_without_steer(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with build_app_client(
         _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
@@ -2416,7 +2429,7 @@ def test_streaming_delta_shell_translates_without_steer(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "read file",
                 "stream": True,
                 "tools": [
@@ -2492,7 +2505,8 @@ def test_streaming_corrupt_delta_recovers_via_done(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with build_app_client(
         _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
@@ -2500,7 +2514,7 @@ def test_streaming_corrupt_delta_recovers_via_done(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "write file",
                 "stream": True,
                 "tools": [
@@ -2559,7 +2573,8 @@ def test_streaming_done_only_shell_translates_without_steer(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with build_app_client(
         _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
@@ -2567,7 +2582,7 @@ def test_streaming_done_only_shell_translates_without_steer(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "read file",
                 "stream": True,
                 "tools": [
@@ -2619,7 +2634,7 @@ def test_streaming_namespaced_emitter_gets_argument_correction(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "print file",
                 "stream": True,
                 "tools": [
@@ -2718,7 +2733,8 @@ def test_streaming_bare_patch_rewrite_reaches_input_frames(tmp_path):
         )
 
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://opencode.ai/zen/v1"
+        transport=httpx.MockTransport(handler),
+        base_url="https://opencode.ai/inference/openai/v1",
     )
     with build_app_client(
         _make_settings(data_dir=str(tmp_path)), client, seed_key=TEST_SECRET
@@ -2777,7 +2793,7 @@ def test_wait_agent_empty_targets_fills_from_spawn_output_e2e(tmp_path):
         r = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": [
                     {
                         "type": "function_call",

@@ -166,7 +166,7 @@ def test_secret_header_forwards_with_and_without_affinity(app_client, mock_upstr
     for path in ("/v1/responses", "/ak-team1/v1/responses"):
         r = tc.post(
             path,
-            json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            json={"model": "glm-5.3-flash-free", "input": "hi"},
             headers=TEST_HEADERS,
         )
         assert r.status_code == 200, path

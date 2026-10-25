@@ -12,7 +12,7 @@ def test_chat_ingress_routes_spark_to_responses(app_client, mock_upstream):
     r = tc.post(
         "/v1/chat/completions",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "messages": [{"role": "user", "content": "hi"}],
         },
         headers=TEST_HEADERS,
@@ -56,7 +56,7 @@ def test_responses_web_search_history_forwards_verbatim(app_client):
     r = tc.post(
         "/v1/responses",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "input": [
                 {
                     "type": "message",
@@ -127,7 +127,7 @@ def test_genuine_opencode_responses_passthrough(app_client):
     r = tc.post(
         "/v1/responses",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "instructions": "You are opencode.",
             "input": "hi",
             "tools": genuine,
@@ -173,7 +173,7 @@ def test_nongenuine_overlapping_tools_client_definition_wins(app_client):
     r = tc.post(
         "/v1/responses",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "input": "hi",
             "tools": [
                 {
@@ -384,7 +384,7 @@ def test_server_tool_specs_forwarded_never_500(app_client):
     r = tc.post(
         "/v1/messages",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "max_tokens": 50,
             "tools": [
                 {"type": "web_fetch_20260209", "name": "web_fetch"},
@@ -423,7 +423,7 @@ def test_cross_dialect_stream_translates(app_client, mock_upstream):
     r = tc.post(
         "/v1/chat/completions",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
         },
@@ -442,7 +442,7 @@ def test_messages_ingress_routes_spark_to_responses(app_client, mock_upstream):
     r = tc.post(
         "/v1/messages",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 64,
         },
@@ -477,8 +477,8 @@ def test_model_alias_remaps_before_routing(mock_upstream, tmp_path):
     settings = make_settings(
         data_dir=str(tmp_path),
         model_aliases=(
-            ("gpt-*", "muse-spark-1.3-contributor-free"),
-            ("claude-*", "muse-spark-1.3-contributor-free"),
+            ("gpt-*", "glm-5.3-flash-free"),
+            ("claude-*", "glm-5.3-flash-free"),
         ),
     )
     with build_app_client(settings, client, seed_key=TEST_SECRET) as tc:
@@ -492,7 +492,7 @@ def test_model_alias_remaps_before_routing(mock_upstream, tmp_path):
         )
         assert r.status_code == 200
         assert seen["url"].endswith("/responses")
-        assert seen["json"]["model"] == "muse-spark-1.3-contributor-free"
+        assert seen["json"]["model"] == "glm-5.3-flash-free"
 
 
 def test_chat_image_forwards_on_chat_egress(app_client):
@@ -589,7 +589,7 @@ def test_compacted_codex_thread_keeps_session(app_client):
     for i, text in enumerate(["do the thing", "<summary>did the thing</summary>"]):
         r = tc.post(
             "/v1/responses",
-            json={"model": "muse-spark-1.3-contributor-free", "input": text},
+            json={"model": "glm-5.3-flash-free", "input": text},
             headers=headers,
         )
         assert r.status_code == 200
@@ -606,7 +606,7 @@ def test_malformed_tool_specs_are_json_never_plaintext_500(app_client):
         (
             "/v1/responses",
             {
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "hi",
                 "tools": [{"type": "server_tool_use", "name": "web_search"}],
             },
@@ -644,7 +644,7 @@ def test_codex_web_search_tool_forwarded(app_client):
     r = tc.post(
         "/v1/responses",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "input": "search the web for SWE-smith",
             "tools": [{"type": "web_search"}],
         },
@@ -662,7 +662,7 @@ def test_distinct_codex_threads_get_distinct_sessions(app_client):
     for thread in ("thread-A", "thread-B"):
         r = tc.post(
             "/v1/responses",
-            json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            json={"model": "glm-5.3-flash-free", "input": "hi"},
             headers=dict(
                 TEST_HEADERS, **{"originator": "codex_exec", "thread-id": thread}
             ),
@@ -754,7 +754,7 @@ def test_case_variant_client_tool_appends_beside_genuine(app_client):
     r = tc.post(
         "/v1/responses",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "input": "hi",
             "tools": [
                 {
@@ -792,7 +792,7 @@ def test_genuine_tool_order_and_identity_preserved(app_client):
     r = tc.post(
         "/v1/responses",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "input": "hi",
             "tools": [
                 {
@@ -826,7 +826,7 @@ def test_overlay_skips_genuine_twin_of_declared_name(app_client):
     r = tc.post(
         "/v1/responses",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "input": "hi",
             "tools": [
                 {
@@ -868,7 +868,7 @@ def test_overlay_case_variant_keeps_genuine_and_appends_client(app_client):
     r = tc.post(
         "/v1/responses",
         json={
-            "model": "muse-spark-1.3-contributor-free",
+            "model": "glm-5.3-flash-free",
             "input": "hi",
             "tools": [
                 {

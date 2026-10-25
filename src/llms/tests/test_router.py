@@ -8,8 +8,8 @@ from llms.proxy.router import normalize_model, pick, resolve_alias
 @pytest.mark.parametrize(
     "model,expected",
     [
-        ("muse-spark-1.3-contributor-free", "responses"),
-        ("opencode/muse-spark-1.3", "responses"),
+        ("glm-5.3-flash-free", "responses"),
+        ("opencode/glm-5.3-flash-free", "responses"),
         ("gpt-5.5", "responses"),
         ("GROK-4.5", "responses"),
         ("deepseek-v4-flash", "chat"),
@@ -41,13 +41,10 @@ def test_normalize_strips_prefix_and_case():
 
 def test_resolve_alias_prefix_and_exact():
     aliases = (
-        ("gpt-*", "muse-spark-1.3-contributor-free"),
-        ("claude-opus-4-5", "muse-spark-1.2"),
+        ("gpt-*", "glm-5.3-flash-free"),
+        ("claude-opus-4-5", "glm-5.3"),
     )
-    assert (
-        resolve_alias("gpt-5.4-xhigh-fast", aliases)
-        == "muse-spark-1.3-contributor-free"
-    )
-    assert resolve_alias("opencode/claude-opus-4-5", aliases) == "muse-spark-1.2"
+    assert resolve_alias("gpt-5.4-xhigh-fast", aliases) == "glm-5.3-flash-free"
+    assert resolve_alias("opencode/claude-opus-4-5", aliases) == "glm-5.3"
     assert resolve_alias("mimo-v2.5-free", aliases) == "mimo-v2.5-free"
     assert resolve_alias("anything", ()) == "anything"

@@ -43,7 +43,7 @@ def test_registry_roundtrip_and_route(tmp_path):
     routed = registry.route("gpt-5")
     assert routed is not None and routed.id == "warp-1"
     assert routed.exits == 4
-    routed = registry.route("muse-spark-1.3-contributor-free")
+    routed = registry.route("glm-5.3-flash-free")
     assert routed is not None and routed.id == "noproxy"
 
 
@@ -175,12 +175,12 @@ def test_provider_admin_updates_models(admin_client):
     assert r.status_code == 201
     r = tc.put(
         "/api/admin/providers/warp-models",
-        json={"models": ["claude-*", "muse-spark-*"]},
+        json={"models": ["claude-*", "glm-5.3-*"]},
     )
     assert r.status_code == 200
     providers = tc.get("/api/admin/providers").json()["providers"]
     entry = next(p for p in providers if p["id"] == "warp-models")
-    assert entry["models"] == ["claude-*", "muse-spark-*"]
+    assert entry["models"] == ["claude-*", "glm-5.3-*"]
     assert tc.put("/api/admin/providers/nope", json={"models": []}).status_code == 404
 
 
@@ -228,7 +228,7 @@ def test_warp_egress_socks_and_retry_tracking(monkeypatch):
                 id="warp-1",
                 kind="warp",
                 exits=2,
-                models=["muse-spark*"],
+                models=["glm-5.3*"],
             )
         ]
     )
@@ -276,7 +276,7 @@ def test_warp_egress_socks_and_retry_tracking(monkeypatch):
     with TestClient(app) as tc:
         r = tc.post(
             "/v1/responses",
-            json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            json={"model": "glm-5.3-flash-free", "input": "hi"},
             headers=TEST_HEADERS,
         )
         assert r.status_code == 200, r.text
@@ -286,7 +286,7 @@ def test_warp_egress_socks_and_retry_tracking(monkeypatch):
         rt = registry.runtime("warp-1")
         snap = rt.recent_snapshot()
         assert len(snap) == 1
-        assert snap[0]["model"] == "muse-spark-1.3-contributor-free"
+        assert snap[0]["model"] == "glm-5.3-flash-free"
         assert snap[0]["status"] == 200
     asyncio.run(registry.aclose())
     asyncio.run(zen_client.aclose())
@@ -628,7 +628,7 @@ def test_inflight_changes_push_providers_frame(admin_client):
                 target=lambda: tc.post(
                     "/v1/responses",
                     json={
-                        "model": "muse-spark-1.3-contributor-free",
+                        "model": "glm-5.3-flash-free",
                         "input": "hi",
                     },
                     headers={

@@ -12,7 +12,7 @@ def test_success_does_not_clear_active_backoff(app_client):
     assert before > time.monotonic()
     r = tc.post(
         "/v1/responses",
-        json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+        json={"model": "glm-5.3-flash-free", "input": "hi"},
         headers={"Authorization": "Bearer sk-test"},
     )
     assert r.status_code == 200

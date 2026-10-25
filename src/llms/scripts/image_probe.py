@@ -90,9 +90,7 @@ def main() -> int:
             r = httpx.post(
                 f"{BASE_URL}/v1/responses",
                 json={
-                    "model": os.getenv(
-                        "PROBE_MODEL", "muse-spark-1.3-contributor-free"
-                    ),
+                    "model": os.getenv("PROBE_MODEL", "glm-5.3-flash-free"),
                     "input": [
                         {
                             "type": "message",

@@ -33,7 +33,7 @@ def cmd_chat(args: list[str]) -> int:
     import httpx
 
     message = args[0] if args else "Reply with exactly: local-ok."
-    model = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
+    model = os.getenv("PROBE_MODEL", "glm-5.3-flash-free")
     r = httpx.post(
         f"{BASE_URL}/v1/chat/completions",
         json={
@@ -55,7 +55,7 @@ def cmd_stream(args: list[str]) -> int:
     import httpx
 
     message = args[0] if args else "Reply with exactly: local-ok."
-    model = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
+    model = os.getenv("PROBE_MODEL", "glm-5.3-flash-free")
     text = ""
     with httpx.stream(
         "POST",

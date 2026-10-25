@@ -8,7 +8,7 @@ from llms.probe.proc import fail, running_proxy
 
 PORT = int(os.getenv("PROBE_PORT", "8793"))
 BASE_URL = f"http://127.0.0.1:{PORT}/v1"
-MODEL = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
+MODEL = os.getenv("PROBE_MODEL", "glm-5.3-flash-free")
 
 
 def main() -> int:
@@ -75,7 +75,9 @@ def main() -> int:
                         return fail(f"missing intermediate file {name}")
                     if want not in path.read_text():
                         return fail(f"{name} has unexpected content")
-                print("codex tool-session probe ok: 4-step dependent session answered 110")
+                print(
+                    "codex tool-session probe ok: 4-step dependent session answered 110"
+                )
         return 0
     except Exception as exc:
         return fail(f"probe failed: {type(exc).__name__}: {exc}")

@@ -27,8 +27,8 @@ def test_non_affinity_paths_pass_through():
 
 
 def test_bucket_stable_and_bounded():
-    first = bucket_for("ak-team1", "muse-spark-1.3-contributor-free")
-    assert bucket_for("ak-team1", "muse-spark-1.3-contributor-free") == first
+    first = bucket_for("ak-team1", "glm-5.3-flash-free")
+    assert bucket_for("ak-team1", "glm-5.3-flash-free") == first
     assert 0 <= first < 1024
 
 

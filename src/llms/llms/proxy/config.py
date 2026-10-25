@@ -11,7 +11,7 @@ from fastapi import Request
 class Settings:
     zen_base_url: str = field(
         default_factory=lambda: os.getenv(
-            "ZEN_BASE_URL", "https://opencode.ai/inference/v1"
+            "ZEN_BASE_URL", "https://opencode.ai/inference/openai/v1"
         )
     )
     zen_api_key: str = field(default_factory=lambda: os.getenv("ZEN_API_KEY", ""))
@@ -22,7 +22,7 @@ class Settings:
         default_factory=lambda: os.getenv("UPSTREAM_RELAY_KEY", "")
     )
     opencode_version: str = field(
-        default_factory=lambda: os.getenv("ZEN_GATEWAY_OPENCODE_VERSION", "2.0.29")
+        default_factory=lambda: os.getenv("ZEN_GATEWAY_OPENCODE_VERSION", "2.1.0")
     )
     opencode_channel: str = field(
         default_factory=lambda: os.getenv("ZEN_GATEWAY_CHANNEL", "latest")
@@ -34,13 +34,11 @@ class Settings:
         default_factory=lambda: os.getenv("ZEN_GATEWAY_PROJECT", "global")
     )
     default_model: str = field(
-        default_factory=lambda: os.getenv(
-            "ZEN_DEFAULT_MODEL", "muse-spark-1.3-contributor-free"
-        )
+        default_factory=lambda: os.getenv("ZEN_DEFAULT_MODEL", "glm-5.3-flash-free")
     )
     default_chat_model: str = field(
         default_factory=lambda: os.getenv(
-            "ZEN_DEFAULT_CHAT_MODEL", "muse-spark-1.3-contributor-free"
+            "ZEN_DEFAULT_CHAT_MODEL", "glm-5.3-flash-free"
         )
     )
     default_messages_model: str = field(

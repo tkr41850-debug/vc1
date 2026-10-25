@@ -218,7 +218,7 @@ def _drain(text: str) -> None:
         (
             "responses",
             "v1/responses",
-            "muse-spark-1.3-contributor-free",
+            "glm-5.3-flash-free",
             None,  # built below
             (7, 3, 2, 1),
         ),

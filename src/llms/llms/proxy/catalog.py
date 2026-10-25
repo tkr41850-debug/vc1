@@ -2,28 +2,16 @@ from __future__ import annotations
 
 MODELS = (
     {
-        "id": "muse-spark-1.3-contributor-free",
+        "id": "glm-5.3-flash-free",
         "zen_endpoint": "responses",
-        "context_window": 1000000,
-        "max_output_tokens": 131072,
-        "reasoning_effort": ["low", "medium", "high"],
+        "context_window": 200000,
+        "max_output_tokens": 32000,
+        "reasoning_effort": ["low", "high", "max"],
         "thinking_toggle": False,
         "tools": True,
         "streaming": True,
         "pricing": {"input": 0, "output": 0},
-        "contributor_terms": True,
-    },
-    {
-        "id": "muse-spark-1.2-contributor-free",
-        "zen_endpoint": "responses",
-        "context_window": 1000000,
-        "max_output_tokens": 131072,
-        "reasoning_effort": ["low", "medium", "high"],
-        "thinking_toggle": False,
-        "tools": True,
-        "streaming": True,
-        "pricing": {"input": 0, "output": 0},
-        "contributor_terms": True,
+        "contributor_terms": False,
     },
     {
         "id": "deepseek-v4-flash-free",

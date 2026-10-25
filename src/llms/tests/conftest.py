@@ -18,13 +18,13 @@ from llms.proxy.main import create_app
 
 def make_settings(**overrides) -> Settings:
     base = {
-        "zen_base_url": "https://opencode.ai/inference/v1",
+        "zen_base_url": "https://opencode.ai/inference/openai/v1",
         "zen_api_key": "",
         "opencode_version": "1.18.4",
         "opencode_client": "cli",
         "opencode_project": "global",
-        "default_model": "muse-spark-1.3-contributor-free",
-        "default_chat_model": "muse-spark-1.3-contributor-free",
+        "default_model": "glm-5.3-flash-free",
+        "default_chat_model": "glm-5.3-flash-free",
         "default_messages_model": "claude-haiku-4-5",
         "num_buckets": 1024,
         "num_slots": 8,
@@ -161,7 +161,7 @@ def mock_upstream(upstream_seen):
                 "id": "resp_123",
                 "object": "response",
                 "status": "completed",
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "output_text": "hello",
                 "output": [
                     {
@@ -178,7 +178,7 @@ def mock_upstream(upstream_seen):
 
     transport = httpx.MockTransport(handler)
     client = httpx.AsyncClient(
-        transport=transport, base_url="https://opencode.ai/inference/v1"
+        transport=transport, base_url="https://opencode.ai/inference/openai/v1"
     )
     yield client, upstream_seen
 

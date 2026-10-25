@@ -10,7 +10,7 @@ local supervisor wiring end to end:
      behavior; only gateway errors fail the probe
 
 Knobs: PROBE_PORT (8793), PROBE_DATA_DIR (required), PROBE_SECRET,
-PROBE_MODEL (muse-spark-1.3-contributor-free), PROBE_EXITS (1,
+PROBE_MODEL (glm-5.3-flash-free), PROBE_EXITS (1,
 PROBE_SLOTS legacy alias), PROBE_WARP_WAIT (90s max wait for a ready exit
 via status.json).
 """
@@ -33,7 +33,7 @@ PROBE_HEADERS = {"Authorization": f"Bearer {PROBE_SECRET}"}
 PROVIDER_ID = os.getenv("PROBE_PROVIDER", "warp-probe")
 EXITS = int(os.getenv("PROBE_EXITS", os.getenv("PROBE_SLOTS", "1")))
 WARP_WAIT = float(os.getenv("PROBE_WARP_WAIT", "90"))
-MODEL = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
+MODEL = os.getenv("PROBE_MODEL", "glm-5.3-flash-free")
 
 
 def fail(message: str) -> int:

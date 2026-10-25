@@ -5,7 +5,7 @@ from llms.proxy.translate_response import messages_to_responses, responses_to_me
 RESP_WITH_CALL = {
     "id": "resp_1",
     "status": "completed",
-    "model": "muse-spark-1.3-contributor-free",
+    "model": "glm-5.3-flash-free",
     "output": [
         {
             "type": "function_call",

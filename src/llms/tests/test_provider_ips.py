@@ -7,7 +7,7 @@ def test_provider_ips_warp_per_exit(admin_client, tmp_path, monkeypatch):
 
     tc, _ = admin_client
     registry = ProviderRegistry(data_dir=tmp_path)
-    registry.save([Provider(id="pool1", kind="warp", exits=2, models=["muse-*"])])
+    registry.save([Provider(id="pool1", kind="warp", exits=2, models=["glm-5.3-*"])])
     rt = registry.runtime("pool1")
     rt.health.exits = [
         WarpExit(idx=0, ready=True, status="Connected", socks=40001),

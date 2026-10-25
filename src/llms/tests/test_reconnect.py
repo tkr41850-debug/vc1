@@ -52,9 +52,9 @@ def test_reconnect_bounces_pool_and_resyncs(admin_client, tmp_path, monkeypatch)
     table = tc.app.state.bucket_table
     registry = ProviderRegistry(data_dir=tmp_path)
     monkeypatch.setattr(registry, "ensure_pool", _ensure_pool)
-    registry.save([Provider(id="pool1", kind="warp", exits=2, models=["muse-*"])])
+    registry.save([Provider(id="pool1", kind="warp", exits=2, models=["glm-5.3-*"])])
     egress = ProviderEgress(tc.app.state.egress, registry=registry)
-    assert egress.resolve("muse-spark")[0] == "pool1"
+    assert egress.resolve("glm-5.3-flash-free")[0] == "pool1"
     tc.app.state.egress = egress
     tc.app.state.providers = registry
     assert table.num_slots == 1
@@ -100,7 +100,7 @@ def test_local_reconnect_pool_uses_secret_key(app_client, tmp_path, monkeypatch)
     tc, _ = app_client
     registry = ProviderRegistry(data_dir=tmp_path)
     monkeypatch.setattr(registry, "ensure_pool", _ensure_pool)
-    registry.save([Provider(id="pool1", kind="warp", exits=2, models=["muse-*"])])
+    registry.save([Provider(id="pool1", kind="warp", exits=2, models=["glm-5.3-*"])])
     tc.app.state.egress = ProviderEgress(tc.app.state.egress, registry=registry)
     tc.app.state.providers = registry
     r = tc.post(
@@ -434,7 +434,7 @@ def test_distinct_sessions_hash_distinct_buckets():
     from llms.proxy.affinity import bucket_for
 
     buckets = {
-        bucket_for(None, "muse-spark-1.3-contributor-free", 6, "sk-x", f"ses_{i:026d}")
+        bucket_for(None, "glm-5.3-flash-free", 6, "sk-x", f"ses_{i:026d}")
         for i in range(10)
     }
     assert len(buckets) > 1

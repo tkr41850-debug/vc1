@@ -108,7 +108,7 @@ def test_genuine_incoming_session_rides_unchanged(mock_upstream, tmp_path):
     ) as tc:
         r = tc.post(
             "/v1/responses",
-            json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            json={"model": "glm-5.3-flash-free", "input": "hi"},
             headers={
                 "Authorization": f"Bearer {TEST_SECRET}",
                 "User-Agent": "opencode/latest/2.0.29/cli",
@@ -121,7 +121,7 @@ def test_genuine_incoming_session_rides_unchanged(mock_upstream, tmp_path):
         assert seen["json"]["prompt_cache_key"] == genuine
         r2 = tc.post(
             "/v1/responses",
-            json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            json={"model": "glm-5.3-flash-free", "input": "hi"},
             headers={
                 "Authorization": f"Bearer {TEST_SECRET}",
                 "User-Agent": "opencode/latest/2.0.29/cli",
@@ -148,7 +148,7 @@ def test_chained_turns_reuse_session(mock_upstream, tmp_path):
     ) as tc:
         first = tc.post(
             "/v1/responses",
-            json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            json={"model": "glm-5.3-flash-free", "input": "hi"},
             headers=TEST_HEADERS,
         )
         assert first.status_code == 200
@@ -156,7 +156,7 @@ def test_chained_turns_reuse_session(mock_upstream, tmp_path):
         second = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "hi again",
                 "previous_response_id": first.json()["id"],
             },
@@ -211,7 +211,7 @@ def test_streaming_chained_turns_reuse_session(tmp_path):
         first = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "hi",
                 "stream": True,
             },
@@ -222,7 +222,7 @@ def test_streaming_chained_turns_reuse_session(tmp_path):
         second = tc.post(
             "/v1/responses",
             json={
-                "model": "muse-spark-1.3-contributor-free",
+                "model": "glm-5.3-flash-free",
                 "input": "hi again",
                 "previous_response_id": "resp_up1",
                 "stream": True,
@@ -275,7 +275,7 @@ def test_warming_fires_for_new_conversation(mock_upstream, tmp_path, monkeypatch
     ) as tc:
         r = tc.post(
             "/v1/responses",
-            json={"model": "muse-spark-1.3-contributor-free", "input": "hi"},
+            json={"model": "glm-5.3-flash-free", "input": "hi"},
             headers=TEST_HEADERS,
         )
         assert r.status_code == 200

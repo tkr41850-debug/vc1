@@ -11,7 +11,7 @@ import urllib.request
 PORT = int(os.getenv("PROBE_PORT", "8793"))
 BASE_URL = f"http://127.0.0.1:{PORT}"
 DATA_DIR = os.getenv("PROBE_DATA_DIR", "")
-MODEL = os.getenv("PROBE_MODEL", "muse-spark-1.3-contributor-free")
+MODEL = os.getenv("PROBE_MODEL", "glm-5.3-flash-free")
 
 
 def fail(message: str) -> int:

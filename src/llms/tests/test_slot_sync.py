@@ -22,7 +22,7 @@ def _registry_with_warp(tmp_path, **overrides) -> ProviderRegistry:
         "label": "pool",
         "kind": "warp",
         "exits": 2,
-        "models": ["muse-*"],
+        "models": ["glm-5.3-*"],
         "enabled": True,
     }
     params.update(overrides)
@@ -38,7 +38,7 @@ def test_sync_new_pool_starts_at_zero_slots(tmp_path):
     egress = ProviderEgress(DirectEgress(httpx.AsyncClient()), registry=registry)
     assert egress.sync_bucket_slots(table) is False
     assert table.num_slots == 1
-    assert egress.resolve("muse-spark")[1] == "warp"
+    assert egress.resolve("glm-5.3-flash-free")[1] == "warp"
 
 
 def test_sync_grows_as_exits_come_up(tmp_path):
@@ -47,7 +47,7 @@ def test_sync_grows_as_exits_come_up(tmp_path):
     table = BucketTable(num_buckets=16, num_slots=1)
     registry = _registry_with_warp(tmp_path)
     egress = ProviderEgress(DirectEgress(httpx.AsyncClient()), registry=registry)
-    egress.resolve("muse-spark")
+    egress.resolve("glm-5.3-flash-free")
     egress._warp["pool1"].set_num_slots(3)
     assert egress.sync_bucket_slots(table) is True
     assert table.num_slots == 3
@@ -62,11 +62,11 @@ def test_resolve_skips_known_empty_pool(tmp_path):
 
     registry = _registry_with_warp(tmp_path)
     egress = ProviderEgress(DirectEgress(httpx.AsyncClient()), registry=registry)
-    assert egress.resolve("muse-spark")[1] == "warp"
+    assert egress.resolve("glm-5.3-flash-free")[1] == "warp"
     rt = registry.runtime("pool1")
     rt.health = ProviderHealth(fetched_at=time.monotonic(), exits=[])
     # No pool attached (or empty instances) => pool cannot recover => skip.
-    assert egress.resolve("muse-spark")[1] == "noproxy"
+    assert egress.resolve("glm-5.3-flash-free")[1] == "noproxy"
 
 
 def test_resolve_stays_eligible_while_pool_booting(tmp_path):
@@ -94,10 +94,10 @@ def test_resolve_stays_eligible_while_pool_booting(tmp_path):
     egress = ProviderEgress(DirectEgress(httpx.AsyncClient()), registry=registry)
     rt = registry.runtime("pool1")
     rt.health = ProviderHealth(fetched_at=time.monotonic(), exits=[])
-    assert egress.resolve("muse-spark")[1] == "warp"
+    assert egress.resolve("glm-5.3-flash-free")[1] == "warp"
 
     pool.instances[0].status = "Disconnected"
-    assert egress.resolve("muse-spark")[1] == "noproxy"
+    assert egress.resolve("glm-5.3-flash-free")[1] == "noproxy"
 
 
 def test_sync_tracks_ready_exits_and_disable(tmp_path):
@@ -141,14 +141,14 @@ def test_create_provider_resizes_table(admin_client, tmp_path):
             "id": "pool1",
             "kind": "warp",
             "exits": 2,
-            "models": ["muse-*"],
+            "models": ["glm-5.3-*"],
         },
         headers={"Authorization": "Bearer sk-test"},
     )
     assert r.status_code == 201
     assert (tmp_path / "warps" / "pool1").is_dir()
     assert table.num_slots == 1
-    egress.resolve("muse-spark")
+    egress.resolve("glm-5.3-flash-free")
     egress._warp["pool1"].set_num_slots(4)
     r = tc.put("/api/admin/providers/pool1", json={"label": "p1"})
     assert r.status_code == 200
@@ -188,6 +188,6 @@ def test_resolve_seeds_slots_from_disk(tmp_path):
         ProviderHealth(exits=[WarpExit(idx=1, ready=True)], fetched_at=1.0),
     )
     egress = ProviderEgress(DirectEgress(httpx.AsyncClient()), registry=registry)
-    pid, kind, warp = egress.resolve("muse-spark")
+    pid, kind, warp = egress.resolve("glm-5.3-flash-free")
     assert (pid, kind) == ("pool1", "warp")
     assert warp is not None and warp.num_slots() == 1
