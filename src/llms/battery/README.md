@@ -28,6 +28,23 @@ Each test uses a distinct `ak-batteryN` affinity key so gateway buckets
 spread legs across pools. Expect codex legs to be flakier than claude
 legs — that asymmetry is the point (codex compat debt), not noise.
 
+## Failure vs skip
+
+`run_cli` retries genuine `429 Too Many Requests` storms
+(`BATTERY_RETRY_429_ATTEMPTS`, default 5, spaced
+`BATTERY_RETRY_429_DELAY_S`, default 5s). Two 429s are never retried:
+the anonymous shape rejection, and the daily free-tier cap
+(`FreeUsageLimitError`, `retry-after` in hours, resetting at UTC
+midnight). A leg that hits the spent quota is **skipped** with a hint —
+a spent quota says nothing about the gateway, so failing would report a
+regression that does not exist.
+
+Legs live under `/tmp/llms-battery-<tag>` (a 3.9G tmpfs here) and each
+CLI accumulates ~100–300M of rollout sessions per leg. `battery_dirs`
+prunes the starting leg's sessions and any other leg's sessions idle for
+`BATTERY_STALE_SESSIONS_AGE_S` (default 900s), so repeated passes cannot
+fill `/tmp` and fail with ENOSPC.
+
 ## Single-turn specs
 
 Per-CLI tables live in `battery/codex/README.md` and
