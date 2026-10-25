@@ -25,6 +25,146 @@ STREAM_TIMEOUT_S = float(os.getenv("STREAM_TIMEOUT_S", "600"))
 # Sentinel for racing upstream reads against the heartbeat timer.
 _END: object = object()
 
+# Zen's anonymous inference layer materializes per-session state
+# asynchronously and converts replayed assistant turns against it, so
+# a follow-up arriving while the previous response's state is not yet
+# visible is rejected with
+# `[invalid_value] messages[N]: content must not be an empty array`.
+# Captured ladders (Oct 21): the identical body+session 400s at +2s
+# and +60s after turn 1 and heals scatter from ~4min to ~40min — a
+# synchronous wait cannot cover that, but a user-only-messages resend
+# converts instantly (+2s verified) because it needs no state. The
+# helper first re-probes the faithful body after each delay below (a
+# fast state flip preserves fidelity), then flattens. A 400 never
+# reached the model, so resending is safe. Streaming callers keep
+# their heartbeat machinery because the retries live inside the send
+# task.
+COLD_STATE_400_MARKER = "content must not be an empty array"
+COLD_STATE_RETRY_DELAYS_S = tuple(
+    float(d)
+    for d in os.getenv("COLD_STATE_RETRY_DELAYS_S", "15").split(",")
+    if d.strip()
+)
+
+
+def _is_cold_state_400(status_code: int, payload: bytes) -> bool:
+    return status_code == 400 and COLD_STATE_400_MARKER.encode() in payload
+
+
+def _flatten_for_cold_state(body: dict) -> dict:
+    """Drop replayed assistant turns; inline them as a user message.
+
+    Reasoning summaries and the tool round (`function_call` /
+    `function_call_output`) cannot be converted while the session's
+    state is invisible, but user-only input always converts (turn 1
+    proves it). The reasoning summary and tool round are inlined as
+    inert text so the model keeps the context. Returns the same body
+    when there is nothing to flatten.
+    """
+    items = body.get("input") or []
+    kept: list = []
+    notes: list[str] = []
+    for item in items:
+        kind = item.get("type")
+        if kind == "reasoning":
+            texts = [
+                str(s.get("text", ""))
+                for s in item.get("summary") or []
+                if isinstance(s, dict)
+            ]
+            if texts:
+                notes.append("assistant thinking: " + " ".join(texts))
+        elif kind == "function_call":
+            notes.append(
+                f"assistant tool call {item.get('name')} {item.get('arguments')}"
+            )
+        elif kind == "function_call_output":
+            out = item.get("output")
+            if not isinstance(out, str):
+                out = json.dumps(out, ensure_ascii=False)
+            notes.append(f"tool result: {out}")
+        else:
+            kept.append(item)
+    if len(kept) == len(items) and not notes:
+        return body
+    if notes:
+        kept.append(
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "[continuation of a prior exchange]\n"
+                        + "\n".join(notes),
+                    }
+                ],
+            }
+        )
+    return dict(body, input=kept)
+
+
+async def _send_with_cold_retry(client, body, req_factory, trace_id):
+    """Send, escaping zen's cold-state window on replayed input.
+
+    Zen materializes per-session state asynchronously and converts
+    replayed assistant turns against it, so a follow-up can be rejected
+    with the cold-state 400 until the state is visible — observed tails
+    run to minutes, so pure waiting cannot bound the hold. First the
+    identical request is re-probed after each COLD_STATE_RETRY_DELAYS_S
+    gap (a fast state flip lets the faithful body through). Once the
+    probes are exhausted the input is flattened to user-only messages
+    (see _flatten_for_cold_state) and sent once. Exhausted and
+    non-marker 400s come back as a buffered httpx.Response stand-in
+    (body already consumed), so downstream `aread()`/`json()` keep
+    working unchanged. Transport errors propagate as httpx.HTTPError
+    and keep their existing handling at every call site.
+    """
+    body_now = body
+    flattened = False
+    probe_idx = 0
+    while True:
+        resp = await client.send(req_factory(body_now), stream=True)
+        if resp.status_code != 400:
+            return resp
+        try:
+            payload = await resp.aread()
+        finally:
+            try:
+                await resp.aclose()
+            except Exception:
+                pass
+        if not _is_cold_state_400(400, payload):
+            return httpx.Response(
+                400, content=payload, headers=resp.headers, request=resp.request
+            )
+        if probe_idx < len(COLD_STATE_RETRY_DELAYS_S):
+            delay = COLD_STATE_RETRY_DELAYS_S[probe_idx]
+            probe_idx += 1
+            logger.info(
+                "[%s] upstream cold-state 400; faithful resend %d/%d in %.1fs",
+                trace_id,
+                probe_idx,
+                len(COLD_STATE_RETRY_DELAYS_S),
+                delay,
+            )
+            await asyncio.sleep(delay)
+            continue
+        if not flattened:
+            flat = _flatten_for_cold_state(body_now)
+            if flat is not body_now:
+                logger.info(
+                    "[%s] cold-state window persisted; resending input"
+                    " flattened to user-only messages",
+                    trace_id,
+                )
+                body_now = flat
+                flattened = True
+                continue
+        return httpx.Response(
+            400, content=payload, headers=resp.headers, request=resp.request
+        )
+
 
 def _slow_error_frame(status: int, message: str) -> bytes:
     """Terminal SSE error event for the slow-send path.
@@ -946,15 +1086,24 @@ async def fold_and_steer_streaming(
                 )
                 break
         outbound = dict(outbound, input=list(outbound.get("input", [])) + followups)
-        req = client.build_request("POST", url, headers=headers, json=outbound)
-        req.extensions["timeout"] = {
-            "connect": 10.0,
-            "read": STREAM_TIMEOUT_S,
-            "write": 10.0,
-            "pool": 10.0,
-        }
+
+        def _steer_req_factory(req_body):
+            req = client.build_request("POST", url, headers=headers, json=req_body)
+            req.extensions["timeout"] = {
+                "connect": 10.0,
+                "read": STREAM_TIMEOUT_S,
+                "write": 10.0,
+                "pool": 10.0,
+            }
+            return req
+
+        # Cold-state resend rides inside the helper: this re-request is a
+        # follow-up moments after turn 1's stream ended — squarely inside
+        # the window where zen's session state may not be visible yet.
         try:
-            follow_resp = await client.send(req, stream=True)
+            follow_resp = await _send_with_cold_retry(
+                client, outbound, _steer_req_factory, trace_id
+            )
         except httpx.HTTPError as exc:
             logger.error("[%s] steer re-request failed: %s", trace_id, exc)
             # Fail closed: never replay a turn known to carry undeclared
@@ -1667,21 +1816,28 @@ async def forward(
     # loopback relay. Streams flow through SOCKS like any other request.
     warped = via_warp is not None
     if body.get("stream") is True:
-        req = client.build_request("POST", url, headers=headers, json=body)
         # Per-request upstream budget: heartbeats only keep the downstream
         # leg alive, so long Zen generations need room past the client's
         # default timeout. httpx takes this via request extensions.
-        req.extensions["timeout"] = {
-            "connect": 10.0,
-            "read": STREAM_TIMEOUT_S,
-            "write": 10.0,
-            "pool": 10.0,
-        }
+        def _req_factory(req_body):
+            req = client.build_request("POST", url, headers=headers, json=req_body)
+            req.extensions["timeout"] = {
+                "connect": 10.0,
+                "read": STREAM_TIMEOUT_S,
+                "write": 10.0,
+                "pool": 10.0,
+            }
+            return req
+
         # Send in the background: a slow Zen TTFB must not hold the
         # downstream connection silent. Fast sends take the normal path
         # below (errors keep their JSON contract); a send slower than one
-        # heartbeat commits to SSE with pings until Zen answers.
-        send_task = asyncio.create_task(client.send(req, stream=True))
+        # heartbeat commits to SSE with pings until Zen answers. The
+        # cold-state resend loop lives inside the send task, so its
+        # retry sleeps ride the same heartbeat machinery.
+        send_task = asyncio.create_task(
+            _send_with_cold_retry(client, body, _req_factory, trace_id)
+        )
         try:
             await asyncio.wait_for(
                 asyncio.shield(send_task), timeout=STREAM_HEARTBEAT_S
@@ -1845,15 +2001,23 @@ async def forward(
         # (Downstream stays silent while collecting — JSON has no
         # heartbeat channel; the streaming paths above cover that case.)
         stream_body = dict(body, stream=True)
-        req = client.build_request("POST", url, headers=headers, json=stream_body)
-        req.extensions["timeout"] = {
-            "connect": 10.0,
-            "read": STREAM_TIMEOUT_S,
-            "write": 10.0,
-            "pool": 10.0,
-        }
+
+        def _json_req_factory(req_body):
+            req = client.build_request("POST", url, headers=headers, json=req_body)
+            req.extensions["timeout"] = {
+                "connect": 10.0,
+                "read": STREAM_TIMEOUT_S,
+                "write": 10.0,
+                "pool": 10.0,
+            }
+            return req
+
+        # Cold-state resend rides inside the helper (same contract as the
+        # streaming path).
         try:
-            upstream = await client.send(req, stream=True)
+            upstream = await _send_with_cold_retry(
+                client, stream_body, _json_req_factory, trace_id
+            )
         except httpx.HTTPError as exc:
             logger.error("[%s] upstream connect failed: %s", trace_id, exc)
             return JSONResponse(
@@ -1895,13 +2059,26 @@ async def forward(
             if via_warp.get("warp_idx") is not None:
                 response.headers["x-pool-active-warp"] = str(via_warp["warp_idx"])
         return response
+    # Cold-state resend rides inside the helper. Its responses arrive
+    # streamed, so buffer before the content/length/json reads below.
     try:
-        upstream = await client.post(url, headers=headers, json=body)
+        upstream = await _send_with_cold_retry(
+            client,
+            body,
+            lambda req_body: client.build_request(
+                "POST", url, headers=headers, json=req_body
+            ),
+            trace_id,
+        )
     except httpx.HTTPError as exc:
         logger.error("[%s] upstream connect failed: %s", trace_id, exc)
         return JSONResponse(
             status_code=502, content={"error": {"message": "upstream unreachable"}}
         )
+    try:
+        await upstream.aread()
+    except Exception:
+        pass
     log_response(trace_id, upstream.status_code, len(upstream.content))
     try:
         payload = upstream.json()

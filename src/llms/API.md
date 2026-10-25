@@ -157,6 +157,17 @@ opencode identity set; omitting it yields `MissingSessionID`.
 - Upstream status is preserved verbatim. `429`/quota errors
   (`FreeUsageLimitError`, `rate limit`, `too many`, `quota`) rebalance the
   bucket and fail fast to the client; `Retry-After` is forwarded when present.
+- Exception: the cold-state `400` (`messages[N]: content must not be an
+  empty array`) is escaped instead of relayed. Zen materializes
+  per-session state asynchronously and converts replayed assistant turns
+  against it, so a follow-up can arrive before the previous response's
+  state is visible (heal times observed: 4–40min). The helper first
+  re-probes the identical body after `COLD_STATE_RETRY_DELAYS_S`
+  (default one probe at `15s`); if the window persists the input is
+  flattened to user-only messages — reasoning/tool replays dropped and
+  inlined as text — a shape zen converts without state. A `400` never
+  reached the model, so resending is safe; non-marker `400`s and
+  exhausted escapes relay unchanged.
 - Same-dialect responses pass through; cross-dialect responses are translated
   (`stop`↔`completed`, `length`↔`incomplete`, tool calls both ways,
   token usage remapped). Translation failure yields `502`.
