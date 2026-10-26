@@ -7,6 +7,7 @@ network. Live behavior is covered by scripts/warp_probe.py.
 """
 
 import asyncio
+import time
 
 import pytest
 
@@ -339,7 +340,11 @@ def test_heal_guarded_by_cooldown_and_budget():
 def test_heal_stale_deletes_and_registers(monkeypatch, tmp_path):
     pool = WarpPool("pool1", tmp_path, WarpPoolConfig(exits=2))
     slot = WarpSlot(idx=0, socks_port=40001, ready=False)
-    pool.last_reg_ts = 0.0  # budget spent long ago → budget_wait() == 0
+    # Budget spent long ago → _budget_wait() == 0. Anchored to the clock
+    # the pool reads: the sentinel 0.0 only works upstream of
+    # reg_interval_sec of host uptime, which made this test pass or fail
+    # depending on when the box booted.
+    pool.last_reg_ts = time.monotonic() - pool.config.reg_interval_sec - 1.0
     ran: list = []
     monkeypatch.setattr(
         warp_mod,
