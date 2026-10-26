@@ -664,6 +664,82 @@ def test_upstream_error_forwarded(app_client, mock_upstream):
     assert r.json()["error"]["type"] == "AuthError"
 
 
+def test_free_tier_403_relayed_and_flags_fingerprint(
+    app_client, mock_upstream, monkeypatch
+):
+    """Shape rejection relays verbatim and still triggers the re-check.
+
+    Upstream switched this rejection from 5xx to 403 in the Oct-2026
+    v2.1.x update; the fingerprint hook keys on the error *type*, so a
+    status-class change must not silently disable it.
+    """
+    from llms.proxy import pipeline
+
+    calls: list = []
+    monkeypatch.setattr(
+        pipeline, "note_free_tier_error", lambda *a, **k: calls.append(a)
+    )
+    tc, _seen = app_client
+    _, seen_dict = mock_upstream
+    seen_dict["mode"] = "free_tier_403"
+    r = tc.post(
+        "/v1/responses",
+        json={"model": "glm-5.3-flash-free", "input": "hi"},
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 403
+    assert r.json()["error"]["type"] == "FreeTierError"
+    assert len(calls) == 1
+
+
+def test_free_tier_5xx_still_flags_fingerprint(app_client, mock_upstream, monkeypatch):
+    """The old 5xx spelling of the same rejection behaves identically."""
+    from llms.proxy import pipeline
+
+    calls: list = []
+    monkeypatch.setattr(
+        pipeline, "note_free_tier_error", lambda *a, **k: calls.append(a)
+    )
+    tc, _seen = app_client
+    _, seen_dict = mock_upstream
+    seen_dict["mode"] = "free_tier_502"
+    r = tc.post(
+        "/v1/responses",
+        json={"model": "glm-5.3-flash-free", "input": "hi"},
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 502
+    assert len(calls) == 1
+
+
+def test_free_tier_403_streaming_client_flags_fingerprint(
+    app_client, mock_upstream, monkeypatch
+):
+    """Streaming clients (codex/claude) get a real status, not a 200 frame.
+
+    The pre-stream upstream error path must return the upstream status as
+    JSON so the fingerprint hook sees it; if it degraded into an SSE
+    error frame the hook would be blind for every real client.
+    """
+    from llms.proxy import pipeline
+
+    calls: list = []
+    monkeypatch.setattr(
+        pipeline, "note_free_tier_error", lambda *a, **k: calls.append(a)
+    )
+    tc, _seen = app_client
+    _, seen_dict = mock_upstream
+    seen_dict["mode"] = "free_tier_403"
+    r = tc.post(
+        "/v1/responses",
+        json={"model": "glm-5.3-flash-free", "input": "hi", "stream": True},
+        headers=TEST_HEADERS,
+    )
+    assert r.status_code == 403
+    assert r.json()["error"]["type"] == "FreeTierError"
+    assert len(calls) == 1
+
+
 def test_stream_strips_cost_frames(app_client, mock_upstream):
     tc, _seen = app_client
     _, seen_dict = mock_upstream

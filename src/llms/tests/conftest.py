@@ -134,6 +134,35 @@ def mock_upstream(upstream_seen):
                     "error": {"type": "AuthError", "message": "bad key"},
                 },
             )
+        if mode == "free_tier_403":
+            # Upstream now rejects non-genuine shapes with 403 (was 5xx
+            # before the Oct-2026 v2.1.x update); the body type is the
+            # stable signal, not the status class.
+            return httpx.Response(
+                403,
+                json={
+                    "type": "error",
+                    "error": {
+                        "type": "FreeTierError",
+                        "message": (
+                            "OpenCode's free tier can only be used from within OpenCode"
+                        ),
+                    },
+                },
+            )
+        if mode == "free_tier_502":
+            return httpx.Response(
+                502,
+                json={
+                    "type": "error",
+                    "error": {
+                        "type": "FreeTierError",
+                        "message": (
+                            "OpenCode's free tier can only be used from within OpenCode"
+                        ),
+                    },
+                },
+            )
         if str(request.url).endswith("/chat/completions"):
             return httpx.Response(
                 200,

@@ -26,6 +26,11 @@ re-fetches the upstream sources below and updates the snapshot (and the
 config version default) when opencode drifts. The gateway calls
 :func:`note_free_tier_error` whenever Zen answers ``FreeTierError`` so a
 stale fingerprint triggers a background re-check instead of silent 403s.
+
+Shape rejections are ``403`` + ``FreeTierError`` since the v2.1.x update
+(they were 5xx before). Never key the staleness signal on the status
+class — ``error.type`` is the stable contract, and the fingerprint hook
+fires for 403 exactly like it did for 5xx.
 """
 
 from __future__ import annotations
@@ -47,6 +52,9 @@ EXPECTED = {
     # ua_version must be a version Zen currently ACCEPTS (newest is not
     # automatically safe — the allowlist lags releases. Only bump after
     # a live probe 200s.
+    # Upstream tags ran to v2.1.4 on 2026-10-26; the pin stays at 2.1.0
+    # until a probe can run (the anonymous tier was quota-exhausted that
+    # day, and a 429 cannot tell acceptance from rejection).
     "ua_version": "2.1.0",
     "ua_channel": "latest",
     "required_headers": (
@@ -243,13 +251,19 @@ def probe_version_accepted(
     title_prompt: str,
     base_url: str = "https://opencode.ai/inference/openai/v1",
     timeout: float = 30.0,
-) -> bool:
+) -> bool | None:
     """Live-probe whether Zen accepts a UA version (canonical recipe).
 
     Sends the known-good shape (well-formed session + matching
     prompt_cache_key + canonical title instructions, tiny output cap).
     A 403 costs nothing (no inference runs); a 200 burns a few tokens.
-    Network errors raise; only an HTTP status answers the question.
+    Network errors raise.
+
+    Returns ``True`` (accepted), ``False`` (403: version rejected) or
+    ``None`` (inconclusive — e.g. 429 while the anonymous daily quota is
+    spent, or a 5xx). Inconclusive must never be read as rejection: the
+    quota gate runs *before* the version gate, so a spent quota makes
+    every version look refused.
     """
     import urllib.error
 
@@ -290,7 +304,11 @@ def probe_version_accepted(
             return r.status == 200
     except urllib.error.HTTPError as exc:
         logger.debug("version probe %s -> HTTP %s", version, exc.code)
-        return False
+        if exc.code == 403:
+            return False
+        # 429 (daily quota) and 5xx mean the gate never evaluated the
+        # version: inconclusive, not a rejection.
+        return None
 
 
 def apply_version(new_version: str, root: Path | None = None) -> None:
@@ -362,12 +380,18 @@ def run_refresh(
         except Exception as exc:
             report["note"] = f"version probe network failure: {exc!r}"
             return report
+        if accepted is None:
+            report["note"] = (
+                f"version probe inconclusive for {candidate} (gate did not "
+                "answer — 429 daily quota or upstream 5xx); staying pinned"
+            )
+            return report
         if accepted:
             apply_version(candidate, root)
             report["version_applied"] = candidate
             return report
     report["note"] = (
-        f"newer tags exist {candidates} but Zen accepts none yet; staying pinned"
+        f"newer tags exist {candidates} but Zen 403s them all; staying pinned"
     )
     return report
 

@@ -114,6 +114,33 @@ def test_probe_version_accepted_status(monkeypatch):
     assert fp.probe_version_accepted("9.9.99", "title") is False
 
 
+def test_probe_version_inconclusive_on_quota(monkeypatch):
+    """429 means the gate never saw the version — not a rejection.
+
+    The anonymous daily quota is checked before the UA allowlist, so a
+    spent quota makes every version look refused (live 2026-10-26: the
+    refresh reported "accepts none yet" while every probe was 429).
+    """
+
+    def rate_limited(*a, **k):
+        raise urllib.error.HTTPError(
+            "https://x",
+            429,
+            "Too Many Requests",
+            {"retry-after": "3600"},
+            None,
+        )
+
+    monkeypatch.setattr(fp.urllib.request, "urlopen", rate_limited)
+    assert fp.probe_version_accepted("2.1.4", "title") is None
+
+    def broke(*a, **k):
+        raise urllib.error.HTTPError("https://x", 502, "Bad Gateway", {}, None)
+
+    monkeypatch.setattr(fp.urllib.request, "urlopen", broke)
+    assert fp.probe_version_accepted("2.1.4", "title") is None
+
+
 def test_apply_version_bumps_newer_only(tmp_path, monkeypatch):
     proxy = tmp_path / "llms" / "proxy"
     proxy.mkdir(parents=True)
@@ -154,6 +181,29 @@ def test_run_refresh_pins_newest_accepted(tmp_path, monkeypatch):
     report = _fp.run_refresh(root=tmp_path)
     assert report["version_applied"] == "2.0.15"
     assert '"2.0.15"' in (proxy / "config.py").read_text()
+
+
+def test_run_refresh_does_not_pin_on_inconclusive_probe(tmp_path, monkeypatch):
+    """A 429 probe must not be reported or acted on as a rejection."""
+    proxy = tmp_path / "llms" / "proxy"
+    proxy.mkdir(parents=True)
+    (proxy / "config.py").write_text(
+        'x = os.getenv("ZEN_GATEWAY_OPENCODE_VERSION", "2.0.12")\n'
+    )
+    (proxy / "zen_fingerprint.py").write_text('"ua_version": "2.0.12"\n')
+    import llms.proxy.zen_fingerprint as _fp
+
+    baseline = dict(fp.EXPECTED)
+    baseline["ua_version"] = "2.0.12"
+    monkeypatch.setattr(_fp, "EXPECTED", baseline)
+    tags = '[{"name": "v2.0.16"}, {"name": "v2.0.12"}]'
+    monkeypatch.setattr(_fp, "fetch_sources", lambda *a, **k: _sources(tags=tags))
+    monkeypatch.setattr(_fp, "probe_version_accepted", lambda v, *a, **k: None)
+    report = _fp.run_refresh(root=tmp_path)
+    assert report["version_applied"] is None
+    assert "inconclusive" in report["note"]
+    assert "403s" not in report["note"]
+    assert '"2.0.12"' in (proxy / "config.py").read_text()
 
 
 def test_free_tier_error_triggers_gated_recheck(tmp_path, monkeypatch):

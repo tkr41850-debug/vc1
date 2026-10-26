@@ -157,6 +157,10 @@ opencode identity set; omitting it yields `MissingSessionID`.
 - Upstream status is preserved verbatim. `429`/quota errors
   (`FreeUsageLimitError`, `rate limit`, `too many`, `quota`) rebalance the
   bucket and fail fast to the client; `Retry-After` is forwarded when present.
+- Shape rejections (`FreeTierError`, "free tier can only be used from
+  within OpenCode") relay verbatim — `403` since the v2.1.x update,
+  `5xx` before — and trigger a background fingerprint re-check keyed on
+  `error.type`, never on the status class.
 - Exception: the cold-state `400` (`messages[N]: content must not be an
   empty array`) is escaped instead of relayed. Zen materializes
   per-session state asynchronously and converts replayed assistant turns
