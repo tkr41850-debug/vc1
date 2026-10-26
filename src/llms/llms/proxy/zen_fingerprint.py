@@ -43,6 +43,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
+from typing import NamedTuple
 
 logger = logging.getLogger("zen_proxy")
 
@@ -246,24 +247,82 @@ def mint_probe_session() -> str:
     return descending_session_id()
 
 
-def probe_version_accepted(
+class ProbeOutcome(NamedTuple):
+    """One version-acceptance probe: observed status, verdict, and why.
+
+    ``accepted`` is tri-state and ``status`` carries the evidence the
+    verdict was derived from, so a report can name the actual cause
+    instead of guessing "quota or 5xx".
+    """
+
+    status: int | None
+    accepted: bool | None
+    detail: str = ""
+
+    @property
+    def transient(self) -> bool:
+        """The gate never evaluated the version (quota, burst, incident)."""
+        return self.accepted is None and (
+            self.status is None or self.status == 429 or self.status >= 500
+        )
+
+
+def _probe_error_outcome(version: str, exc) -> ProbeOutcome:
+    status = getattr(exc, "code", None) or 0
+    retry_after = ""
+    # HTTPMessage lookups are case-insensitive; never `dict()` the headers
+    # first (that lowercases nothing and silently drops `Retry-After`).
+    try:
+        ra = (exc.headers or {}).get("retry-after")
+    except Exception:
+        ra = None
+    if ra:
+        retry_after = f", retry-after {ra}s"
+    body = ""
+    try:
+        body = exc.read().decode(errors="replace")
+    except Exception:
+        pass
+    etype = ""
+    emsg = ""
+    try:
+        payload = json.loads(body) if body else None
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            etype = str(error.get("type") or "")
+            emsg = str(error.get("message") or "")
+    except Exception:
+        pass
+    logger.debug(
+        "version probe %s -> HTTP %s %s %s", version, status, etype, body[:160].strip()
+    )
+    label = f"HTTP {status}{f' {etype}' if etype else ''}{retry_after}"
+    if status == 403:
+        return ProbeOutcome(status, False, label)
+    if status == 429 or status >= 500:
+        return ProbeOutcome(status, None, label)
+    # 400/401/404/422: the gate did not reject the *version* — the probe
+    # recipe itself no longer fits (model renamed, endpoint moved, body
+    # shape tightened). Surface it as needing a human, not as quota.
+    snippet = " ".join((emsg or body).split())[:120]
+    detail = label
+    if snippet:
+        detail += f": {snippet}"
+    return ProbeOutcome(status, None, detail)
+
+
+def probe_version_outcome(
     version: str,
     title_prompt: str,
     base_url: str = "https://opencode.ai/inference/openai/v1",
     timeout: float = 30.0,
-) -> bool | None:
-    """Live-probe whether Zen accepts a UA version (canonical recipe).
+) -> ProbeOutcome:
+    """Live-probe a UA version and report the evidence, not just a verdict.
 
     Sends the known-good shape (well-formed session + matching
     prompt_cache_key + canonical title instructions, tiny output cap).
     A 403 costs nothing (no inference runs); a 200 burns a few tokens.
     Network errors raise.
-
-    Returns ``True`` (accepted), ``False`` (403: version rejected) or
-    ``None`` (inconclusive — e.g. 429 while the anonymous daily quota is
-    spent, or a 5xx). Inconclusive must never be read as rejection: the
-    quota gate runs *before* the version gate, so a spent quota makes
-    every version look refused.
     """
     import urllib.error
 
@@ -301,14 +360,26 @@ def probe_version_accepted(
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status == 200
+            return ProbeOutcome(r.status, r.status == 200, f"HTTP {r.status}")
     except urllib.error.HTTPError as exc:
-        logger.debug("version probe %s -> HTTP %s", version, exc.code)
-        if exc.code == 403:
-            return False
-        # 429 (daily quota) and 5xx mean the gate never evaluated the
-        # version: inconclusive, not a rejection.
-        return None
+        return _probe_error_outcome(version, exc)
+
+
+def probe_version_accepted(
+    version: str,
+    title_prompt: str,
+    base_url: str = "https://opencode.ai/inference/openai/v1",
+    timeout: float = 30.0,
+) -> bool | None:
+    """Verdict-only view of :func:`probe_version_outcome`.
+
+    ``True`` (accepted), ``False`` (403: version rejected) or ``None``
+    (inconclusive — quota 429, upstream 5xx, or a probe recipe that no
+    longer fits). Inconclusive must never be read as rejection: the
+    quota gate runs *before* the version gate, so a spent quota makes
+    every version look refused.
+    """
+    return probe_version_outcome(version, title_prompt, base_url, timeout).accepted
 
 
 def apply_version(new_version: str, root: Path | None = None) -> None:
@@ -374,22 +445,41 @@ def run_refresh(
         return report
     for candidate in candidates:
         try:
-            accepted = probe_version_accepted(
-                candidate, title_prompt, base_url, timeout
-            )
+            outcome = probe_version_outcome(candidate, title_prompt, base_url, timeout)
         except Exception as exc:
             report["note"] = f"version probe network failure: {exc!r}"
             return report
-        if accepted is None:
-            report["note"] = (
-                f"version probe inconclusive for {candidate} (gate did not "
-                "answer — 429 daily quota or upstream 5xx); staying pinned"
-            )
+        report["probe"] = {
+            "version": candidate,
+            "status": outcome.status,
+            "detail": outcome.detail,
+        }
+        if outcome.accepted is None:
+            if outcome.transient:
+                if "FreeUsageLimitError" in outcome.detail:
+                    why = (
+                        "this egress IP's daily free-tier quota is spent"
+                        " (resets with the retry-after above)"
+                    )
+                else:
+                    why = "the gate never evaluated the version (quota or upstream incident)"
+                report["note"] = (
+                    f"version probe inconclusive for {candidate} "
+                    f"({outcome.detail}): {why}; staying pinned"
+                )
+            else:
+                report["note"] = (
+                    f"version probe for {candidate} failed with "
+                    f"{outcome.detail}: the probe recipe no longer fits "
+                    "upstream (model renamed or endpoint moved?) — needs a "
+                    "human, staying pinned"
+                )
             return report
-        if accepted:
+        if outcome.accepted:
             apply_version(candidate, root)
             report["version_applied"] = candidate
             return report
+        logger.info("version probe %s -> %s (rejected)", candidate, outcome.detail)
     report["note"] = (
         f"newer tags exist {candidates} but Zen 403s them all; staying pinned"
     )

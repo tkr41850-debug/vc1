@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import re
 import urllib.error
 
@@ -133,12 +134,70 @@ def test_probe_version_inconclusive_on_quota(monkeypatch):
 
     monkeypatch.setattr(fp.urllib.request, "urlopen", rate_limited)
     assert fp.probe_version_accepted("2.1.4", "title") is None
+    outcome = fp.probe_version_outcome("2.1.4", "title")
+    assert outcome.status == 429
+    assert outcome.transient is True
+    assert "429" in outcome.detail
+    assert "retry-after 3600s" in outcome.detail
 
     def broke(*a, **k):
         raise urllib.error.HTTPError("https://x", 502, "Bad Gateway", {}, None)
 
     monkeypatch.setattr(fp.urllib.request, "urlopen", broke)
     assert fp.probe_version_accepted("2.1.4", "title") is None
+    assert fp.probe_version_outcome("2.1.4", "title").transient is True
+
+
+def test_probe_reads_retry_after_case_insensitively(monkeypatch):
+    """The wire header is `Retry-After`; a dict() copy silently drops it.
+
+    Live evidence (2026-10-26): the probe got `Retry-After: 74305` plus a
+    `FreeUsageLimitError` body, but the report said only "HTTP 429",
+    because the headers had been flattened to a case-sensitive dict.
+    """
+    import email.message
+
+    headers = email.message.Message()
+    headers["Retry-After"] = "74305"
+    body = io.BytesIO(
+        b'{"type":"error","error":{"type":"FreeUsageLimitError",'
+        b'"message":"Free usage limit reached."}}'
+    )
+
+    def rate_limited(*a, **k):
+        raise urllib.error.HTTPError("https://x", 429, "Too Many", headers, body)
+
+    monkeypatch.setattr(fp.urllib.request, "urlopen", rate_limited)
+    outcome = fp.probe_version_outcome("2.1.4", "title")
+    assert outcome.status == 429
+    assert outcome.transient is True
+    assert "FreeUsageLimitError" in outcome.detail
+    assert "retry-after 74305s" in outcome.detail
+
+
+def test_probe_names_a_stale_recipe_instead_of_blaming_quota(monkeypatch):
+    """400/404 means our request shape broke, not that the gate said no.
+
+    Since the probe body embeds the model name and endpoint, a rename or
+    move surfaces as 400/404 — reporting that as "quota" would park the
+    pin indefinitely with nothing to act on.
+    """
+
+    def bad_request(*a, **k):
+        raise urllib.error.HTTPError(
+            "https://x",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(b'{"error":{"message":"unknown model"}}'),
+        )
+
+    monkeypatch.setattr(fp.urllib.request, "urlopen", bad_request)
+    outcome = fp.probe_version_outcome("2.1.4", "title")
+    assert outcome.accepted is None
+    assert outcome.transient is False
+    assert "400" in outcome.detail
+    assert "unknown model" in outcome.detail
 
 
 def test_apply_version_bumps_newer_only(tmp_path, monkeypatch):
@@ -177,7 +236,11 @@ def test_run_refresh_pins_newest_accepted(tmp_path, monkeypatch):
     monkeypatch.setattr(_fp, "EXPECTED", baseline)
     tags = '[{"name": "v2.0.16"}, {"name": "v2.0.15"}, {"name": "v2.0.12"}]'
     monkeypatch.setattr(_fp, "fetch_sources", lambda *a, **k: _sources(tags=tags))
-    monkeypatch.setattr(_fp, "probe_version_accepted", lambda v, *a, **k: v == "2.0.15")
+    monkeypatch.setattr(
+        _fp,
+        "probe_version_outcome",
+        lambda v, *a, **k: _fp.ProbeOutcome(200, v == "2.0.15", "HTTP 200"),
+    )
     report = _fp.run_refresh(root=tmp_path)
     assert report["version_applied"] == "2.0.15"
     assert '"2.0.15"' in (proxy / "config.py").read_text()
@@ -198,12 +261,49 @@ def test_run_refresh_does_not_pin_on_inconclusive_probe(tmp_path, monkeypatch):
     monkeypatch.setattr(_fp, "EXPECTED", baseline)
     tags = '[{"name": "v2.0.16"}, {"name": "v2.0.12"}]'
     monkeypatch.setattr(_fp, "fetch_sources", lambda *a, **k: _sources(tags=tags))
-    monkeypatch.setattr(_fp, "probe_version_accepted", lambda v, *a, **k: None)
+    monkeypatch.setattr(
+        _fp,
+        "probe_version_outcome",
+        lambda v, *a, **k: _fp.ProbeOutcome(429, None, "HTTP 429, retry-after 78654s"),
+    )
     report = _fp.run_refresh(root=tmp_path)
     assert report["version_applied"] is None
     assert "inconclusive" in report["note"]
     assert "403s" not in report["note"]
+    assert "HTTP 429" in report["note"]
+    assert report["probe"] == {
+        "version": "2.0.16",
+        "status": 429,
+        "detail": "HTTP 429, retry-after 78654s",
+    }
     assert '"2.0.12"' in (proxy / "config.py").read_text()
+
+
+def test_run_refresh_reports_a_stale_recipe_as_needing_a_human(tmp_path, monkeypatch):
+    """A 400 must not be filed under "quota"; nothing would ever retry it."""
+    proxy = tmp_path / "llms" / "proxy"
+    proxy.mkdir(parents=True)
+    (proxy / "config.py").write_text(
+        'x = os.getenv("ZEN_GATEWAY_OPENCODE_VERSION", "2.0.12")\n'
+    )
+    (proxy / "zen_fingerprint.py").write_text('"ua_version": "2.0.12"\n')
+    import llms.proxy.zen_fingerprint as _fp
+
+    baseline = dict(fp.EXPECTED)
+    baseline["ua_version"] = "2.0.12"
+    monkeypatch.setattr(_fp, "EXPECTED", baseline)
+    tags = '[{"name": "v2.0.16"}, {"name": "v2.0.12"}]'
+    monkeypatch.setattr(_fp, "fetch_sources", lambda *a, **k: _sources(tags=tags))
+    monkeypatch.setattr(
+        _fp,
+        "probe_version_outcome",
+        lambda v, *a, **k: _fp.ProbeOutcome(400, None, "HTTP 400: unknown model"),
+    )
+    report = _fp.run_refresh(root=tmp_path)
+    assert report["version_applied"] is None
+    assert "needs a human" in report["note"]
+    assert "quota" not in report["note"]
+    assert "HTTP 400" in report["note"]
 
 
 def test_free_tier_error_triggers_gated_recheck(tmp_path, monkeypatch):

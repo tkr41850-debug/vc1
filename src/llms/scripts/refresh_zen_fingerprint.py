@@ -29,6 +29,11 @@ def main() -> int:
         )
         return 0
     print(f"fingerprint check: {report.get('note') or 'in sync'}")
+    probe = report.get("probe") or {}
+    if probe.get("status") is not None:
+        print(
+            f"  probe evidence: version {probe.get('version')} -> {probe.get('detail')}"
+        )
     return 0
 
 
